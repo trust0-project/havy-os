@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.19](https://github.com/trust0-project/havy-os/compare/v0.1.18...v0.1.19) (2025-12-06)
+
+
+### Bug Fixes
+
+* remove uart test ([db99e0c](https://github.com/trust0-project/havy-os/commit/db99e0c8151ffd277b061b3dc43b6889c1d04a92))
+
 ## [0.1.18](https://github.com/trust0-project/havy-os/compare/v0.1.17...v0.1.18) (2025-12-06)
 
 
