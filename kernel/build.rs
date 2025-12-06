@@ -3,6 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() {
+
+
+
+    
     println!("cargo:rerun-if-changed=memory.x");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let target_script = out_dir.join("memory.x");

@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "havy-os"
-version = "0.1.12"
+version = "0.1.13"
 
 [[package]]
 name = "heapless"

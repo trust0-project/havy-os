@@ -14,6 +14,9 @@ const SEC_DIR_START: u64 = 65;
 const SEC_DIR_COUNT: u64 = 64; // 1024 files max
 const SEC_DATA_START: u64 = 129;
 
+
+
+
 #[derive(Parser)]
 struct Args {
     /// Output disk image path
