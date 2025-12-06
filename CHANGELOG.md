@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.18](https://github.com/trust0-project/havy-os/compare/v0.1.17...v0.1.18) (2025-12-06)
+
+
+### Bug Fixes
+
+* kernel and ts with qemu ([48a1600](https://github.com/trust0-project/havy-os/commit/48a16008f0258fef02e6b309f60fbd426583d754))
+
 ## [0.1.17](https://github.com/trust0-project/havy-os/compare/v0.1.16...v0.1.17) (2025-12-06)
 
 
