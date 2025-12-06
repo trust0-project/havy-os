@@ -1238,13 +1238,6 @@ fn main() -> ! {
     print_section(&format!("\x1b[1;97mBAVY OS BOOT COMPLETE!\x1b[0m"));
     uart::write_line("");
 
-    // Quick UART input test
-    uart::write_str("\x1b[1;33mUART Test:\x1b[0m Press any key... ");
-    let test_console = uart::Console::new();
-    let test_byte = test_console.read_byte_blocking();
-    uart::write_str("\x1b[1;32mOK!\x1b[0m (received 0x");
-    uart::write_hex(test_byte as u64);
-    uart::write_line(")");
     uart::write_line("");
 
     cwd_init();
