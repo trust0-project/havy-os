@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.21](https://github.com/trust0-project/havy-os/compare/v0.1.20...v0.1.21) (2025-12-06)
+
+
+### Bug Fixes
+
+* kernel cpu_time and i64 u64 conversion ([a66938b](https://github.com/trust0-project/havy-os/commit/a66938bb62466a623b9b1724b812b1025070bbfc))
+
 ## [0.1.20](https://github.com/trust0-project/havy-os/compare/v0.1.19...v0.1.20) (2025-12-06)
 
 

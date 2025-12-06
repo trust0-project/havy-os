@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "havy-os"
-version = "0.1.20"
+version = "0.1.21"
 
 [[package]]
 name = "heapless"
@@ -534,7 +534,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "kernel"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "aes-gcm",
  "embedded-io",
@@ -603,7 +603,7 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
 name = "mkfs"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "clap",
 ]
