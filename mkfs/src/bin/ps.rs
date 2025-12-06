@@ -80,7 +80,8 @@ mod wasm {
         let pid = parse_u64(pid_slice);
         let cpu_time = parse_u64(cpu_slice);
         let uptime_ms = parse_u64(uptime_slice);
-        let uptime_sec = uptime_ms / 1000;
+        // Cap uptime to avoid overflow before division
+        let uptime_sec = if uptime_ms > 9999999000 { 9999999 } else { uptime_ms / 1000 };
 
         // Color based on state
         let color = if state_slice == b"R+" {
@@ -110,9 +111,9 @@ mod wasm {
         console_log(" ");
 
         // CPU time (6 chars + "ms", right-aligned)
-        // Cap at reasonable max to avoid display issues
-        let cpu_display = if cpu_time > 999999999 { 999999999 } else { cpu_time };
-        print_padded_u64(cpu_display, 6);
+        // Cap at 999999 to fit in display and avoid i64 overflow
+        let cpu_capped = if cpu_time > 999999 { 999999 } else { cpu_time as i64 };
+        print_padded_int(cpu_capped, 6);
         console_log("ms ");
 
         // Uptime (7 chars + "s", right-aligned)

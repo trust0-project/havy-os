@@ -236,16 +236,14 @@ mod wasm {
             console_log(" ");
 
             // CPU time (6 chars + "ms", right-aligned)
-            // Cap at reasonable max to avoid overflow when casting to i64
-            let cpu_display = if task.cpu_time > 999999999 { 999999999 } else { task.cpu_time };
-            print_padded_u64(cpu_display, 6);
+            // Cap at 999999 to fit in display and avoid i64 overflow
+            let cpu_capped = if task.cpu_time > 999999 { 999999 } else { task.cpu_time as i64 };
+            print_padded_int(cpu_capped, 6);
             console_log("ms ");
 
-            // Uptime (cap at reasonable values)
-            let uptime_sec = task.uptime / 1000;
-            // Cap at ~100 years in seconds to avoid overflow
-            let uptime_display = if uptime_sec > 3_153_600_000 { 3_153_600_000 } else { uptime_sec };
-            print_uptime_u64(uptime_display);
+            // Uptime - cap at reasonable value before dividing
+            let uptime_sec = if task.uptime > 999999999000 { 999999999 } else { (task.uptime / 1000) as i64 };
+            print_uptime(uptime_sec);
             console_log("  ");
 
             // Name
