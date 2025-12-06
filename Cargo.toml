@@ -1,0 +1,27 @@
+[workspace]
+members = ["kernel", "mkfs"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.12"
+
+# Workspace-wide release optimizations
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+debug = false
+
+# Optimize all dependencies in release mode
+[profile.release.package."*"]
+opt-level = 3
+
+# Keep some debug info for profiling (uncomment if needed)
+# [profile.release]
+# debug = 1
+
+
+
+

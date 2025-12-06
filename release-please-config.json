@@ -1,0 +1,16 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "package-name": "havy-os",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "kernel/Cargo.toml",
+        "mkfs/Cargo.toml"
+      ]
+    }
+  }
+}
+

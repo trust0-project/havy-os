@@ -1,0 +1,75 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release-created: ${{ steps.release.outputs.release_created }}
+      tag-name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+  
+  build-and-upload:
+    name: Build and Upload Release Assets
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release-created }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-none-elf,wasm32-unknown-unknown
+      
+      - name: Install wasm-opt
+        run: |
+          wget https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+          tar xzf binaryen-version_116-x86_64-linux.tar.gz
+          sudo cp binaryen-version_116/bin/wasm-opt /usr/local/bin/
+          wasm-opt --version
+      
+      - name: Build Kernel
+        run: cargo build -p kernel --target riscv64gc-unknown-none-elf --release
+      
+      - name: Build WASM Binaries
+        run: |
+          RUSTFLAGS="-C target-feature=-bulk-memory -C link-arg=--initial-memory=2097152" \
+            cargo build -p mkfs --release --target wasm32-unknown-unknown --no-default-features
+      
+      - name: Optimize WASM
+        run: |
+          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+            if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
+              wasm-opt -O3 "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
+            fi
+          done
+      
+      - name: Build Filesystem Image
+        run: cargo run -p mkfs -- --output target/riscv64gc-unknown-none-elf/release/fs.img --dir mkfs/root --size 2
+      
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag-name }}
+          files: |
+            target/riscv64gc-unknown-none-elf/release/kernel
+            target/riscv64gc-unknown-none-elf/release/fs.img
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
