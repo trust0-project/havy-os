@@ -9,9 +9,6 @@ version = "0.1.12"
 edition = "2021"
 publish = false
 
-[workspace.package]
-version = "0.1.12"
-
 # Workspace-wide release optimizations
 [profile.release]
 opt-level = 3
