@@ -8,11 +8,12 @@ const THR: usize = 0x00; // Transmitter Holding Register (write)
 const IER: usize = 0x01; // Interrupt Enable Register
 const FCR: usize = 0x02; // FIFO Control Register (write)
 const LCR: usize = 0x03; // Line Control Register
+const MCR: usize = 0x04; // Modem Control Register
 const LSR: usize = 0x05; // Line Status Register
 
 // LSR bits
 const LSR_RX_READY: u8 = 0x01; // Data ready
-const LSR_TX_IDLE: u8 = 0x20;  // THR empty (Transmitter Holding Register Empty)
+const LSR_TX_IDLE: u8 = 0x20; // THR empty (Transmitter Holding Register Empty)
 
 pub struct Console;
 
@@ -21,34 +22,34 @@ impl Console {
         Self
     }
 
-    /// Initialize the UART for QEMU compatibility
-    /// This sets up the UART with 8N1 configuration and enables FIFOs
+    /// Initialize the UART for QEMU virt machine compatibility.
+    /// Uses minimal configuration - QEMU's NS16550 works well with simple setup.
     #[allow(dead_code)]
     pub fn init() {
         unsafe {
             let base = UART_BASE as *mut u8;
-            
+
             // Disable all interrupts
             core::ptr::write_volatile(base.add(IER), 0x00);
-            
-            // Enable DLAB (Divisor Latch Access Bit) to set baud rate
-            core::ptr::write_volatile(base.add(LCR), 0x80);
-            
-            // Set divisor to 1 (115200 baud with 1.8432 MHz clock)
-            // DLL (Divisor Latch Low)
-            core::ptr::write_volatile(base.add(0), 0x01);
-            // DLM (Divisor Latch High)
-            core::ptr::write_volatile(base.add(1), 0x00);
-            
-            // 8 bits, no parity, one stop bit (8N1), disable DLAB
+
+            // 8 bits, no parity, one stop bit (8N1)
+            // QEMU doesn't require baud rate configuration
             core::ptr::write_volatile(base.add(LCR), 0x03);
-            
-            // Enable FIFO, clear TX/RX queues, set 14-byte threshold
-            core::ptr::write_volatile(base.add(FCR), 0xC7);
-            
-            // Enable receiver interrupts (optional, not strictly needed for polling)
-            // core::ptr::write_volatile(base.add(IER), 0x01);
+
+            // Disable FIFO for simple character-by-character operation
+            // Writing 0 to FCR disables FIFO mode
+            core::ptr::write_volatile(base.add(FCR), 0x00);
         }
+    }
+
+    /// Read a byte, blocking until one is available.
+    /// Use this for guaranteed input reception.
+    pub fn read_byte_blocking(&self) -> u8 {
+        // Spin until data is ready
+        while !Self::is_rx_ready() {
+            core::hint::spin_loop();
+        }
+        unsafe { core::ptr::read_volatile((UART_BASE + RBR) as *const u8) }
     }
 
     #[inline(always)]
@@ -67,6 +68,11 @@ impl Console {
     #[inline(always)]
     fn is_rx_ready() -> bool {
         (Self::lsr() & LSR_RX_READY) != 0
+    }
+
+    /// Public version of is_rx_ready for external use
+    pub fn is_rx_ready_public() -> bool {
+        Self::is_rx_ready()
     }
 
     pub fn write_byte(&mut self, byte: u8) {
@@ -171,6 +177,12 @@ pub fn write_hex_byte(b: u8) {
     let hex_digits = b"0123456789abcdef";
     console.write_byte(hex_digits[(b >> 4) as usize]);
     console.write_byte(hex_digits[(b & 0xf) as usize]);
+}
+
+/// Format and print to UART using core::fmt::Arguments
+pub fn print_fmt(args: fmt::Arguments) {
+    let mut console = Console::new();
+    let _ = core::fmt::write(&mut console, args);
 }
 
 #[macro_export]

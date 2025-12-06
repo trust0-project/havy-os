@@ -54,7 +54,7 @@ Follow these instructions to build and run Havy OS on your local machine.
 A build script is provided to automate the process. Run it from the root of the project:
 
 ```sh
-./build.sh
+sh ./build.sh
 ```
 
 This script will:
@@ -68,12 +68,12 @@ This script will:
 After a successful build, you can run Havy OS in QEMU with the following command:
 
 ```sh
-qemu-system-riscv64 -machine virt -m 128M -nographic \
+qemu-system-riscv64 -machine virt -m 1G -bios none \
   -kernel target/riscv64gc-unknown-none-elf/release/kernel \
-  -drive file=target/riscv64gc-unknown-none-elf/release/fs.img,format=raw,id=hd0 \
+  -drive file=target/riscv64gc-unknown-none-elf/release/fs.img,format=raw,id=hd0,if=none \
   -device virtio-blk-device,drive=hd0 \
-  -netdev user,id=net0 \
-  -device virtio-net-device,netdev=net0
+  -chardev stdio,id=char0,mux=on,signal=off \
+  -serial chardev:char0 -display none
 ```
 
 This will start the OS, and you should see the boot process in your terminal, ending with a shell prompt.

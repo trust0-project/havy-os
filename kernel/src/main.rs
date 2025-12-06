@@ -1237,6 +1237,14 @@ fn main() -> ! {
     // ─── BOOT COMPLETE ────────────────────────────────────────────────────────
     print_section(&format!("\x1b[1;97mBAVY OS BOOT COMPLETE!\x1b[0m"));
     uart::write_line("");
+
+    // Quick UART input test
+    uart::write_str("\x1b[1;33mUART Test:\x1b[0m Press any key... ");
+    let test_console = uart::Console::new();
+    let test_byte = test_console.read_byte_blocking();
+    uart::write_str("\x1b[1;32mOK!\x1b[0m (received 0x");
+    uart::write_hex(test_byte as u64);
+    uart::write_line(")");
     uart::write_line("");
 
     cwd_init();
@@ -1271,35 +1279,13 @@ fn main() -> ! {
     let mut tail_follow_last_check: i64 = 0;
 
     loop {
-        // Poll network stack
+        // Poll network stack (non-blocking)
         poll_network();
 
-        let byte = console.read_byte();
+        // Use blocking read - wait for input
+        let byte = console.read_byte_blocking();
 
-        // 0 means "no input" in our UART model
-        if byte == 0 {
-            // While idle, periodically run scheduled tasks on hart 0
-            // Services like klogd/sysmond are pinned to hart 0 for VirtIO access
-            let now = get_time_ms();
-            if now - last_task_run >= 100 {
-                // Every 100ms
-                last_task_run = now;
-                run_hart0_tasks();
-            }
-
-            // If in tail follow mode, check for new content
-            if tail_follow_mode && now - tail_follow_last_check >= 200 {
-                tail_follow_last_check = now;
-
-                let path_str =
-                    core::str::from_utf8(&tail_follow_path[..tail_follow_path_len]).unwrap_or("");
-                if let Some(new_size) = check_tail_follow(path_str, tail_follow_last_size) {
-                    tail_follow_last_size = new_size;
-                }
-            }
-
-            continue;
-        }
+        // Blocking read always returns valid byte, so no need to check for 0
 
         // Check for Ctrl+C (0x03) to cancel running commands or exit follow mode
         if byte == 0x03 {
