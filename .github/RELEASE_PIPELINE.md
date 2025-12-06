@@ -67,19 +67,25 @@ git push origin main
 
 ## Version Management
 
-All packages in the workspace share the same version, defined in the root `Cargo.toml`:
+All packages in the workspace share the same version. The root `Cargo.toml` contains both a virtual package and workspace package definition:
 
 ```toml
+[package]
+name = "havy-os"
+version = "0.1.12"  # Updated by Release Please
+edition = "2021"
+publish = false
+
 [workspace.package]
-version = "0.1.12"
+version = "0.1.12"  # Also updated by Release Please
 ```
 
-Both `kernel` and `mkfs` inherit this version:
+Both `kernel` and `mkfs` inherit the workspace version:
 
 ```toml
 [package]
 version.workspace = true
 ```
 
-This ensures that releases always include synchronized versions of both components.
+Release Please updates both version fields in the root Cargo.toml, ensuring all components stay synchronized.
 
