@@ -954,6 +954,21 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     let tasks = crate::scheduler::SCHEDULER.list_tasks();
                     let mut output = String::new();
                     
+                    // Include the current shell command (which is the one calling ps_list)
+                    // This shows the currently running WASM command with its CPU time
+                    if let Some((name, pid, cpu_time, uptime, is_running)) = crate::get_shell_cmd_info() {
+                        let state = if is_running { "R+" } else { "S" };
+                        output.push_str(&format!(
+                            "{}:{}:{}:{}:{}:{}\n",
+                            pid,
+                            name,
+                            state,
+                            "normal",
+                            cpu_time,
+                            uptime
+                        ));
+                    }
+                    
                     for task in tasks {
                         // Format: pid:name:state:priority:cpu_time:uptime\n
                         output.push_str(&format!(

@@ -615,6 +615,116 @@ static PING_STATE: Spinlock<Option<PingState>> = Spinlock::new(None);
 /// Command running flag, protected by spinlock.
 static COMMAND_RUNNING: Spinlock<bool> = Spinlock::new(false);
 
+// ─── SHELL COMMAND CPU TIME TRACKING ──────────────────────────────────────────
+
+/// State for tracking the currently running shell command's CPU time
+struct ShellCmdState {
+    /// Command name (limited to 32 chars)
+    name: [u8; 32],
+    name_len: usize,
+    /// Virtual PID for the current command (starts at 1000)
+    pid: u32,
+    /// Start time of current command (ms since boot)
+    start_time: u64,
+    /// Whether a command is currently running
+    is_running: bool,
+    /// Accumulated CPU time for tracking (ms)
+    accumulated_cpu_time: u64,
+    /// Time when this shell session started
+    session_start: u64,
+}
+
+impl ShellCmdState {
+    const fn new() -> Self {
+        Self {
+            name: [0u8; 32],
+            name_len: 0,
+            pid: 0,
+            start_time: 0,
+            is_running: false,
+            accumulated_cpu_time: 0,
+            session_start: 0,
+        }
+    }
+
+    fn start_command(&mut self, cmd_name: &str, current_time: u64) {
+        // Copy command name (truncate if too long)
+        let bytes = cmd_name.as_bytes();
+        let copy_len = bytes.len().min(31);
+        self.name[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        self.name_len = copy_len;
+        self.start_time = current_time;
+        self.is_running = true;
+        // Virtual PID starting from 1000
+        self.pid = 1000 + ((current_time / 100) % 9000) as u32;
+    }
+
+    fn end_command(&mut self, current_time: u64) {
+        if self.is_running {
+            let elapsed = current_time.saturating_sub(self.start_time);
+            self.accumulated_cpu_time = self.accumulated_cpu_time.saturating_add(elapsed);
+            self.is_running = false;
+        }
+    }
+
+    fn get_name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("unknown")
+    }
+}
+
+/// Shell command state, protected by spinlock.
+static SHELL_CMD_STATE: Spinlock<ShellCmdState> = Spinlock::new(ShellCmdState::new());
+
+/// Initialize shell command tracking
+fn shell_cmd_init() {
+    let mut state = SHELL_CMD_STATE.lock();
+    state.session_start = get_time_ms() as u64;
+}
+
+/// Start tracking a shell command
+fn shell_cmd_start(cmd_name: &str) {
+    let mut state = SHELL_CMD_STATE.lock();
+    state.start_command(cmd_name, get_time_ms() as u64);
+}
+
+/// Stop tracking the current shell command
+fn shell_cmd_end() {
+    let mut state = SHELL_CMD_STATE.lock();
+    state.end_command(get_time_ms() as u64);
+}
+
+/// Get shell command info for ps_list (returns: name, pid, cpu_time_ms, uptime_ms, is_running)
+pub fn get_shell_cmd_info() -> Option<(String, u32, u64, u64, bool)> {
+    let state = SHELL_CMD_STATE.lock();
+    let current_time = get_time_ms() as u64;
+    
+    if state.is_running {
+        // Currently running command - calculate elapsed time
+        let elapsed = current_time.saturating_sub(state.start_time);
+        let cpu_time = state.accumulated_cpu_time.saturating_add(elapsed);
+        let uptime = current_time.saturating_sub(state.start_time);
+        Some((
+            String::from(state.get_name()),
+            state.pid,
+            cpu_time,
+            uptime,
+            true,
+        ))
+    } else if state.accumulated_cpu_time > 0 || state.name_len > 0 {
+        // Last command finished - show accumulated time
+        let uptime = current_time.saturating_sub(state.session_start);
+        Some((
+            String::from("shell"),
+            0,
+            state.accumulated_cpu_time,
+            uptime,
+            false,
+        ))
+    } else {
+        None
+    }
+}
+
 // ─── CURRENT WORKING DIRECTORY ────────────────────────────────────────────────
 const CWD_MAX_LEN: usize = 128;
 
@@ -1130,6 +1240,7 @@ fn main() -> ! {
     uart::write_line("");
 
     cwd_init();
+    shell_cmd_init();
     print_prompt();
 
     let console = uart::Console::new();
@@ -2063,7 +2174,10 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
     // Fallback to script-based commands for flexibility/customization
     // ═══════════════════════════════════════════════════════════════════════════
     if let Some(script_bytes) = scripting::find_script(cmd_str) {
+        // Track command CPU time
+        shell_cmd_start(cmd_str);
         run_script_bytes(&script_bytes, args_str);
+        shell_cmd_end();
         return;
     }
 
