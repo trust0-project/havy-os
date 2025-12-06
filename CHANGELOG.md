@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.22](https://github.com/trust0-project/havy-os/compare/v0.1.21...v0.1.22) (2025-12-06)
+
+
+### Bug Fixes
+
+* timer ([bf409c3](https://github.com/trust0-project/havy-os/commit/bf409c3b7c73d382e41adfcc85af72761835e3fd))
+
 ## [0.1.21](https://github.com/trust0-project/havy-os/compare/v0.1.20...v0.1.21) (2025-12-06)
 
 
