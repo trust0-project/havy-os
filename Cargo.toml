@@ -5,7 +5,7 @@ resolver = "2"
 # Virtual package for release-please
 [package]
 name = "havy-os"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2021"
 publish = false
 
