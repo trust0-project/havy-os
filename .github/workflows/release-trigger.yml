@@ -38,6 +38,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.82.0"
           targets: riscv64gc-unknown-none-elf,wasm32-unknown-unknown
       
       - name: Install wasm-opt
@@ -52,14 +53,14 @@ jobs:
       
       - name: Build WASM Binaries
         run: |
-          RUSTFLAGS="-C target-feature=-bulk-memory -C link-arg=--initial-memory=2097152" \
+          RUSTFLAGS="-C link-arg=--initial-memory=2097152" \
             cargo build -p mkfs --release --target wasm32-unknown-unknown --no-default-features
       
       - name: Optimize WASM
         run: |
           for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
             if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
-              wasm-opt -O3 "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
+              wasm-opt -O3 --enable-bulk-memory "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
             fi
           done
       
