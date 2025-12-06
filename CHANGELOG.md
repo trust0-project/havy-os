@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/trust0-project/havy-os/compare/v0.1.14...v0.1.15) (2025-12-06)
+
+
+### Bug Fixes
+
+* toolchain ([b2782ab](https://github.com/trust0-project/havy-os/commit/b2782abe826fe82e3f7ee3916969eec4b1f19f77))
+
 ## [0.1.14](https://github.com/trust0-project/havy-os/compare/v0.1.13...v0.1.14) (2025-12-06)
 
 
