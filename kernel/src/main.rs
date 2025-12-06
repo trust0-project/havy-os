@@ -1960,6 +1960,10 @@ fn poll_network() {
             }
         }
 
+
+
+
+        
         // In continuous mode, send next ping after 1 second interval
         if ping.continuous && !ping.waiting {
             if timestamp - ping.last_send_time >= 1000 {

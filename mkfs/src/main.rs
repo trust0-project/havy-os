@@ -17,6 +17,12 @@ const SEC_DATA_START: u64 = 129;
 
 
 
+
+
+
+
+
+
 #[derive(Parser)]
 struct Args {
     /// Output disk image path
