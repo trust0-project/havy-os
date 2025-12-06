@@ -468,6 +468,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "havy-os"
+version = "0.1.12"
+
+[[package]]
 name = "heapless"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
