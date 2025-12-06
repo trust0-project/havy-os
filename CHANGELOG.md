@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.14](https://github.com/trust0-project/havy-os/compare/v0.1.13...v0.1.14) (2025-12-06)
+
+
+### Bug Fixes
+
+* correct build files ([563b68a](https://github.com/trust0-project/havy-os/commit/563b68a0ee4cfc5ab374e2d13569b02447a87b45))
+* release ([4a5418e](https://github.com/trust0-project/havy-os/commit/4a5418e136109c0053b25190124fb1f726ece889))
+
 ## [0.1.13](https://github.com/trust0-project/havy-os/compare/v0.1.12...v0.1.13) (2025-12-06)
 
 
