@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.17](https://github.com/trust0-project/havy-os/compare/v0.1.16...v0.1.17) (2025-12-06)
+
+
+### Bug Fixes
+
+* improve shell command cpu time ([496635c](https://github.com/trust0-project/havy-os/commit/496635c94b61ccaa0fcacadc07552971e0ba9428))
+
 ## [0.1.16](https://github.com/trust0-project/havy-os/compare/v0.1.15...v0.1.16) (2025-12-06)
 
 
