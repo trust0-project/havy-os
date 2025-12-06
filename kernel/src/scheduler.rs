@@ -316,7 +316,7 @@ impl Scheduler {
 
     /// List all tasks
     pub fn list_tasks(&self) -> Vec<TaskInfo> {
-        let current_time = crate::get_time_ms() as u64;
+        let current_time = crate::get_time_ms();
         self.tasks
             .lock()
             .values()

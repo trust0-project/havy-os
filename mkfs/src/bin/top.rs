@@ -236,11 +236,16 @@ mod wasm {
             console_log(" ");
 
             // CPU time (6 chars + "ms", right-aligned)
-            print_padded_int(task.cpu_time as i64, 6);
+            // Cap at reasonable max to avoid overflow when casting to i64
+            let cpu_display = if task.cpu_time > 999999999 { 999999999 } else { task.cpu_time };
+            print_padded_u64(cpu_display, 6);
             console_log("ms ");
 
-            // Uptime
-            print_uptime((task.uptime / 1000) as i64);
+            // Uptime (cap at reasonable values)
+            let uptime_sec = task.uptime / 1000;
+            // Cap at ~100 years in seconds to avoid overflow
+            let uptime_display = if uptime_sec > 3_153_600_000 { 3_153_600_000 } else { uptime_sec };
+            print_uptime_u64(uptime_display);
             console_log("  ");
 
             // Name
@@ -352,6 +357,53 @@ mod wasm {
         }
         pad_spaces(width.saturating_sub(digits));
         print_int(n);
+    }
+
+    fn print_padded_u64(n: u64, width: usize) {
+        let mut temp = if n == 0 { 1 } else { n };
+        let mut digits = 0usize;
+        while temp > 0 {
+            digits += 1;
+            temp /= 10;
+        }
+        pad_spaces(width.saturating_sub(digits));
+        print_u64(n);
+    }
+
+    fn print_u64(mut n: u64) {
+        if n == 0 {
+            console_log("0");
+            return;
+        }
+        let mut buf = [0u8; 20];
+        let mut i = 0;
+        while n > 0 {
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            i += 1;
+        }
+        // Reverse and print
+        for j in (0..i).rev() {
+            let c = buf[j];
+            unsafe { mkfs::print(&c as *const u8, 1) };
+        }
+    }
+
+    fn print_uptime_u64(total_sec: u64) {
+        let hours = total_sec / 3600;
+        let mins = (total_sec % 3600) / 60;
+        let secs = total_sec % 60;
+
+        if hours > 0 {
+            print_u64(hours);
+            console_log("h ");
+        }
+        if hours > 0 || mins > 0 {
+            print_u64(mins);
+            console_log("m ");
+        }
+        print_u64(secs);
+        console_log("s");
     }
 
     fn pad_spaces(count: usize) {

@@ -176,14 +176,14 @@ impl From<EmbeddedTlsError> for TlsError {
 /// and provides blocking read/write operations with timeout support.
 pub struct BlockingTcpSocket<'a> {
     net: &'a mut crate::net::NetState,
-    timeout_ms: i64,
-    get_time: fn() -> i64,
-    start_time: i64,
+    timeout_ms: u64,
+    get_time: fn() -> u64,
+    start_time: u64,
 }
 
 impl<'a> BlockingTcpSocket<'a> {
     /// Create a new blocking TCP socket wrapper.
-    pub fn new(net: &'a mut crate::net::NetState, timeout_ms: i64, get_time: fn() -> i64) -> Self {
+    pub fn new(net: &'a mut crate::net::NetState, timeout_ms: u64, get_time: fn() -> u64) -> Self {
         let start_time = get_time();
         Self {
             net,
@@ -207,7 +207,7 @@ impl<'a> BlockingTcpSocket<'a> {
     /// Poll the network stack.
     fn poll_network(&mut self) {
         let now = (self.get_time)();
-        self.net.poll(now);
+        self.net.poll(now as i64);
     }
 
     /// Small delay to avoid busy-waiting.
@@ -221,7 +221,7 @@ impl<'a> BlockingTcpSocket<'a> {
     pub fn connect(&mut self, ip: smoltcp::wire::Ipv4Address, port: u16) -> Result<(), TlsError> {
         let now = (self.get_time)();
         self.net
-            .tcp_connect(ip, port, now)
+            .tcp_connect(ip, port, now as i64)
             .map_err(|_| TlsError::ConnectionError)?;
 
         // Wait for TCP connection to establish
@@ -250,7 +250,7 @@ impl<'a> BlockingTcpSocket<'a> {
     /// Close the TCP connection.
     pub fn close(&mut self) {
         let now = (self.get_time)();
-        self.net.tcp_close(now);
+        self.net.tcp_close(now as i64);
     }
 
     /// Abort the TCP connection immediately.
@@ -282,7 +282,7 @@ impl Read for BlockingTcpSocket<'_> {
             poll_count += 1;
 
             let now = (self.get_time)();
-            match self.net.tcp_recv(buf, now) {
+            match self.net.tcp_recv(buf, now as i64) {
                 Ok(n) if n > 0 => {
                     self.reset_timeout();
                     return Ok(n);
@@ -342,7 +342,7 @@ impl Write for BlockingTcpSocket<'_> {
             self.poll_network();
             let now = (self.get_time)();
 
-            match self.net.tcp_send(&buf[total_sent..], now) {
+            match self.net.tcp_send(&buf[total_sent..], now as i64) {
                 Ok(n) if n > 0 => {
                     total_sent += n;
                     self.reset_timeout();
@@ -406,8 +406,8 @@ pub fn https_request(
     port: u16,
     hostname: &str,
     request_bytes: &[u8],
-    timeout_ms: i64,
-    get_time: fn() -> i64,
+    timeout_ms: u64,
+    get_time: fn() -> u64,
 ) -> Result<Vec<u8>, TlsError> {
     // Allocate TLS buffers
     let mut read_buffer = alloc::vec![0u8; TLS_READ_BUFFER_SIZE];
@@ -631,8 +631,8 @@ pub fn https_get(
     ip: smoltcp::wire::Ipv4Address,
     port: u16,
     path: &str,
-    timeout_ms: i64,
-    get_time: fn() -> i64,
+    timeout_ms: u64,
+    get_time: fn() -> u64,
 ) -> Result<Vec<u8>, TlsError> {
     // Build HTTP GET request
     let request = alloc::format!(
@@ -666,8 +666,8 @@ pub fn https_get_url(
     hostname: &str,
     port: u16,
     path: &str,
-    timeout_ms: i64,
-    get_time: fn() -> i64,
+    timeout_ms: u64,
+    get_time: fn() -> u64,
 ) -> Result<Vec<u8>, TlsError> {
     // Try to parse as IP first
     if let Some(ip) = crate::net::parse_ipv4(hostname.as_bytes()) {

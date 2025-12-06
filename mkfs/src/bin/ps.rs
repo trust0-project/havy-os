@@ -110,11 +110,15 @@ mod wasm {
         console_log(" ");
 
         // CPU time (6 chars + "ms", right-aligned)
-        print_padded_int(cpu_time as i64, 6);
+        // Cap at reasonable max to avoid display issues
+        let cpu_display = if cpu_time > 999999999 { 999999999 } else { cpu_time };
+        print_padded_u64(cpu_display, 6);
         console_log("ms ");
 
         // Uptime (7 chars + "s", right-aligned)
-        print_padded_int(uptime_sec as i64, 7);
+        // Cap at reasonable max to avoid display issues
+        let uptime_display = if uptime_sec > 999999999 { 999999999 } else { uptime_sec };
+        print_padded_u64(uptime_display, 7);
         console_log("s  ");
 
         // Name
@@ -147,6 +151,36 @@ mod wasm {
         // Print leading spaces
         pad_spaces(width.saturating_sub(digits));
         print_int(n);
+    }
+
+    fn print_padded_u64(n: u64, width: usize) {
+        let mut temp = if n == 0 { 1 } else { n };
+        let mut digits = 0usize;
+        while temp > 0 {
+            digits += 1;
+            temp /= 10;
+        }
+        pad_spaces(width.saturating_sub(digits));
+        print_u64(n);
+    }
+
+    fn print_u64(mut n: u64) {
+        if n == 0 {
+            console_log("0");
+            return;
+        }
+        let mut buf = [0u8; 20];
+        let mut i = 0;
+        while n > 0 {
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            i += 1;
+        }
+        // Reverse and print
+        for j in (0..i).rev() {
+            let c = buf[j];
+            unsafe { mkfs::print(&c as *const u8, 1) };
+        }
     }
 
     fn print_bytes(bytes: &[u8]) {

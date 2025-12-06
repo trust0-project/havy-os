@@ -125,7 +125,7 @@ impl Task {
             hart_affinity: None,
             current_hart: AtomicUsize::new(usize::MAX),
             entry,
-            created_at: crate::get_time_ms() as u64,
+            created_at: crate::get_time_ms(),
             cpu_time: AtomicU64::new(0),
             exit_code: AtomicUsize::new(0),
             is_daemon: false,
@@ -432,7 +432,7 @@ pub fn init_wait_queues() {
 
 /// Helper to add a task to the timer wait queue
 pub fn wait_timer(pid: Pid, timeout_ms: u64) {
-    let current_time = crate::get_time_ms() as u64;
+    let current_time = crate::get_time_ms();
     let deadline = current_time + timeout_ms;
 
     if let Some(ref wq) = *TIMER_WAITQ.lock() {

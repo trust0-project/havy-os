@@ -324,8 +324,8 @@ pub fn parse_response(data: &[u8]) -> Result<HttpResponse, &'static str> {
 pub fn http_request(
     net: &mut crate::net::NetState,
     request: &HttpRequest,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<HttpResponse, &'static str> {
     // For HTTPS, use the TLS module
     if request.is_https {
@@ -338,7 +338,7 @@ pub fn http_request(
     let start_time = get_time_ms();
 
     // Connect to the server
-    net.tcp_connect(dest_ip, request.port, start_time)?;
+    net.tcp_connect(dest_ip, request.port, start_time as i64)?;
 
     // Wait for connection to establish
     loop {
@@ -348,7 +348,7 @@ pub fn http_request(
             return Err("Connection timeout");
         }
 
-        net.poll(now);
+        net.poll(now as i64);
 
         if net.tcp_is_connected() {
             break;
@@ -375,9 +375,9 @@ pub fn http_request(
             return Err("Send timeout");
         }
 
-        net.poll(now);
+        net.poll(now as i64);
 
-        match net.tcp_send(&request_bytes[sent..], now) {
+        match net.tcp_send(&request_bytes[sent..], now as i64) {
             Ok(n) if n > 0 => sent += n,
             Ok(_) => {}
             Err(e) => {
@@ -406,9 +406,9 @@ pub fn http_request(
             return Err("Receive timeout");
         }
 
-        net.poll(now);
+        net.poll(now as i64);
 
-        match net.tcp_recv(&mut recv_buf, now) {
+        match net.tcp_recv(&mut recv_buf, now as i64) {
             Ok(n) if n > 0 => {
                 response_buf.extend_from_slice(&recv_buf[..n]);
 
@@ -465,7 +465,7 @@ pub fn http_request(
     }
 
     // Close the connection
-    net.tcp_close(get_time_ms());
+    net.tcp_close(get_time_ms() as i64);
 
     // Parse the response
     if response_buf.is_empty() {
@@ -489,8 +489,8 @@ pub fn http_request(
 pub fn http_request_follow_redirects(
     net: &mut crate::net::NetState,
     request: &HttpRequest,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<HttpResponse, &'static str> {
     let mut current_request = HttpRequest {
         method: request.method,
@@ -576,8 +576,8 @@ pub fn http_request_follow_redirects(
 fn resolve_host(
     net: &mut crate::net::NetState,
     host: &str,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<Ipv4Address, &'static str> {
     // Try to parse as IP address first
     if let Some(ip) = crate::net::parse_ipv4(host.as_bytes()) {
@@ -610,8 +610,8 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 pub fn get(
     net: &mut crate::net::NetState,
     url: &str,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<HttpResponse, &'static str> {
     let request = HttpRequest::get(url)?;
     http_request(net, &request, timeout_ms, get_time_ms)
@@ -621,8 +621,8 @@ pub fn get(
 pub fn get_follow_redirects(
     net: &mut crate::net::NetState,
     url: &str,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<HttpResponse, &'static str> {
     let request = HttpRequest::get(url)?;
     http_request_follow_redirects(net, &request, timeout_ms, get_time_ms)
@@ -634,8 +634,8 @@ pub fn post(
     url: &str,
     body: &str,
     content_type: &str,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<HttpResponse, &'static str> {
     let request = HttpRequest::post(url)?
         .header("Content-Type", content_type)
@@ -652,8 +652,8 @@ pub fn post(
 fn https_request(
     net: &mut crate::net::NetState,
     request: &HttpRequest,
-    timeout_ms: i64,
-    get_time_ms: fn() -> i64,
+    timeout_ms: u64,
+    get_time_ms: fn() -> u64,
 ) -> Result<HttpResponse, &'static str> {
     // Resolve hostname to IP address
     let dest_ip = resolve_host(net, &request.host, timeout_ms, get_time_ms)?;
