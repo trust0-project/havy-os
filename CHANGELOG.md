@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.20](https://github.com/trust0-project/havy-os/compare/v0.1.19...v0.1.20) (2025-12-06)
+
+
+### Bug Fixes
+
+* cpu_time ([a946304](https://github.com/trust0-project/havy-os/commit/a946304c115a1bd59975cdfc7704acf5a2161e95))
+
 ## [0.1.19](https://github.com/trust0-project/havy-os/compare/v0.1.18...v0.1.19) (2025-12-06)
 
 
