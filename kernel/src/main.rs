@@ -655,6 +655,8 @@ impl ShellCmdState {
         self.name_len = copy_len;
         self.start_time = current_time;
         self.is_running = true;
+        // Reset CPU time for this command (don't accumulate from previous commands)
+        self.accumulated_cpu_time = 0;
         // Virtual PID starting from 1000
         self.pid = 1000 + ((current_time / 100) % 9000) as u32;
     }
