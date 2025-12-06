@@ -38,7 +38,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.82.0"
+          toolchain: "1.86.0"
           targets: riscv64gc-unknown-none-elf,wasm32-unknown-unknown
       
       - name: Install wasm-opt
