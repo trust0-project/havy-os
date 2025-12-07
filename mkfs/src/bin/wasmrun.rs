@@ -109,9 +109,9 @@ mod wasm {
         }
 
         // Submit job (None = auto-select least loaded hart)
-        console_log("\x1b[1;34m●\x1b[0m Submitting: ");
+        console_log("\x1b[1;34m*\x1b[0m Submitting: ");
         console_log(filename_str);
-        console_log(" → least loaded hart\n");
+        console_log(" -> least loaded hart\n");
 
         let job_id = match submit_wasm_job(&wasm_buf[..wasm_len], "", None) {
             Some(id) => id,
@@ -121,7 +121,7 @@ mod wasm {
             }
         };
 
-        console_log("\x1b[1;32m✓\x1b[0m Job ");
+        console_log("\x1b[1;32m[OK]\x1b[0m Job ");
         print_int(job_id as i64);
         console_log(" queued\n");
 

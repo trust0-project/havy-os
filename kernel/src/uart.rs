@@ -44,10 +44,23 @@ impl Console {
 
     /// Read a byte, blocking until one is available.
     /// Use this for guaranteed input reception.
+    /// While waiting, periodically runs background tasks on hart 0.
     pub fn read_byte_blocking(&self) -> u8 {
+        let mut poll_counter: u32 = 0;
         // Spin until data is ready
         while !Self::is_rx_ready() {
             core::hint::spin_loop();
+            
+            // Every ~1000 iterations, run background tasks
+            poll_counter = poll_counter.wrapping_add(1);
+            if poll_counter % 1000 == 0 {
+                // Run hart0 background tasks (klogd, sysmond)
+                crate::init::klogd_tick();
+                crate::init::sysmond_tick();
+                
+                // Poll tail -f for new content
+                crate::poll_tail_follow();
+            }
         }
         unsafe { core::ptr::read_volatile((UART_BASE + RBR) as *const u8) }
     }

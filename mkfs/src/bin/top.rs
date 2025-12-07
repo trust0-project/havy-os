@@ -105,7 +105,7 @@ mod wasm {
 
         // Header
         if batch_mode {
-            console_log("═══════════════════════════════════════════════════════════════════\n");
+            console_log("===================================================================\n");
             console_log("BAVY OS v");
             if version_len > 0 {
                 unsafe { print_bytes(&VERSION_BUF[..version_len]) };
@@ -116,7 +116,7 @@ mod wasm {
             print_int(harts as i64);
             console_log(" hart(s)\n");
         } else {
-            console_log("\x1b[1;36m═══════════════════════════════════════════════════════════════════\x1b[0m\n");
+            console_log("\x1b[1;36m===================================================================\x1b[0m\n");
             console_log("\x1b[1;97m BAVY OS v");
             if version_len > 0 {
                 unsafe { print_bytes(&VERSION_BUF[..version_len]) };
@@ -140,14 +140,14 @@ mod wasm {
             for j in 0..bar_width {
                 if j < filled {
                     if pct > 80 {
-                        console_log("\x1b[1;31m█\x1b[0m");
+                        console_log("\x1b[1;31m#\x1b[0m");
                     } else if pct > 60 {
-                        console_log("\x1b[1;33m█\x1b[0m");
+                        console_log("\x1b[1;33m#\x1b[0m");
                     } else {
-                        console_log("\x1b[1;32m█\x1b[0m");
+                        console_log("\x1b[1;32m#\x1b[0m");
                     }
                 } else {
-                    console_log("\x1b[0;90m░\x1b[0m");
+                    console_log("\x1b[0;90m.\x1b[0m");
                 }
             }
             console_log("] ");
@@ -249,7 +249,7 @@ mod wasm {
             console_log("\x1b[0m\n");
         }
 
-        console_log("\n\x1b[1;36m─────────────────────────────────────────────────────────────────\x1b[0m\n");
+        console_log("\n\x1b[1;36m-----------------------------------------------------------------\x1b[0m\n");
     }
 
     fn parse_tasks(data: &[u8]) -> usize {

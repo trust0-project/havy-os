@@ -415,26 +415,26 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| {
                 uart::write_line("");
                 uart::write_line(
-                    "\x1b[1;31m╔═══════════════════════════════════════════════════════════════════╗\x1b[0m",
+                    "\x1b[1;31m+===================================================================+\x1b[0m",
                 );
                 uart::write_line(
-                    "\x1b[1;31m║\x1b[0m                                                                   \x1b[1;31m║\x1b[0m",
+                    "\x1b[1;31m|\x1b[0m                                                                   \x1b[1;31m|\x1b[0m",
                 );
                 uart::write_line(
-                    "\x1b[1;31m║\x1b[0m                    \x1b[1;97mSystem Shutdown Initiated\x1b[0m                       \x1b[1;31m║\x1b[0m",
+                    "\x1b[1;31m|\x1b[0m                    \x1b[1;97mSystem Shutdown Initiated\x1b[0m                       \x1b[1;31m|\x1b[0m",
                 );
                 uart::write_line(
-                    "\x1b[1;31m║\x1b[0m                                                                   \x1b[1;31m║\x1b[0m",
+                    "\x1b[1;31m|\x1b[0m                                                                   \x1b[1;31m|\x1b[0m",
                 );
                 uart::write_line(
-                    "\x1b[1;31m╚═══════════════════════════════════════════════════════════════════╝\x1b[0m",
+                    "\x1b[1;31m+===================================================================+\x1b[0m",
                 );
                 uart::write_line("");
                 uart::write_line("    \x1b[0;90m[1/3]\x1b[0m Syncing filesystems...");
                 uart::write_line("    \x1b[0;90m[2/3]\x1b[0m Stopping network services...");
                 uart::write_line("    \x1b[0;90m[3/3]\x1b[0m Powering off CPU...");
                 uart::write_line("");
-                uart::write_line("    \x1b[1;32m✓ Goodbye!\x1b[0m");
+                uart::write_line("    \x1b[1;32m[OK] Goodbye!\x1b[0m");
                 uart::write_line("");
                 unsafe {
                     ptr::write_volatile(TEST_FINISHER as *mut u32, 0x5555);
@@ -969,7 +969,10 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         ));
                     }
                     
-                    for task in tasks {
+                    // Include scheduler tasks
+                    let mut seen_names: alloc::collections::BTreeSet<&str> = alloc::collections::BTreeSet::new();
+                    for task in &tasks {
+                        seen_names.insert(&task.name);
                         // Format: pid:name:state:priority:cpu:uptime\n (cpu = assigned hart number)
                         output.push_str(&format!(
                             "{}:{}:{}:{}:{}:{}\n",
@@ -980,6 +983,29 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             task.cpu,
                             task.uptime
                         ));
+                    }
+                    
+                    // Include registered services (klogd, sysmond, etc.)
+                    // Skip services that already appear as scheduler tasks (to avoid duplicates)
+                    let services = crate::init::list_services();
+                    for svc in services {
+                        if svc.status == crate::init::ServiceStatus::Running {
+                            // Skip if this service name is already in the task list
+                            if seen_names.contains(svc.name.as_str()) {
+                                continue;
+                            }
+                            let hart = svc.hart.unwrap_or(0);
+                            let uptime = crate::get_time_ms() as u64 - svc.started_at;
+                            output.push_str(&format!(
+                                "{}:{}:{}:{}:{}:{}\n",
+                                svc.pid,
+                                svc.name,
+                                "R+", // Running via polling
+                                "normal",
+                                hart,
+                                uptime
+                            ));
+                        }
                     }
                     
                     let bytes = output.as_bytes();
@@ -999,7 +1025,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define ps_list: {:?}", e))?;
 
     // Syscall: kill(pid) -> i32
-    // Kills a process by PID. Returns 0 on success, -1 if not found or invalid.
+    // Kills a process by PID. Returns 0 on success, -1 if not found, -2 if cannot kill.
     linker
         .define(
             "env",
@@ -1013,11 +1039,18 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     if pid == 1 {
                         return -2; // Cannot kill init
                     }
+                    
+                    // First try to kill as a scheduler task
                     if crate::scheduler::SCHEDULER.kill(pid as u32) {
-                        0 // Success
-                    } else {
-                        -1 // Not found
+                        return 0; // Success
                     }
+                    
+                    // Then try to stop as a service
+                    if crate::init::stop_service_by_pid(pid as u32) {
+                        return 0; // Success
+                    }
+                    
+                    -1 // Not found
                 },
             ),
         )

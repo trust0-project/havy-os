@@ -101,7 +101,7 @@ impl NetState {
         let mut my_ip = DEFAULT_IP_ADDR; // Fallback default
         let mut got_ip = false;
 
-        crate::uart::write_str("    \x1b[0;90m├─\x1b[0m Waiting for IP assignment");
+        crate::uart::write_str("    \x1b[0;90m+-\x1b[0m Waiting for IP assignment");
         // 200 iterations with shorter delays = more chances for async tasks in WASM
         // Total wait time is roughly 2-3 seconds
         for i in 0..200 {
@@ -124,9 +124,9 @@ impl NetState {
         // If we didn't get an IP, network is unavailable - return error
         if !got_ip {
             crate::uart::write_line(" \x1b[1;31m[FAILED]\x1b[0m");
-            crate::uart::write_line("    \x1b[1;31m[✗]\x1b[0m No IP address assigned by relay");
+            crate::uart::write_line("    \x1b[1;31m[X]\x1b[0m No IP address assigned by relay");
             crate::uart::write_line(
-                "    \x1b[0;90m    └─ Check relay connection and certificate hash\x1b[0m",
+                "    \x1b[0;90m    +- Check relay connection and certificate hash\x1b[0m",
             );
             return Err("No IP address assigned - networking disabled");
         }
@@ -554,9 +554,9 @@ impl NetState {
         socket.can_recv()
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =============================================================================
     // TCP METHODS (for HTTP connections)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =============================================================================
 
     /// Connect TCP socket to a remote host
     pub fn tcp_connect(

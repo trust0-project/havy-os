@@ -82,9 +82,9 @@ impl InitState {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // INIT PROCESS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Init process entry point - PID 1
 ///
@@ -180,38 +180,42 @@ fn start_system_services() {
         }
     }
 
-    // Register service definitions with load-based hart selection
-    // Services will be scheduled on the least loaded hart
-    let klogd_hart = get_least_loaded_hart();
+    // Register klogd and sysmond as "virtual" services
+    // These run via the uart polling loop on hart 0, not as separate tasks
+    // This avoids scheduling issues where they sit in the ready queue forever
+    
+    // Register service definitions (for service list/status display)
     register_service_def(
         "klogd",
-        "Kernel logger daemon - logs system memory stats",
+        "Kernel logger daemon - logs system memory stats (hart 0 polling)",
         klogd_service,
         Priority::Normal,
-        Some(klogd_hart),
+        Some(0), // Runs on hart 0 via uart polling
     );
-
-    let sysmond_hart = get_least_loaded_hart();
+    
     register_service_def(
         "sysmond",
-        "System monitor daemon - monitors system health",
+        "System monitor daemon - monitors system health (hart 0 polling)",
         sysmond_service,
         Priority::Normal,
-        Some(sysmond_hart),
+        Some(0), // Runs on hart 0 via uart polling
     );
-
-    // Auto-start daemons on their selected harts
-    if let Ok(()) = start_service("klogd") {
-        klog_info("init", &format!("Auto-started klogd on hart {}", klogd_hart));
-    }
-    if let Ok(()) = start_service("sysmond") {
-        klog_info("init", &format!("Auto-started sysmond on hart {}", sysmond_hart));
-    }
+    
+    // Register them as running immediately (they're polled by uart loop, not spawned as tasks)
+    // Use scheduler's allocate_pid() for consistent PID numbering
+    let klogd_pid = SCHEDULER.allocate_pid();
+    let sysmond_pid = SCHEDULER.allocate_pid();
+    
+    register_service("klogd", klogd_pid, Some(0));
+    register_service("sysmond", sysmond_pid, Some(0));
+    
+    klog_info("init", &format!("klogd (PID {}) running via uart polling on hart 0", klogd_pid));
+    klog_info("init", &format!("sysmond (PID {}) running via uart polling on hart 0", sysmond_pid));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // PUBLIC SERVICE CONTROL API
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Start a service by name
 /// Returns Ok(()) on success, Err(message) on failure
@@ -236,18 +240,27 @@ pub fn start_service(name: &str) -> Result<(), &'static str> {
     let priority = def.priority;
     let preferred_hart = def.preferred_hart;
     let name_owned = def.name.clone();
+    
+    // Check if this is a virtual service (runs via uart polling)
+    let is_virtual = name == "klogd" || name == "sysmond";
 
     drop(state); // Release lock before spawning
 
-    // Spawn the service
-    let pid = SCHEDULER.spawn_daemon_on_hart(&name_owned, entry, priority, preferred_hart);
+    if is_virtual {
+        // Virtual services don't need to spawn tasks - they run via uart polling
+        // Just register them as running with a new PID
+        let pid = SCHEDULER.allocate_pid();
+        register_service(&name_owned, pid, Some(0)); // Always on hart 0 for uart polling
+        klog_info("init", &format!("Started {} (PID {}) via uart polling on hart 0", name_owned, pid));
+    } else {
+        // Regular services spawn as scheduler tasks
+        let pid = SCHEDULER.spawn_daemon_on_hart(&name_owned, entry, priority, preferred_hart);
+        register_service(&name_owned, pid, preferred_hart);
 
-    // Register as running
-    register_service(&name_owned, pid, preferred_hart);
-
-    // Wake the target hart
-    if let Some(hart) = preferred_hart {
-        crate::send_ipi(hart);
+        // Wake the target hart
+        if let Some(hart) = preferred_hart {
+            crate::send_ipi(hart);
+        }
     }
 
     Ok(())
@@ -281,6 +294,25 @@ pub fn stop_service(name: &str) -> Result<(), &'static str> {
     mark_service_stopped(name);
 
     Ok(())
+}
+
+/// Stop a service by PID (used by kill syscall)
+/// Returns true if a service with that PID was found and stopped
+pub fn stop_service_by_pid(pid: u32) -> bool {
+    let mut state = INIT_STATE.lock();
+    
+    // Find the running service with this PID
+    if let Some(svc) = state.services.iter_mut().find(|s| s.pid == pid && s.status == ServiceStatus::Running) {
+        let name = svc.name.clone();
+        svc.status = ServiceStatus::Stopped;
+        svc.pid = 0;
+        svc.hart = None;
+        
+        klog_info("init", &format!("Stopped service '{}' (PID {})", name, pid));
+        return true;
+    }
+    
+    false
 }
 
 /// Restart a service by name
@@ -445,9 +477,9 @@ fn write_boot_log() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SYSTEM SERVICES (long-running daemons on secondary harts)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Spin-delay for approximately the given milliseconds
 /// Uses busy-waiting since secondary harts don't have timer interrupts
@@ -497,11 +529,11 @@ fn append_to_log(line: &str) -> bool {
     false
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // COOPERATIVE DAEMON TICKS
 // These functions do one unit of work and return immediately.
 // Called from the shell loop on hart 0.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 use core::sync::atomic::AtomicI64;
 
@@ -526,11 +558,11 @@ pub fn klogd_tick() {
         KLOGD_LAST_RUN.store(now, Ordering::Relaxed);
 
         let startup_msg = format!(
-            "══════════════════════════════════════════════════════════════\n\
+            "================================================================\n\
              BAVY OS - Kernel Logger Started\n\
-             ══════════════════════════════════════════════════════════════\n\
+             ================================================================\n\
              Time: {}ms | Hart: 0 | klogd daemon initialized\n\
-             ──────────────────────────────────────────────────────────────",
+             ----------------------------------------------------------------",
             now
         );
         append_to_log(&startup_msg);
@@ -620,16 +652,28 @@ pub fn sysmond_tick() {
     }
 }
 
-/// Legacy service entry points (for task scheduler compatibility)
-/// These are no longer used directly but kept for API compatibility
+/// Daemon service entry point for klogd
+/// This runs as an infinite loop on its assigned hart
 pub fn klogd_service() {
-    // Single tick - for scheduler-based execution
-    klogd_tick();
+    loop {
+        klogd_tick();
+        
+        // Sleep for 1 second between checks
+        // Use spin_delay since secondary harts may not have timer interrupts
+        spin_delay_ms(1000);
+    }
 }
 
+/// Daemon service entry point for sysmond
+/// This runs as an infinite loop on its assigned hart
 pub fn sysmond_service() {
-    // Single tick - for scheduler-based execution
-    sysmond_tick();
+    loop {
+        sysmond_tick();
+        
+        // Sleep for 1 second between checks
+        // Use spin_delay since secondary harts may not have timer interrupts
+        spin_delay_ms(1000);
+    }
 }
 
 /// WASM worker service entry point
@@ -639,9 +683,9 @@ pub fn wasm_worker_service() {
     crate::wasm_service::worker_entry();
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // UTILITY FUNCTIONS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Check if init has completed
 pub fn is_init_complete() -> bool {

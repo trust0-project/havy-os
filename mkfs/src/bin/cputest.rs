@@ -169,9 +169,9 @@ mod wasm {
             console_log("  \x1b[1;33mResults:\x1b[0m\n\n");
 
             if serial_count == parallel_count {
-                console_log("    \x1b[1;32m✓\x1b[0m Results match\n\n");
+                console_log("    \x1b[1;32m[OK]\x1b[0m Results match\n\n");
             } else {
-                console_log("    \x1b[1;31m✗\x1b[0m MISMATCH! Serial=");
+                console_log("    \x1b[1;31m[X]\x1b[0m MISMATCH! Serial=");
                 print_u32(serial_count);
                 console_log(" Parallel=");
                 print_u32(parallel_count);

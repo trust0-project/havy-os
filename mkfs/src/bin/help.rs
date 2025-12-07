@@ -141,51 +141,52 @@ mod wasm {
         }
 
         // Show full help
+        // Box width: 60 chars content + 2 border chars = 62 total
         console_log("\n");
-        console_log("\x1b[1;36m╔══════════════════════════════════════════════════════════╗\x1b[0m\n");
-        console_log("\x1b[1;36m║\x1b[0m           \x1b[1;37mBAVY OS - Command Reference\x1b[0m                   \x1b[1;36m║\x1b[0m\n");
-        console_log("\x1b[1;36m╚══════════════════════════════════════════════════════════╝\x1b[0m\n\n");
+        console_log("\x1b[1;36m+------------------------------------------------------------+\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m          \x1b[1;37mBAVY OS - Command Reference\x1b[0m                    \x1b[1;36m|\x1b[0m\n");
+        console_log("\x1b[1;36m+------------------------------------------------------------+\x1b[0m\n\n");
 
         // Built-in Shell Commands
-        console_log("\x1b[1;33m┌─ Built-in Shell Commands ────────────────────────────────┐\x1b[0m\n");
-        console_log("\x1b[33m│\x1b[0m  \x1b[1mcd\x1b[0m <dir>      Change directory                        \x1b[33m│\x1b[0m\n");
-        console_log("\x1b[33m│\x1b[0m  \x1b[1mpwd\x1b[0m           Print working directory                  \x1b[33m│\x1b[0m\n");
-        console_log("\x1b[33m│\x1b[0m  \x1b[1mclear\x1b[0m         Clear the screen                         \x1b[33m│\x1b[0m\n");
-        console_log("\x1b[33m│\x1b[0m  \x1b[1mshutdown\x1b[0m      Power off the system                     \x1b[33m│\x1b[0m\n");
-        console_log("\x1b[33m│\x1b[0m  \x1b[1mping\x1b[0m <host>   Ping a host (Ctrl+C to stop)            \x1b[33m│\x1b[0m\n");
-        console_log("\x1b[33m│\x1b[0m  \x1b[1mnslookup\x1b[0m      DNS lookup                               \x1b[33m│\x1b[0m\n");
-        console_log("\x1b[33m└──────────────────────────────────────────────────────────┘\x1b[0m\n\n");
+        console_log("\x1b[1;33m+-- Built-in Shell Commands ---------------------------------+\x1b[0m\n");
+        console_log("\x1b[33m|\x1b[0m  \x1b[1mcd\x1b[0m <dir>       Change directory                       \x1b[33m|\x1b[0m\n");
+        console_log("\x1b[33m|\x1b[0m  \x1b[1mpwd\x1b[0m            Print working directory                 \x1b[33m|\x1b[0m\n");
+        console_log("\x1b[33m|\x1b[0m  \x1b[1mclear\x1b[0m          Clear the screen                        \x1b[33m|\x1b[0m\n");
+        console_log("\x1b[33m|\x1b[0m  \x1b[1mshutdown\x1b[0m       Power off the system                    \x1b[33m|\x1b[0m\n");
+        console_log("\x1b[33m|\x1b[0m  \x1b[1mping\x1b[0m <host>    Ping a host (Ctrl+C to stop)           \x1b[33m|\x1b[0m\n");
+        console_log("\x1b[33m|\x1b[0m  \x1b[1mnslookup\x1b[0m       DNS lookup                              \x1b[33m|\x1b[0m\n");
+        console_log("\x1b[33m+------------------------------------------------------------+\x1b[0m\n\n");
 
         // WASM Programs
-        console_log("\x1b[1;32m┌─ WASM Programs (in /usr/bin/) ──────────────────────────┐\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mls\x1b[0m [-l] [dir] List directory contents                 \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mcat\x1b[0m [-n] file Display file contents                   \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mecho\x1b[0m [-n] txt Print text to stdout                    \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mgrep\x1b[0m pat file Search for patterns in files            \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mtail\x1b[0m [-n] f   Show last lines of a file              \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1muptime\x1b[0m        Show system uptime                      \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mwrite\x1b[0m f txt   Write content to a file                \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mhelp\x1b[0m [cmd]    Show help (this screen)                 \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mdmesg\x1b[0m [-n N]  Display kernel log messages              \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mnano\x1b[0m <file>   View file with line numbers             \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mwget\x1b[0m <url>    Download files from the web             \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mpkg\x1b[0m <cmd>     Package manager                         \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m│\x1b[0m  \x1b[1mcowsay\x1b[0m [msg]  ASCII art cow says something            \x1b[32m│\x1b[0m\n");
-        console_log("\x1b[32m└──────────────────────────────────────────────────────────┘\x1b[0m\n\n");
+        console_log("\x1b[1;32m+-- WASM Programs (in /usr/bin/) ----------------------------+\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mls\x1b[0m [-l] [dir]  List directory contents                \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mcat\x1b[0m [-n] file  Display file contents                  \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mecho\x1b[0m [-n] txt  Print text to stdout                   \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mgrep\x1b[0m pat file  Search for patterns in files           \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mtail\x1b[0m [-n] f    Show last lines of a file             \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1muptime\x1b[0m         Show system uptime                     \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mwrite\x1b[0m f txt    Write content to a file               \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mhelp\x1b[0m [cmd]     Show help (this screen)                \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mdmesg\x1b[0m [-n N]   Display kernel log messages             \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mnano\x1b[0m <file>    View file with line numbers            \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mwget\x1b[0m <url>     Download files from the web            \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mpkg\x1b[0m <cmd>      Package manager                        \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m|\x1b[0m  \x1b[1mcowsay\x1b[0m [msg]   ASCII art cow says something           \x1b[32m|\x1b[0m\n");
+        console_log("\x1b[32m+------------------------------------------------------------+\x1b[0m\n\n");
 
         // System Status
-        console_log("\x1b[1;35m┌─ System Status ─────────────────────────────────────────┐\x1b[0m\n");
+        console_log("\x1b[1;35m+-- System Status -------------------------------------------+\x1b[0m\n");
 
         // Network status
         if is_net_available() {
-            console_log("\x1b[35m│\x1b[0m  Network:      \x1b[32m● Online\x1b[0m                               \x1b[35m│\x1b[0m\n");
+            console_log("\x1b[35m|\x1b[0m  Network:       \x1b[32m* Online\x1b[0m                              \x1b[35m|\x1b[0m\n");
         } else {
-            console_log("\x1b[35m│\x1b[0m  Network:      \x1b[31m○ Offline\x1b[0m                              \x1b[35m│\x1b[0m\n");
+            console_log("\x1b[35m|\x1b[0m  Network:       \x1b[31mo Offline\x1b[0m                             \x1b[35m|\x1b[0m\n");
         }
 
-        console_log("\x1b[35m│\x1b[0m  Kernel:       BAVY RISC-V                            \x1b[35m│\x1b[0m\n");
-        console_log("\x1b[35m│\x1b[0m  Shell:        Built-in                               \x1b[35m│\x1b[0m\n");
-        console_log("\x1b[35m└──────────────────────────────────────────────────────────┘\x1b[0m\n\n");
+        console_log("\x1b[35m|\x1b[0m  Kernel:        BAVY RISC-V                           \x1b[35m|\x1b[0m\n");
+        console_log("\x1b[35m|\x1b[0m  Shell:         Built-in                              \x1b[35m|\x1b[0m\n");
+        console_log("\x1b[35m+------------------------------------------------------------+\x1b[0m\n\n");
 
         console_log("\x1b[90mTip: Run 'help <command>' for detailed help on a command.\x1b[0m\n");
         console_log("\x1b[90mTip: Use Ctrl+C to cancel a running command.\x1b[0m\n\n");

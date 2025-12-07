@@ -15,6 +15,11 @@ mod wasm {
     use mkfs::{console_log, argc, argv, get_cwd, print_int};
     use mkfs::syscalls::{print, fs_read};
 
+    // Use static buffers to avoid stack overflow
+    static mut CONTENT_BUF: [u8; 65536] = [0u8; 65536]; // 64KB max file size
+    static mut PATH_BUF: [u8; 512] = [0u8; 512];
+    static mut ARG_BUF: [u8; 256] = [0u8; 256];
+
     fn resolve_path(arg: &[u8], out: &mut [u8]) -> usize {
         let mut cwd = [0u8; 256];
         let cwd_len = get_cwd(&mut cwd);
@@ -66,15 +71,19 @@ mod wasm {
 
         // Parse arguments
         for i in 0..arg_count {
-            let mut arg_buf = [0u8; 256];
-            if let Some(len) = argv(i, &mut arg_buf) {
-                let arg = &arg_buf[..len];
-
-                if arg == b"-n" {
-                    show_line_numbers = true;
-                } else if !arg.starts_with(b"-") {
-                    file_arg_idx = Some(i);
+            let len = unsafe {
+                match argv(i, &mut ARG_BUF) {
+                    Some(l) => l,
+                    None => continue,
                 }
+            };
+            
+            let arg = unsafe { &ARG_BUF[..len] };
+
+            if arg == b"-n" {
+                show_line_numbers = true;
+            } else if !arg.starts_with(b"-") {
+                file_arg_idx = Some(i);
             }
         }
 
@@ -87,33 +96,34 @@ mod wasm {
         };
 
         // Get filename
-        let mut filename_buf = [0u8; 256];
-        let filename_len = match argv(file_idx, &mut filename_buf) {
-            Some(len) => len,
-            None => {
-                console_log("\x1b[1;31mError:\x1b[0m Invalid filename\n");
-                return;
+        let filename_len = unsafe {
+            match argv(file_idx, &mut ARG_BUF) {
+                Some(len) => len,
+                None => {
+                    console_log("\x1b[1;31mError:\x1b[0m Invalid filename\n");
+                    return;
+                }
             }
         };
 
         // Resolve path
-        let mut path_buf = [0u8; 512];
-        let path_len = resolve_path(&filename_buf[..filename_len], &mut path_buf);
+        let path_len = unsafe {
+            resolve_path(&ARG_BUF[..filename_len], &mut PATH_BUF)
+        };
 
         // Read file
-        let mut content = [0u8; 1048576]; // 1MB max file size
         let read_len = unsafe {
-            fs_read(path_buf.as_ptr(), path_len as i32, content.as_mut_ptr(), content.len() as i32)
+            fs_read(PATH_BUF.as_ptr(), path_len as i32, CONTENT_BUF.as_mut_ptr(), CONTENT_BUF.len() as i32)
         };
 
         if read_len < 0 {
             console_log("\x1b[1;31mError:\x1b[0m File not found: ");
-            unsafe { print(path_buf.as_ptr(), path_len) };
+            unsafe { print(PATH_BUF.as_ptr(), path_len) };
             console_log("\n");
             return;
         }
 
-        let content = &content[..read_len as usize];
+        let content = unsafe { &CONTENT_BUF[..read_len as usize] };
 
         if show_line_numbers {
             let mut line_num = 1usize;

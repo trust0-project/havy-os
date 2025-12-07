@@ -20,7 +20,7 @@ mod wasm {
     pub extern "C" fn _start() {
         // Header
         console_log("\x1b[1;36m  PID  STATE  PRI  CPU    UPTIME  NAME\x1b[0m\n");
-        console_log("\x1b[90m─────────────────────────────────────────────────────\x1b[0m\n");
+        console_log("\x1b[90m-----------------------------------------------------\x1b[0m\n");
 
         // Get process list
         let len = unsafe { ps_list(BUF.as_mut_ptr(), 2048) };

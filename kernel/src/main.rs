@@ -68,9 +68,9 @@ fn get_expected_harts() -> usize {
 /// Set high enough to support modern multi-core systems.
 pub const MAX_HARTS: usize = 128;
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // BENCHMARK STATE (for multi-hart CPU testing)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Benchmark mode for parallel computation
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,9 +187,9 @@ impl BenchmarkState {
 /// Global benchmark state
 static BENCHMARK: BenchmarkState = BenchmarkState::new();
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // PARALLEL RESULTS STORAGE (for generic parallel WASM execution)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Maximum number of parallel result slots (supports up to 32 workers)
 const MAX_PARALLEL_SLOTS: usize = 32;
@@ -202,9 +202,9 @@ pub static PARALLEL_RESULTS: [AtomicU64; MAX_PARALLEL_SLOTS] = {
     [INIT; MAX_PARALLEL_SLOTS]
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // PRIME NUMBER FUNCTIONS (for CPU benchmarking)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Check if a number is prime using trial division
 /// Optimized with early exits and only checking up to sqrt(n)
@@ -485,9 +485,9 @@ pub fn is_my_msip_pending() -> bool {
 const CLINT_MTIME: usize = 0x0200_BFF8;
 const TEST_FINISHER: usize = 0x0010_0000;
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SYSINFO MMIO DEVICE - for reporting stats to emulator
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Base address for the SysInfo MMIO device (must match emulator)
 const SYSINFO_BASE: usize = 0x0011_0000;
@@ -535,9 +535,9 @@ fn update_sysinfo() {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SPINLOCK-PROTECTED GLOBAL STATE
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 /// Network state, protected by spinlock.
 static NET_STATE: Spinlock<Option<net::NetState>> = Spinlock::new(None);
@@ -615,7 +615,92 @@ static PING_STATE: Spinlock<Option<PingState>> = Spinlock::new(None);
 /// Command running flag, protected by spinlock.
 static COMMAND_RUNNING: Spinlock<bool> = Spinlock::new(false);
 
-// ─── SHELL COMMAND CPU TIME TRACKING ──────────────────────────────────────────
+// --- TAIL FOLLOW STATE (for tail -f) ----------------------------------------
+
+/// State for tail -f follow mode
+struct TailFollowState {
+    active: bool,
+    path: [u8; 128],
+    path_len: usize,
+    last_size: usize,
+    last_check_ms: i64,
+}
+
+impl TailFollowState {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            path: [0u8; 128],
+            path_len: 0,
+            last_size: 0,
+            last_check_ms: 0,
+        }
+    }
+    
+    fn start(&mut self, path: &str, initial_size: usize) {
+        let bytes = path.as_bytes();
+        let len = bytes.len().min(128);
+        self.path[..len].copy_from_slice(&bytes[..len]);
+        self.path_len = len;
+        self.last_size = initial_size;
+        self.last_check_ms = get_time_ms();
+        self.active = true;
+    }
+    
+    fn stop(&mut self) {
+        self.active = false;
+    }
+    
+    fn get_path(&self) -> Option<&str> {
+        if self.active && self.path_len > 0 {
+            core::str::from_utf8(&self.path[..self.path_len]).ok()
+        } else {
+            None
+        }
+    }
+}
+
+/// Global tail follow state
+static TAIL_FOLLOW_STATE: Spinlock<TailFollowState> = Spinlock::new(TailFollowState::new());
+
+/// Poll tail follow for new content (called from uart during blocking reads)
+/// Returns true if content was found and printed
+pub fn poll_tail_follow() -> bool {
+    let mut state = TAIL_FOLLOW_STATE.lock();
+    
+    if !state.active {
+        return false;
+    }
+    
+    // Only check every 500ms to avoid excessive filesystem access
+    let now = get_time_ms();
+    if now - state.last_check_ms < 500 {
+        return false;
+    }
+    state.last_check_ms = now;
+    
+    // Get a copy of path before releasing lock
+    let path_copy = if let Some(p) = state.get_path() {
+        alloc::string::String::from(p)
+    } else {
+        return false;
+    };
+    let last_size = state.last_size;
+    
+    // Release lock before filesystem access
+    drop(state);
+    
+    // Check for new content
+    if let Some(new_size) = check_tail_follow(&path_copy, last_size) {
+        let mut state = TAIL_FOLLOW_STATE.lock();
+        state.last_size = new_size;
+        return new_size > last_size;
+    }
+    
+    false
+}
+
+// --- SHELL COMMAND CPU TIME TRACKING ----------------------------------------──
 
 /// State for tracking the currently running shell command's CPU time
 struct ShellCmdState {
@@ -657,8 +742,8 @@ impl ShellCmdState {
         self.is_running = true;
         // Reset CPU time for this command (don't accumulate from previous commands)
         self.accumulated_cpu_time = 0;
-        // Virtual PID starting from 1000
-        self.pid = 1000 + ((current_time / 100) % 9000) as u32;
+        // Allocate a real PID from the scheduler
+        self.pid = scheduler::SCHEDULER.allocate_pid();
     }
 
     fn end_command(&mut self, current_time: u64) {
@@ -725,7 +810,7 @@ pub fn get_shell_cmd_info() -> Option<(String, u32, i64, u64, bool)> {
     }
 }
 
-// ─── CURRENT WORKING DIRECTORY ────────────────────────────────────────────────
+// --- CURRENT WORKING DIRECTORY ------------------------------------------------──
 const CWD_MAX_LEN: usize = 128;
 
 /// Current working directory state
@@ -769,7 +854,7 @@ pub fn cwd_set(path: &str) {
     cwd.len = len;
 }
 
-// ─── OUTPUT CAPTURE FOR REDIRECTION ────────────────────────────────────────────
+// --- OUTPUT CAPTURE FOR REDIRECTION ------------------------------------------────
 const OUTPUT_BUFFER_SIZE: usize = 4096;
 
 /// Output capture state for redirection
@@ -1084,29 +1169,29 @@ fn start_tail_follow(path: &str, num_lines: usize) -> (bool, usize) {
 fn print_section(title: &str) {
     uart::write_line("");
     uart::write_line(
-        "\x1b[1;33m────────────────────────────────────────────────────────────────────────\x1b[0m",
+        "\x1b[1;33m------------------------------------------------------------------------\x1b[0m",
     );
-    uart::write_str("\x1b[1;33m  ◆ ");
+    uart::write_str("\x1b[1;33m  * ");
     uart::write_str(title);
     uart::write_line("\x1b[0m");
     uart::write_line(
-        "\x1b[1;33m────────────────────────────────────────────────────────────────────────\x1b[0m",
+        "\x1b[1;33m------------------------------------------------------------------------\x1b[0m",
     );
 }
 
 /// Print a boot status line
 fn print_boot_status(component: &str, ok: bool) {
     if ok {
-        uart::write_str("    \x1b[1;32m[✓]\x1b[0m ");
+        uart::write_str("    \x1b[1;32m[OK]\x1b[0m ");
     } else {
-        uart::write_str("    \x1b[1;31m[✗]\x1b[0m ");
+        uart::write_str("    \x1b[1;31m[X]\x1b[0m ");
     }
     uart::write_line(component);
 }
 
 /// Print a boot info line
 fn print_boot_info(key: &str, value: &str) {
-    uart::write_str("    \x1b[0;90m├─\x1b[0m ");
+    uart::write_str("    \x1b[0;90m+-\x1b[0m ");
     uart::write_str(key);
     uart::write_str(": \x1b[1;97m");
     uart::write_str(value);
@@ -1135,7 +1220,7 @@ fn main() -> ! {
     // Must be done before any output. Sets up 8N1, enables FIFOs, etc.
     uart::Console::init();
 
-    // ─── CPU & ARCHITECTURE INFO ──────────────────────────────────────────────
+    // --- CPU & ARCHITECTURE INFO -----------------------------------------────
     print_section("CPU & ARCHITECTURE");
     print_boot_info("Primary Hart", "0");
     print_boot_info("Architecture", "RISC-V 64-bit (RV64GC)");
@@ -1143,28 +1228,28 @@ fn main() -> ! {
     print_boot_info("Timer Source", "CLINT @ 0x02000000");
     print_boot_status("CPU initialized", true);
 
-    // ─── MEMORY SUBSYSTEM ─────────────────────────────────────────────────────
+    // --- MEMORY SUBSYSTEM ------------------------------------------------────
     print_section("MEMORY SUBSYSTEM");
     allocator::init();
     let total_heap = allocator::heap_size();
-    uart::write_str("    \x1b[0;90m├─\x1b[0m Heap Base: \x1b[1;97m0x");
+    uart::write_str("    \x1b[0;90m+-\x1b[0m Heap Base: \x1b[1;97m0x");
     uart::write_hex(0x8080_0000u64); // Approximate heap start
     uart::write_line("\x1b[0m");
-    uart::write_str("    \x1b[0;90m├─\x1b[0m Heap Size: \x1b[1;97m");
+    uart::write_str("    \x1b[0;90m+-\x1b[0m Heap Size: \x1b[1;97m");
     uart::write_u64(total_heap as u64 / 1024);
     uart::write_line(" KiB\x1b[0m");
     print_boot_status("Heap allocator ready", true);
 
-    // ─── STORAGE SUBSYSTEM ────────────────────────────────────────────────────
+    // --- STORAGE SUBSYSTEM -----------------------------------------------────
     init_storage();
 
-    // ─── NETWORK SUBSYSTEM ────────────────────────────────────────────────────
+    // --- NETWORK SUBSYSTEM -----------------------------------------------────
     print_section("NETWORK SUBSYSTEM");
     init_network();
 
-    // ═══════════════════════════════════════════════════════════════════
+    // ===================================================================
     // SMP INITIALIZATION
-    // ═══════════════════════════════════════════════════════════════════
+    // ===================================================================
 
     print_section("SMP INITIALIZATION");
 
@@ -1205,15 +1290,15 @@ fn main() -> ! {
     }
 
     let online = HARTS_ONLINE.load(Ordering::Relaxed);
-    uart::write_str("    \x1b[1;32m[✓]\x1b[0m Harts online: ");
+    uart::write_str("    \x1b[1;32m[OK]\x1b[0m Harts online: ");
     uart::write_u64(online as u64);
     uart::write_str("/");
     uart::write_u64(expected_harts as u64);
     uart::write_line("");
 
-    // ═══════════════════════════════════════════════════════════════════
+    // ===================================================================
     // PROCESS MANAGER INITIALIZATION
-    // ═══════════════════════════════════════════════════════════════════
+    // ===================================================================
 
     print_section("PROCESS MANAGER");
 
@@ -1234,7 +1319,7 @@ fn main() -> ! {
         services > 0,
     );
 
-    // ─── BOOT COMPLETE ────────────────────────────────────────────────────────
+    // --- BOOT COMPLETE ---------------------------------------------------────
     print_section(&format!("\x1b[1;97mBAVY OS BOOT COMPLETE!\x1b[0m"));
     uart::write_line("");
 
@@ -1285,6 +1370,7 @@ fn main() -> ! {
             if tail_follow_mode {
                 // Exit tail follow mode
                 tail_follow_mode = false;
+                TAIL_FOLLOW_STATE.lock().stop();
                 uart::write_line("");
                 uart::write_line("\x1b[2m--- tail -f stopped ---\x1b[0m");
                 print_prompt();
@@ -1304,6 +1390,7 @@ fn main() -> ! {
         // In follow mode, 'q' also exits
         if tail_follow_mode && (byte == b'q' || byte == b'Q') {
             tail_follow_mode = false;
+            TAIL_FOLLOW_STATE.lock().stop();
             uart::write_line("");
             uart::write_line("\x1b[2m--- tail -f stopped ---\x1b[0m");
             print_prompt();
@@ -1430,17 +1517,13 @@ fn main() -> ! {
                 if let Some((path, num_lines)) = parse_tail_follow_command(&buffer[..len]) {
                     // Resolve the path
                     let resolved = resolve_path(&path);
-                    let resolved_bytes = resolved.as_bytes();
 
                     // Start follow mode
                     let (success, initial_size) = start_tail_follow(&resolved, num_lines);
                     if success {
                         tail_follow_mode = true;
-                        tail_follow_path_len = resolved_bytes.len().min(128);
-                        tail_follow_path[..tail_follow_path_len]
-                            .copy_from_slice(&resolved_bytes[..tail_follow_path_len]);
-                        tail_follow_last_size = initial_size;
-                        tail_follow_last_check = get_time_ms();
+                        // Store in static state for uart polling
+                        TAIL_FOLLOW_STATE.lock().start(&resolved, initial_size);
                         // Don't print prompt - we're in follow mode
                     } else {
                         print_prompt();
@@ -1741,7 +1824,7 @@ fn find_common_prefix(strings: &[alloc::string::String]) -> alloc::string::Strin
 fn init_storage() {
     print_section("STORAGE SUBSYSTEM");
     if let Some(blk) = virtio_blk::VirtioBlock::probe() {
-        uart::write_str("    \x1b[0;90m├─\x1b[0m Block Device: \x1b[1;97m");
+        uart::write_str("    \x1b[0;90m+-\x1b[0m Block Device: \x1b[1;97m");
         uart::write_u64(blk.capacity() * 512 / 1024 / 1024);
         uart::write_line(" MiB\x1b[0m");
         *BLK_DEV.lock() = Some(blk);
@@ -1753,7 +1836,7 @@ fn init_storage() {
     let mut blk_guard = BLK_DEV.lock();
     if let Some(ref mut blk) = *blk_guard {
         if let Some(fs) = fs::FileSystem::init(blk) {
-            uart::write_line("    \x1b[1;32m[✓]\x1b[0m SFS Mounted (R/W)");
+            uart::write_line("    \x1b[1;32m[OK]\x1b[0m SFS Mounted (R/W)");
             *FS_STATE.lock() = Some(fs);
         }
     }
@@ -1761,14 +1844,14 @@ fn init_storage() {
 
 fn init_fs() {
     if let Some(blk) = virtio_blk::VirtioBlock::probe() {
-        uart::write_line("    \x1b[1;32m[✓]\x1b[0m VirtIO Block found");
+        uart::write_line("    \x1b[1;32m[OK]\x1b[0m VirtIO Block found");
         *BLK_DEV.lock() = Some(blk);
 
         let mut blk_guard = BLK_DEV.lock();
         if let Some(ref mut dev) = *blk_guard {
             if let Some(fs) = fs::FileSystem::init(dev) {
                 *FS_STATE.lock() = Some(fs);
-                uart::write_line("    \x1b[1;32m[✓]\x1b[0m FileSystem Mounted");
+                uart::write_line("    \x1b[1;32m[OK]\x1b[0m FileSystem Mounted");
             }
         }
     }
@@ -1776,12 +1859,12 @@ fn init_fs() {
 
 /// Initialize the network stack
 fn init_network() {
-    uart::write_line("    \x1b[0;90m├─\x1b[0m Probing for VirtIO devices...");
+    uart::write_line("    \x1b[0;90m+-\x1b[0m Probing for VirtIO devices...");
 
     // Probe for VirtIO network device
     match virtio_net::VirtioNet::probe() {
         Some(device) => {
-            uart::write_str("    \x1b[0;90m├─\x1b[0m VirtIO-Net found at: \x1b[1;97m0x");
+            uart::write_str("    \x1b[0;90m+-\x1b[0m VirtIO-Net found at: \x1b[1;97m0x");
             uart::write_hex(device.base_addr() as u64);
             uart::write_line("\x1b[0m");
 
@@ -1828,14 +1911,14 @@ fn init_network() {
                     // Network initialization failed - no IP assigned
                     // Networking is disabled, NET_STATE remains None
                     uart::write_line(
-                        "    \x1b[0;90m    └─ Network features will be unavailable\x1b[0m",
+                        "    \x1b[0;90m    +- Network features will be unavailable\x1b[0m",
                     );
                 }
             }
         }
         None => {
             uart::write_line("    \x1b[1;33m[!]\x1b[0m No VirtIO network device detected");
-            uart::write_line("    \x1b[0;90m    └─ Network features will be unavailable\x1b[0m");
+            uart::write_line("    \x1b[0;90m    +- Network features will be unavailable\x1b[0m");
         }
     }
 }
@@ -2119,7 +2202,7 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
                         // Sync to ensure data is written to disk
                         let _ = fs.sync(dev);
                         uart::write_line("");
-                        uart::write_str("\x1b[1;32m✓\x1b[0m Output written to ");
+                        uart::write_str("\x1b[1;32m[OK]\x1b[0m Output written to ");
                         uart::write_line(&resolved_path);
                     }
                     Err(e) => {
@@ -2148,10 +2231,10 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
 fn execute_command(cmd: &[u8], args: &[u8]) {
     let cmd_str = core::str::from_utf8(cmd).unwrap_or("");
     let args_str = core::str::from_utf8(args).unwrap_or("");
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =============================================================================
     // SCRIPT RESOLUTION (PATH-like)
     // Fallback to script-based commands for flexibility/customization
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =============================================================================
     if let Some(script_bytes) = scripting::find_script(cmd_str) {
         // Track command CPU time
         shell_cmd_start(cmd_str);
@@ -2160,9 +2243,9 @@ fn execute_command(cmd: &[u8], args: &[u8]) {
         return;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =============================================================================
     // COMMAND NOT FOUND
-    // ═══════════════════════════════════════════════════════════════════════════
+    // =============================================================================
     out_str("\x1b[1;31mCommand not found:\x1b[0m ");
     out_line(cmd_str);
     out_line("\x1b[0;90mTry 'help' for available commands, or check /usr/bin/ for scripts\x1b[0m");

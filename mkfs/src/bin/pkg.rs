@@ -33,7 +33,7 @@ mod wasm {
 
     fn cmd_list() {
         console_log("\x1b[1;36mInstalled Packages\x1b[0m\n");
-        console_log("\x1b[90m─────────────────────────────────────\x1b[0m\n\n");
+        console_log("\x1b[90m-------------------------------------\x1b[0m\n\n");
 
         // Read directory listing
         let mut buf = [0u8; 4096];
@@ -62,7 +62,7 @@ mod wasm {
                             // Check if it's in /usr/bin/
                             if path.starts_with(b"/usr/bin/") && path.len() > 9 {
                                 let name = &path[9..];
-                                console_log("  \x1b[32m●\x1b[0m ");
+                                console_log("  \x1b[32m*\x1b[0m ");
                                 unsafe { print(name.as_ptr(), name.len()) };
                                 console_log("\n");
                                 count += 1;
@@ -80,13 +80,13 @@ mod wasm {
                 // Fallback: show known packages
                 console_log("\x1b[33mNote: Directory listing not available.\x1b[0m\n");
                 console_log("\x1b[33mKnown system packages:\x1b[0m\n\n");
-                console_log("  \x1b[32m●\x1b[0m cowsay     ASCII art cow\n");
-                console_log("  \x1b[32m●\x1b[0m dmesg      Kernel log viewer\n");
-                console_log("  \x1b[32m●\x1b[0m hello      Test WASM binary\n");
-                console_log("  \x1b[32m●\x1b[0m help       Show available commands\n");
-                console_log("  \x1b[32m●\x1b[0m nano       Text file viewer\n");
-                console_log("  \x1b[32m●\x1b[0m pkg        Package manager (this)\n");
-                console_log("  \x1b[32m●\x1b[0m wget       Download files\n");
+                console_log("  \x1b[32m*\x1b[0m cowsay     ASCII art cow\n");
+                console_log("  \x1b[32m*\x1b[0m dmesg      Kernel log viewer\n");
+                console_log("  \x1b[32m*\x1b[0m hello      Test WASM binary\n");
+                console_log("  \x1b[32m*\x1b[0m help       Show available commands\n");
+                console_log("  \x1b[32m*\x1b[0m nano       Text file viewer\n");
+                console_log("  \x1b[32m*\x1b[0m pkg        Package manager (this)\n");
+                console_log("  \x1b[32m*\x1b[0m wget       Download files\n");
                 console_log("\n\x1b[90mRun 'ls /usr/bin' to see all installed binaries.\x1b[0m\n");
             }
         }
@@ -126,7 +126,7 @@ mod wasm {
         unsafe { print(name.as_ptr(), display_len) };
         console_log("\n\n");
 
-        console_log("  \x1b[90m→\x1b[0m Downloading... ");
+        console_log("  \x1b[90m->\x1b[0m Downloading... ");
 
         // Fetch the package
         let url_str = unsafe { core::str::from_utf8_unchecked(url) };
@@ -148,7 +148,7 @@ mod wasm {
                 dest_path[prefix.len()..prefix.len() + dest_name_len].copy_from_slice(&name[..dest_name_len]);
                 let dest_len = prefix.len() + dest_name_len;
 
-                console_log("  \x1b[90m→\x1b[0m Installing to ");
+                console_log("  \x1b[90m->\x1b[0m Installing to ");
                 unsafe { print(dest_path.as_ptr(), dest_len) };
                 console_log("... ");
 
@@ -156,7 +156,7 @@ mod wasm {
                 let dest_str = unsafe { core::str::from_utf8_unchecked(&dest_path[..dest_len]) };
                 if write_file(dest_str, &resp_buf[..resp_len]) {
                     console_log("\x1b[32mOK\x1b[0m\n\n");
-                    console_log("\x1b[32m✓ Package installed successfully!\x1b[0m\n");
+                    console_log("\x1b[32m[OK] Package installed successfully!\x1b[0m\n");
                     console_log("  Run '\x1b[1m");
                     unsafe { print(name.as_ptr(), display_len) };
                     console_log("\x1b[0m' to use it.\n");
@@ -190,7 +190,7 @@ mod wasm {
         console_log("\x1b[1;36mPackage Info:\x1b[0m ");
         unsafe { print(name.as_ptr(), name.len()) };
         console_log("\n");
-        console_log("\x1b[90m─────────────────────────────────────\x1b[0m\n");
+        console_log("\x1b[90m-------------------------------------\x1b[0m\n");
 
         if len < 0 {
             console_log("\x1b[31mPackage not found\x1b[0m\n");

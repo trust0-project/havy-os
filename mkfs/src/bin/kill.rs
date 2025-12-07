@@ -14,10 +14,15 @@ extern crate mkfs;
 mod wasm {
     use mkfs::{argc, argv, console_log, kill_process, print_int, KillResult};
 
+    // Use static buffer to avoid stack overflow
+    static mut PID_BUF: [u8; 16] = [0u8; 16];
+
     #[no_mangle]
     pub extern "C" fn _start() {
+        let arg_count = argc();
+        
         // Need at least one argument (the PID)
-        if argc() < 2 {
+        if arg_count < 1 {
             console_log("Usage: kill <pid>\n");
             console_log("\n");
             console_log("Terminate a process by its PID.\n");
@@ -26,26 +31,23 @@ mod wasm {
         }
 
         // Get the PID argument
-        let mut pid_buf = [0u8; 16];
-        let Some(len) = argv(1, &mut pid_buf) else {
-            console_log("\x1b[1;31mError:\x1b[0m Could not read PID argument\n");
-            return;
-        };
-
-        // Parse the PID
-        let pid_str = match core::str::from_utf8(&pid_buf[..len]) {
-            Ok(s) => s.trim(),
-            Err(_) => {
-                console_log("\x1b[1;31mError:\x1b[0m Invalid PID format\n");
-                return;
+        let len = unsafe {
+            match argv(0, &mut PID_BUF) {
+                Some(l) => l,
+                None => {
+                    console_log("\x1b[1;31mError:\x1b[0m Could not read PID argument\n");
+                    return;
+                }
             }
         };
 
-        let pid = match parse_pid(pid_str) {
+        // Parse the PID
+        let pid_bytes = unsafe { &PID_BUF[..len] };
+        let pid = match parse_pid(pid_bytes) {
             Some(p) => p,
             None => {
                 console_log("\x1b[1;31mError:\x1b[0m Invalid PID: ");
-                console_log(pid_str);
+                unsafe { mkfs::print(PID_BUF.as_ptr(), len) };
                 console_log("\n");
                 return;
             }
@@ -59,7 +61,7 @@ mod wasm {
         // Attempt to kill the process
         match kill_process(pid) {
             KillResult::Success => {
-                console_log("\x1b[1;32m✓\x1b[0m Killed process ");
+                console_log("\x1b[1;32m[OK]\x1b[0m Killed process ");
                 print_int(pid as i64);
                 console_log("\n");
             }
@@ -77,14 +79,14 @@ mod wasm {
         }
     }
 
-    /// Parse a string as a positive integer PID
-    fn parse_pid(s: &str) -> Option<u32> {
-        if s.is_empty() {
+    /// Parse bytes as a positive integer PID
+    fn parse_pid(bytes: &[u8]) -> Option<u32> {
+        if bytes.is_empty() {
             return None;
         }
 
         let mut result: u32 = 0;
-        for c in s.bytes() {
+        for &c in bytes {
             if c < b'0' || c > b'9' {
                 return None;
             }
@@ -97,4 +99,3 @@ mod wasm {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {}
-

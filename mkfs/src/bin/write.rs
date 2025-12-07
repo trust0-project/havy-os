@@ -95,7 +95,7 @@ mod wasm {
 
         // Write file
         if write_file(path_str, &content[..content_len]) {
-            console_log("\x1b[1;32m✓\x1b[0m Written to ");
+            console_log("\x1b[1;32m[OK]\x1b[0m Written to ");
             unsafe { print(path_buf.as_ptr(), path_len) };
             console_log("\n");
         } else {

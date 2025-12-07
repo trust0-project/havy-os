@@ -42,47 +42,47 @@ mod wasm {
         }
 
         if !is_net_available() {
-            console_log("\x1b[1;31m✗\x1b[0m Network not initialized\n");
+            console_log("\x1b[1;31m[X]\x1b[0m Network not initialized\n");
             return;
         }
 
         let Some(info) = get_net_info() else {
-            console_log("\x1b[1;31m✗\x1b[0m Could not get network info\n");
+            console_log("\x1b[1;31m[X]\x1b[0m Could not get network info\n");
             return;
         };
 
         console_log("\n");
-        console_log("\x1b[1;34m┌─────────────────────────────────────────────────────────────┐\x1b[0m\n");
-        console_log("\x1b[1;34m│\x1b[0m            \x1b[1;97mNetwork Interface: virtio0\x1b[0m                       \x1b[1;34m│\x1b[0m\n");
-        console_log("\x1b[1;34m├─────────────────────────────────────────────────────────────┤\x1b[0m\n");
+        console_log("\x1b[1;34m+-------------------------------------------------------------+\x1b[0m\n");
+        console_log("\x1b[1;34m|\x1b[0m            \x1b[1;97mNetwork Interface: virtio0\x1b[0m                       \x1b[1;34m|\x1b[0m\n");
+        console_log("\x1b[1;34m+-------------------------------------------------------------+\x1b[0m\n");
 
         // MAC address
         let mac_len = unsafe { format_mac(&info.mac, &mut MAC_BUF) };
-        console_log("\x1b[1;34m│\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  ");
+        console_log("\x1b[1;34m|\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  ");
         unsafe { print_bytes(&MAC_BUF[..mac_len]) };
         pad_spaces(47 - mac_len.min(47));
-        console_log("\x1b[1;34m│\x1b[0m\n");
+        console_log("\x1b[1;34m|\x1b[0m\n");
 
         // IP address
         let ip_len = unsafe { format_ipv4(&info.ip, &mut IP_BUF) };
-        console_log("\x1b[1;34m│\x1b[0m  \x1b[1;33minet\x1b[0m        ");
+        console_log("\x1b[1;34m|\x1b[0m  \x1b[1;33minet\x1b[0m        ");
         unsafe { print_bytes(&IP_BUF[..ip_len]) };
         console_log("/");
         print_u8(info.prefix_len);
         let inet_len = ip_len + 1 + digit_count_u8(info.prefix_len);
         pad_spaces(47 - inet_len.min(47));
-        console_log("\x1b[1;34m│\x1b[0m\n");
+        console_log("\x1b[1;34m|\x1b[0m\n");
 
         // Gateway
         let gw_len = unsafe { format_ipv4(&info.gateway, &mut IP_BUF) };
-        console_log("\x1b[1;34m│\x1b[0m  \x1b[1;33mgateway\x1b[0m     ");
+        console_log("\x1b[1;34m|\x1b[0m  \x1b[1;33mgateway\x1b[0m     ");
         unsafe { print_bytes(&IP_BUF[..gw_len]) };
         pad_spaces(47 - gw_len.min(47));
-        console_log("\x1b[1;34m│\x1b[0m\n");
+        console_log("\x1b[1;34m|\x1b[0m\n");
 
-        console_log("\x1b[1;34m│\x1b[0m                                                             \x1b[1;34m│\x1b[0m\n");
-        console_log("\x1b[1;34m│\x1b[0m  \x1b[1;32mState: UP\x1b[0m    \x1b[0;90mMTU: 1500    Type: VirtIO-Net\x1b[0m              \x1b[1;34m│\x1b[0m\n");
-        console_log("\x1b[1;34m└─────────────────────────────────────────────────────────────┘\x1b[0m\n");
+        console_log("\x1b[1;34m|\x1b[0m                                                             \x1b[1;34m|\x1b[0m\n");
+        console_log("\x1b[1;34m|\x1b[0m  \x1b[1;32mState: UP\x1b[0m    \x1b[0;90mMTU: 1500    Type: VirtIO-Net\x1b[0m              \x1b[1;34m|\x1b[0m\n");
+        console_log("\x1b[1;34m+-------------------------------------------------------------+\x1b[0m\n");
         console_log("\n");
     }
 

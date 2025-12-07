@@ -30,44 +30,44 @@ mod wasm {
         let percent = if total > 0 { (used * 100) / total } else { 0 };
 
         console_log("\n");
-        console_log("\x1b[1;36m┌─────────────────────────────────────────────────────────────┐\x1b[0m\n");
-        console_log("\x1b[1;36m│\x1b[0m              \x1b[1;97mHeap Memory Statistics\x1b[0m                         \x1b[1;36m│\x1b[0m\n");
-        console_log("\x1b[1;36m├─────────────────────────────────────────────────────────────┤\x1b[0m\n");
+        console_log("\x1b[1;36m+-------------------------------------------------------------+\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m              \x1b[1;97mHeap Memory Statistics\x1b[0m                         \x1b[1;36m|\x1b[0m\n");
+        console_log("\x1b[1;36m+-------------------------------------------------------------+\x1b[0m\n");
 
         // Total line
-        console_log("\x1b[1;36m│\x1b[0m  Total:   \x1b[1;97m");
+        console_log("\x1b[1;36m|\x1b[0m  Total:   \x1b[1;97m");
         print_int(total_kb as i64);
         console_log(" KiB\x1b[0m");
         print_padding(total_kb, 49);
-        console_log("\x1b[1;36m│\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m\n");
 
         // Used line
-        console_log("\x1b[1;36m│\x1b[0m  Used:    \x1b[1;33m");
+        console_log("\x1b[1;36m|\x1b[0m  Used:    \x1b[1;33m");
         print_int(used_kb as i64);
         console_log(" KiB\x1b[0m");
         print_padding(used_kb, 49);
-        console_log("\x1b[1;36m│\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m\n");
 
         // Free line
-        console_log("\x1b[1;36m│\x1b[0m  Free:    \x1b[1;32m");
+        console_log("\x1b[1;36m|\x1b[0m  Free:    \x1b[1;32m");
         print_int(free_kb as i64);
         console_log(" KiB\x1b[0m");
         print_padding(free_kb, 49);
-        console_log("\x1b[1;36m│\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m\n");
 
-        console_log("\x1b[1;36m│\x1b[0m                                                             \x1b[1;36m│\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m                                                             \x1b[1;36m|\x1b[0m\n");
 
         // Progress bar
-        console_log("\x1b[1;36m│\x1b[0m  Usage:   [");
+        console_log("\x1b[1;36m|\x1b[0m  Usage:   [");
         
         let bar_width: u64 = 30;
         let filled = (percent * bar_width) / 100;
         
         for i in 0..bar_width {
             if i < filled {
-                console_log("\x1b[1;32m█\x1b[0m");
+                console_log("\x1b[1;32m#\x1b[0m");
             } else {
-                console_log("\x1b[0;90m░\x1b[0m");
+                console_log("\x1b[0;90m.\x1b[0m");
             }
         }
         
@@ -77,9 +77,9 @@ mod wasm {
         
         // Padding for percentage display
         print_percent_padding(percent);
-        console_log("\x1b[1;36m│\x1b[0m\n");
+        console_log("\x1b[1;36m|\x1b[0m\n");
 
-        console_log("\x1b[1;36m└───────────────────────────────────────────────────────────┘\x1b[0m\n");
+        console_log("\x1b[1;36m+-------------------------------------------------------------+\x1b[0m\n");
         console_log("\n");
     }
 

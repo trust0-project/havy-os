@@ -247,7 +247,7 @@ mod wasm {
             return;
         }
 
-        console_log("● ");
+        console_log("* ");
         print_bytes(name_bytes);
         console_log("\n");
 

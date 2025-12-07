@@ -35,12 +35,12 @@ mod wasm {
         let uptime_sec = uptime_ms / 1000;
 
         console_log("\n");
-        console_log("\x1b[1;35m┌─────────────────────────────────────────────────────────────┐\x1b[0m\n");
-        console_log("\x1b[1;35m│\x1b[0m              \x1b[1;97mBAVY OS System Information\x1b[0m                     \x1b[1;35m│\x1b[0m\n");
-        console_log("\x1b[1;35m├─────────────────────────────────────────────────────────────┤\x1b[0m\n");
+        console_log("\x1b[1;35m+-------------------------------------------------------------+\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m              \x1b[1;97mBAVY OS System Information\x1b[0m                     \x1b[1;35m|\x1b[0m\n");
+        console_log("\x1b[1;35m+-------------------------------------------------------------+\x1b[0m\n");
 
         // Kernel version
-        console_log("\x1b[1;35m│\x1b[0m  Kernel:       \x1b[1;97mBAVY OS v");
+        console_log("\x1b[1;35m|\x1b[0m  Kernel:       \x1b[1;97mBAVY OS v");
         if version_len > 0 {
             unsafe { print_bytes(&VERSION_BUF[..version_len]) };
         } else {
@@ -50,43 +50,43 @@ mod wasm {
         // Pad to align
         let version_display_len = 10 + version_len; // "BAVY OS v" + version
         pad_spaces(44 - version_display_len.min(44));
-        console_log("\x1b[1;35m│\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m\n");
 
-        console_log("\x1b[1;35m│\x1b[0m  Architecture: \x1b[1;97mRISC-V 64-bit (RV64GC)\x1b[0m                       \x1b[1;35m│\x1b[0m\n");
-        console_log("\x1b[1;35m│\x1b[0m  Mode:         \x1b[1;97mMachine Mode (M-Mode)\x1b[0m                        \x1b[1;35m│\x1b[0m\n");
-        console_log("\x1b[1;35m│\x1b[0m  Runtime:      \x1b[1;97mJavaScript + Native\x1b[0m                          \x1b[1;35m│\x1b[0m\n");
-        console_log("\x1b[1;35m│\x1b[0m                                                             \x1b[1;35m│\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m  Architecture: \x1b[1;97mRISC-V 64-bit (RV64GC)\x1b[0m                       \x1b[1;35m|\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m  Mode:         \x1b[1;97mMachine Mode (M-Mode)\x1b[0m                        \x1b[1;35m|\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m  Runtime:      \x1b[1;97mJavaScript + Native\x1b[0m                          \x1b[1;35m|\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m                                                             \x1b[1;35m|\x1b[0m\n");
 
         // Network status
         if is_net_available() {
             if let Some(info) = get_net_info() {
                 let ip_len = unsafe { format_ipv4(&info.ip, &mut IP_BUF) };
-                console_log("\x1b[1;35m│\x1b[0m  Network:      \x1b[1;32m● Online\x1b[0m  IP: \x1b[1;97m");
+                console_log("\x1b[1;35m|\x1b[0m  Network:      \x1b[1;32m* Online\x1b[0m  IP: \x1b[1;97m");
                 unsafe { print_bytes(&IP_BUF[..ip_len]) };
                 console_log("\x1b[0m");
                 pad_spaces(29 - ip_len.min(29));
-                console_log("\x1b[1;35m│\x1b[0m\n");
+                console_log("\x1b[1;35m|\x1b[0m\n");
             } else {
-                console_log("\x1b[1;35m│\x1b[0m  Network:      \x1b[1;32m● Online\x1b[0m                                    \x1b[1;35m│\x1b[0m\n");
+                console_log("\x1b[1;35m|\x1b[0m  Network:      \x1b[1;32m* Online\x1b[0m                                    \x1b[1;35m|\x1b[0m\n");
             }
         } else {
-            console_log("\x1b[1;35m│\x1b[0m  Network:      \x1b[1;31m● Offline\x1b[0m                                  \x1b[1;35m│\x1b[0m\n");
+            console_log("\x1b[1;35m|\x1b[0m  Network:      \x1b[1;31m* Offline\x1b[0m                                  \x1b[1;35m|\x1b[0m\n");
         }
 
         // Filesystem status
         if is_fs_available() {
-            console_log("\x1b[1;35m│\x1b[0m  Filesystem:   \x1b[1;32m● Mounted\x1b[0m                                  \x1b[1;35m│\x1b[0m\n");
+            console_log("\x1b[1;35m|\x1b[0m  Filesystem:   \x1b[1;32m* Mounted\x1b[0m                                  \x1b[1;35m|\x1b[0m\n");
         } else {
-            console_log("\x1b[1;35m│\x1b[0m  Filesystem:   \x1b[1;31m● Not mounted\x1b[0m                              \x1b[1;35m│\x1b[0m\n");
+            console_log("\x1b[1;35m|\x1b[0m  Filesystem:   \x1b[1;31m* Not mounted\x1b[0m                              \x1b[1;35m|\x1b[0m\n");
         }
 
-        console_log("\x1b[1;35m│\x1b[0m                                                             \x1b[1;35m│\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m                                                             \x1b[1;35m|\x1b[0m\n");
 
         // Memory
         if let Some(stats) = get_heap_stats() {
             let used_kb = stats.used_bytes / 1024;
             let total_kb = stats.total_bytes / 1024;
-            console_log("\x1b[1;35m│\x1b[0m  Memory:       \x1b[1;97m");
+            console_log("\x1b[1;35m|\x1b[0m  Memory:       \x1b[1;97m");
             print_int(used_kb as i64);
             console_log(" / ");
             print_int(total_kb as i64);
@@ -94,18 +94,18 @@ mod wasm {
             // Calculate padding
             let mem_len = digit_count(used_kb) + digit_count(total_kb) + 9; // " / " + " KiB"
             pad_spaces(44 - mem_len.min(44));
-            console_log("\x1b[1;35m│\x1b[0m\n");
+            console_log("\x1b[1;35m|\x1b[0m\n");
         }
 
         // Uptime
-        console_log("\x1b[1;35m│\x1b[0m  Uptime:       \x1b[1;97m");
+        console_log("\x1b[1;35m|\x1b[0m  Uptime:       \x1b[1;97m");
         print_int(uptime_sec);
         console_log(" seconds\x1b[0m");
         let uptime_len = digit_count(uptime_sec as u64) + 8; // " seconds"
         pad_spaces(44 - uptime_len.min(44));
-        console_log("\x1b[1;35m│\x1b[0m\n");
+        console_log("\x1b[1;35m|\x1b[0m\n");
 
-        console_log("\x1b[1;35m└─────────────────────────────────────────────────────────────┘\x1b[0m\n");
+        console_log("\x1b[1;35m+-------------------------------------------------------------+\x1b[0m\n");
         console_log("\n");
     }
 

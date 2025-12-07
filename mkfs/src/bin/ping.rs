@@ -32,7 +32,7 @@ mod wasm {
         }
 
         if !is_net_available() {
-            console_log("\x1b[1;31m✗\x1b[0m Network not initialized\n");
+            console_log("\x1b[1;31m[X]\x1b[0m Network not initialized\n");
             return;
         }
 

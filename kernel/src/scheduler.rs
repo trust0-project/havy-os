@@ -128,6 +128,12 @@ impl Scheduler {
         self.running.load(Ordering::Acquire)
     }
 
+    /// Allocate a PID without spawning a task
+    /// Used for kernel-integrated services like klogd and sysmond
+    pub fn allocate_pid(&self) -> Pid {
+        self.next_pid.fetch_add(1, Ordering::SeqCst) as Pid
+    }
+
     /// Spawn a new task
     pub fn spawn(&self, name: &str, entry: TaskEntry, priority: Priority) -> Pid {
         self.spawn_on_hart(name, entry, priority, None)
