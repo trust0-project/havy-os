@@ -383,14 +383,14 @@ fn secondary_hart_idle(hart_id: usize) -> ! {
                 // Mark task as running on this hart
                 task.mark_running(hart_id);
 
-                let start_time = get_time_ms();
+                let start_time = get_time_ms() as u64;
 
                 // Execute the task's entry point
                 // Note: Daemon tasks have infinite loops and won't return
                 (task.entry)();
 
                 // If we get here, the task returned (non-daemon or daemon that exited)
-                let elapsed = get_time_ms().saturating_sub(start_time);
+                let elapsed = (get_time_ms() as u64).saturating_sub(start_time);
                 task.add_cpu_time(elapsed);
 
                 // Mark task as finished
@@ -522,7 +522,7 @@ fn update_sysinfo() {
     let cpu_count = HARTS_ONLINE.load(Ordering::Relaxed);
     
     // Get uptime
-    let uptime_ms = get_time_ms();
+    let uptime_ms = get_time_ms() as u64;
     
     // Write to MMIO registers (volatile writes, all 64-bit writes are 8-byte aligned)
     unsafe {
@@ -552,20 +552,20 @@ static BLK_DEV: Spinlock<Option<virtio_blk::VirtioBlock>> = Spinlock::new(None);
 struct PingState {
     target: smoltcp::wire::Ipv4Address,
     seq: u16,
-    sent_time: u64,      // Time when current ping was sent
-    last_send_time: u64, // Time when we last sent a ping (for 1s interval)
+    sent_time: i64,      // Time when current ping was sent
+    last_send_time: i64, // Time when we last sent a ping (for 1s interval)
     waiting: bool,       // Waiting for reply to current ping
     continuous: bool,    // Whether running in continuous mode
     // Statistics
     packets_sent: u32,
     packets_received: u32,
-    min_rtt: u64,
-    max_rtt: u64,
-    total_rtt: u64,
+    min_rtt: i64,
+    max_rtt: i64,
+    total_rtt: i64,
 }
 
 impl PingState {
-    fn new(target: smoltcp::wire::Ipv4Address, timestamp: u64) -> Self {
+    fn new(target: smoltcp::wire::Ipv4Address, timestamp: i64) -> Self {
         PingState {
             target,
             seq: 0,
@@ -575,13 +575,13 @@ impl PingState {
             continuous: true,
             packets_sent: 0,
             packets_received: 0,
-            min_rtt: u64::MAX,
+            min_rtt: i64::MAX,
             max_rtt: 0,
             total_rtt: 0,
         }
     }
 
-    fn record_reply(&mut self, rtt: u64) {
+    fn record_reply(&mut self, rtt: i64) {
         self.packets_received += 1;
         self.total_rtt += rtt;
         if rtt < self.min_rtt {
@@ -592,9 +592,9 @@ impl PingState {
         }
     }
 
-    fn avg_rtt(&self) -> u64 {
+    fn avg_rtt(&self) -> i64 {
         if self.packets_received > 0 {
-            self.total_rtt / self.packets_received as u64
+            self.total_rtt / self.packets_received as i64
         } else {
             0
         }
@@ -680,45 +680,43 @@ static SHELL_CMD_STATE: Spinlock<ShellCmdState> = Spinlock::new(ShellCmdState::n
 /// Initialize shell command tracking
 fn shell_cmd_init() {
     let mut state = SHELL_CMD_STATE.lock();
-    state.session_start = get_time_ms();
+    state.session_start = get_time_ms() as u64;
 }
 
 /// Start tracking a shell command
 fn shell_cmd_start(cmd_name: &str) {
     let mut state = SHELL_CMD_STATE.lock();
-    state.start_command(cmd_name, get_time_ms());
+    state.start_command(cmd_name, get_time_ms() as u64);
 }
 
 /// Stop tracking the current shell command
 fn shell_cmd_end() {
     let mut state = SHELL_CMD_STATE.lock();
-    state.end_command(get_time_ms());
+    state.end_command(get_time_ms() as u64);
 }
 
-/// Get shell command info for ps_list (returns: name, pid, cpu_time_ms, uptime_ms, is_running)
-pub fn get_shell_cmd_info() -> Option<(String, u32, u64, u64, bool)> {
+/// Get shell command info for ps_list (returns: name, pid, cpu (hart), uptime_ms, is_running)
+pub fn get_shell_cmd_info() -> Option<(String, u32, i64, u64, bool)> {
     let state = SHELL_CMD_STATE.lock();
-    let current_time = get_time_ms();
+    let current_time = get_time_ms() as u64;
     
     if state.is_running {
-        // Currently running command - calculate elapsed time
-        let elapsed = current_time.saturating_sub(state.start_time);
-        let cpu_time = state.accumulated_cpu_time.saturating_add(elapsed);
+        // Currently running command - runs on hart 0 (shell hart)
         let uptime = current_time.saturating_sub(state.start_time);
         Some((
             String::from(state.get_name()),
             state.pid,
-            cpu_time,
+            0i64,  // Shell commands run on hart 0
             uptime,
             true,
         ))
-    } else if state.accumulated_cpu_time > 0 || state.name_len > 0 {
-        // Last command finished - show accumulated time
+    } else if state.name_len > 0 {
+        // Last command finished - show shell as not on any hart
         let uptime = current_time.saturating_sub(state.session_start);
         Some((
             String::from("shell"),
             0,
-            state.accumulated_cpu_time,
+            -1i64, // Not running on any hart
             uptime,
             false,
         ))
@@ -925,11 +923,9 @@ enum RedirectMode {
 }
 
 /// Read current time in milliseconds from CLINT mtime register
-pub fn get_time_ms() -> u64 {
+pub fn get_time_ms() -> i64 {
     let mtime = unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) };
-    // QEMU RISC-V virt platform timer runs at 10MHz (10,000,000 Hz)
-    // Divide by 10,000 to get milliseconds
-    mtime / 10_000
+    (mtime / 10_000) as i64
 }
 
 /// Run periodic daemon work on hart 0
@@ -1266,14 +1262,14 @@ fn main() -> ! {
     let mut esc_state: u8 = 0; // 0 = normal, 1 = got ESC, 2 = got ESC[
 
     // Track last time we ran scheduled tasks
-    let mut last_task_run: u64 = get_time_ms();
+    let mut last_task_run: i64 = get_time_ms();
 
     // Tail follow mode state
     let mut tail_follow_mode = false;
     let mut tail_follow_path: [u8; 128] = [0u8; 128];
     let mut tail_follow_path_len: usize = 0;
     let mut tail_follow_last_size: usize = 0;
-    let mut tail_follow_last_check: u64 = 0;
+    let mut tail_follow_last_check: i64 = 0;
 
     loop {
         // Poll network stack (non-blocking)
@@ -1915,7 +1911,7 @@ fn poll_network() {
     {
         let mut net_guard = NET_STATE.lock();
         if let Some(ref mut state) = *net_guard {
-            state.poll(timestamp as i64);
+            state.poll(timestamp);
         }
     }
 
@@ -1960,10 +1956,6 @@ fn poll_network() {
             }
         }
 
-
-
-
-        
         // In continuous mode, send next ping after 1 second interval
         if ping.continuous && !ping.waiting {
             if timestamp - ping.last_send_time >= 1000 {
@@ -1972,14 +1964,14 @@ fn poll_network() {
                 ping.last_send_time = timestamp;
                 ping.packets_sent += 1;
 
-                    let send_result = {
-                        let mut net_guard = NET_STATE.lock();
-                        if let Some(ref mut state) = *net_guard {
-                            state.send_ping(ping.target, ping.seq, timestamp as i64)
-                        } else {
-                            Err("Network not available")
-                        }
-                    };
+                let send_result = {
+                    let mut net_guard = NET_STATE.lock();
+                    if let Some(ref mut state) = *net_guard {
+                        state.send_ping(ping.target, ping.seq, timestamp)
+                    } else {
+                        Err("Network not available")
+                    }
+                };
 
                 match send_result {
                     Ok(()) => {

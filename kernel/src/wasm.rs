@@ -48,7 +48,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             "env",
             "time",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i64 {
-                crate::get_time_ms() as i64
+                crate::get_time_ms()
             }),
         )
         .map_err(|e| format!("define time: {:?}", e))?;
@@ -711,7 +711,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
                     if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
                         // Simple PRNG based on time
-                        let mut seed = crate::get_time_ms();
+                        let mut seed = crate::get_time_ms() as u64;
                         let mut random_bytes = vec![0u8; buf_len as usize];
                         for byte in random_bytes.iter_mut() {
                             seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
@@ -735,7 +735,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             "sleep_ms",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>, ms: i32| {
                 let start = crate::get_time_ms();
-                let target = start + ms as u64;
+                let target = start + ms as i64;
                 while crate::get_time_ms() < target {
                     core::hint::spin_loop();
                 }
@@ -943,7 +943,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
 
     // Syscall: ps_list(buf_ptr, buf_len) -> i32
     // Gets list of all processes/tasks. Returns bytes written or -1 on error.
-    // Format: "pid:name:state:priority:cpu_time:uptime\n" for each task
+    // Format: "pid:name:state:priority:cpu:uptime\n" for each task (cpu = hart number, -1 if not running)
     linker
         .define(
             "env",
@@ -955,8 +955,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     let mut output = String::new();
                     
                     // Include the current shell command (which is the one calling ps_list)
-                    // This shows the currently running WASM command with its CPU time
-                    if let Some((name, pid, cpu_time, uptime, is_running)) = crate::get_shell_cmd_info() {
+                    // This shows the currently running WASM command with its CPU (hart number)
+                    if let Some((name, pid, cpu, uptime, is_running)) = crate::get_shell_cmd_info() {
                         let state = if is_running { "R+" } else { "S" };
                         output.push_str(&format!(
                             "{}:{}:{}:{}:{}:{}\n",
@@ -964,20 +964,20 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             name,
                             state,
                             "normal",
-                            cpu_time,
+                            cpu,
                             uptime
                         ));
                     }
                     
                     for task in tasks {
-                        // Format: pid:name:state:priority:cpu_time:uptime\n
+                        // Format: pid:name:state:priority:cpu:uptime\n (cpu = assigned hart number)
                         output.push_str(&format!(
                             "{}:{}:{}:{}:{}:{}\n",
                             task.pid,
                             task.name,
                             task.state.as_str(),
                             task.priority.as_str(),
-                            task.cpu_time,
+                            task.cpu,
                             task.uptime
                         ));
                     }
@@ -1378,7 +1378,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let send_result = {
                             let mut net_guard = crate::NET_STATE.lock();
                             if let Some(ref mut state) = *net_guard {
-                                state.send_ping(target, seq, timestamp as i64)
+                                state.send_ping(target, seq, timestamp)
                             } else {
                                 return -2;
                             }
@@ -1389,7 +1389,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         }
                         
                         // Wait for reply
-                        let deadline = timestamp + timeout_ms as u64;
+                        let deadline = timestamp + timeout_ms as i64;
                         loop {
                             let now = crate::get_time_ms();
                             if now >= deadline {
@@ -1400,7 +1400,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             let reply = {
                                 let mut net_guard = crate::NET_STATE.lock();
                                 if let Some(ref mut state) = *net_guard {
-                                    state.poll(now as i64);
+                                    state.poll(now);
                                     // check_ping_reply returns (from_ip, ident, seq)
                                     state.check_ping_reply()
                                 } else {

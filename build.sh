@@ -8,7 +8,8 @@ if command -v wasm-opt &> /dev/null; then
     echo "Optimizing WASM binaries..."
     for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
         if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
-            wasm-opt -O3 --enable-bulk-memory "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
+            # Use -O2 instead of -O3 to avoid aggressive optimizations that break integer handling
+            wasm-opt -O3 --enable-bulk-memory --enable-sign-ext "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
         fi
     done
 fi

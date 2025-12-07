@@ -19,7 +19,7 @@ mod wasm {
     #[no_mangle]
     pub extern "C" fn _start() {
         // Header
-        console_log("\x1b[1;36m  PID  STATE  PRI     CPU    UPTIME  NAME\x1b[0m\n");
+        console_log("\x1b[1;36m  PID  STATE  PRI  CPU    UPTIME  NAME\x1b[0m\n");
         console_log("\x1b[90m─────────────────────────────────────────────────────\x1b[0m\n");
 
         // Get process list
@@ -49,11 +49,11 @@ mod wasm {
         }
 
         console_log("\n");
-        console_log("\x1b[90mStates: R=Ready R+=Running S=Sleeping Z=Zombie\x1b[0m\n");
+        console_log("\x1b[90mStates: R=Ready R+=Running S=Sleeping Z=Zombie | CPU: hart # (-1 = not running)\x1b[0m\n");
     }
 
     fn display_task(line: &[u8]) {
-        // Parse: "pid:name:state:priority:cpu_time:uptime"
+        // Parse: "pid:name:state:priority:cpu:uptime"
         // Find field boundaries by scanning for colons
         let mut colon_pos = [0usize; 5];
         let mut colon_count = 0;
@@ -78,10 +78,9 @@ mod wasm {
         let uptime_slice = &line[colon_pos[4]+1..];
         
         let pid = parse_u64(pid_slice);
-        let cpu_time = parse_u64(cpu_slice);
+        let cpu = parse_u64(cpu_slice);  // Hart number (-1 if not running)
         let uptime_ms = parse_u64(uptime_slice);
-        // Cap uptime to avoid overflow before division
-        let uptime_sec = if uptime_ms > 9999999000 { 9999999 } else { uptime_ms / 1000 };
+        let uptime_sec = uptime_ms / 1000;
 
         // Color based on state
         let color = if state_slice == b"R+" {
@@ -110,16 +109,12 @@ mod wasm {
         pad_spaces(6 - priority_slice.len());
         console_log(" ");
 
-        // CPU time (6 chars + "ms", right-aligned)
-        // Cap at 999999 to fit in display and avoid i64 overflow
-        let cpu_capped = if cpu_time > 999999 { 999999 } else { cpu_time as i64 };
-        print_padded_int(cpu_capped, 6);
-        console_log("ms ");
+        // CPU (hart number, 3 chars, right-aligned)
+        print_padded_int(cpu as i64, 3);
+        console_log(" ");
 
         // Uptime (7 chars + "s", right-aligned)
-        // Cap at reasonable max to avoid display issues
-        let uptime_display = if uptime_sec > 999999999 { 999999999 } else { uptime_sec };
-        print_padded_u64(uptime_display, 7);
+        print_padded_int(uptime_sec as i64, 7);
         console_log("s  ");
 
         // Name
@@ -132,9 +127,34 @@ mod wasm {
         for &b in bytes {
             if b >= b'0' && b <= b'9' {
                 n = n.saturating_mul(10).saturating_add((b - b'0') as u64);
+            } else {
+                break;  // Stop at first non-digit!
             }
         }
         n
+    }
+
+    fn parse_i64(bytes: &[u8]) -> i64 {
+        let mut n: i64 = 0;
+        let mut negative = false;
+        let mut started = false;
+
+        for &b in bytes {
+            match b {
+                b'-' if !started => {
+                    negative = true;
+                    started = true;
+                }
+                b'0'..=b'9' => {
+                    n = n.saturating_mul(10).saturating_add((b - b'0') as i64);
+                    started = true;
+                }
+                _ if started => break,  // Stop at first non-digit after starting!
+                _ => {}
+            }
+        }
+
+        if negative { -n } else { n }
     }
 
     fn print_padded_int(n: i64, width: usize) {
@@ -152,36 +172,6 @@ mod wasm {
         // Print leading spaces
         pad_spaces(width.saturating_sub(digits));
         print_int(n);
-    }
-
-    fn print_padded_u64(n: u64, width: usize) {
-        let mut temp = if n == 0 { 1 } else { n };
-        let mut digits = 0usize;
-        while temp > 0 {
-            digits += 1;
-            temp /= 10;
-        }
-        pad_spaces(width.saturating_sub(digits));
-        print_u64(n);
-    }
-
-    fn print_u64(mut n: u64) {
-        if n == 0 {
-            console_log("0");
-            return;
-        }
-        let mut buf = [0u8; 20];
-        let mut i = 0;
-        while n > 0 {
-            buf[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-            i += 1;
-        }
-        // Reverse and print
-        for j in (0..i).rev() {
-            let c = buf[j];
-            unsafe { mkfs::print(&c as *const u8, 1) };
-        }
     }
 
     fn print_bytes(bytes: &[u8]) {

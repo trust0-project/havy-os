@@ -163,7 +163,7 @@ impl LogBuffer {
             return;
         }
 
-        let timestamp = crate::get_time_ms();
+        let timestamp = crate::get_time_ms() as u64;
         let hart_id = crate::get_hart_id();
 
         // Truncate message if too long

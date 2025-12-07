@@ -350,14 +350,14 @@ fn register_service(name: &str, pid: u32, hart: Option<usize>) {
     if let Some(svc) = state.services.iter_mut().find(|s| s.name == name) {
         svc.pid = pid;
         svc.status = ServiceStatus::Running;
-        svc.started_at = crate::get_time_ms();
+        svc.started_at = crate::get_time_ms() as u64;
         svc.hart = hart;
     } else {
         state.services.push(ServiceInfo {
             name: String::from(name),
             pid,
             status: ServiceStatus::Running,
-            started_at: crate::get_time_ms(),
+            started_at: crate::get_time_ms() as u64,
             hart,
         });
     }
@@ -453,9 +453,9 @@ fn write_boot_log() {
 /// Uses busy-waiting since secondary harts don't have timer interrupts
 #[inline(never)]
 fn spin_delay_ms(ms: u64) {
-    let start = crate::get_time_ms();
+    let start = crate::get_time_ms() as u64;
     let target = start + ms;
-    while crate::get_time_ms() < target {
+    while (crate::get_time_ms() as u64) < target {
         // Yield CPU hints to save power
         for _ in 0..100 {
             core::hint::spin_loop();
@@ -503,15 +503,15 @@ fn append_to_log(line: &str) -> bool {
 // Called from the shell loop on hart 0.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::AtomicI64;
 
 /// State for klogd daemon
-static KLOGD_LAST_RUN: AtomicU64 = AtomicU64::new(0);
+static KLOGD_LAST_RUN: AtomicI64 = AtomicI64::new(0);
 static KLOGD_TICK: AtomicUsize = AtomicUsize::new(0);
 static KLOGD_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// State for sysmond daemon  
-static SYSMOND_LAST_RUN: AtomicU64 = AtomicU64::new(0);
+static SYSMOND_LAST_RUN: AtomicI64 = AtomicI64::new(0);
 static SYSMOND_TICK: AtomicUsize = AtomicUsize::new(0);
 static SYSMOND_INITIALIZED: AtomicBool = AtomicBool::new(false);
 

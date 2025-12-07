@@ -67,6 +67,11 @@ This script will:
 
 After a successful build, you can run Havy OS in QEMU with the following command:
 
+with our npm package virtual-machine
+```sh
+npx virtual-machine --kernel target/riscv64gc-unknown-none-elf/release/kernel --disk target/riscv64gc-unknown-none-elf/release/fs.img --harts 2
+```
+
 ```sh
 qemu-system-riscv64 -machine virt -m 1G -bios none \
   -kernel target/riscv64gc-unknown-none-elf/release/kernel \

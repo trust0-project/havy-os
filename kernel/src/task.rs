@@ -98,7 +98,9 @@ pub struct Task {
     pub priority: Priority,
     /// Hart affinity (None = can run on any hart)
     pub hart_affinity: Option<usize>,
-    /// Hart currently running this task (if Running)
+    /// Hart this task is assigned to (which queue it's in)
+    pub assigned_hart: AtomicUsize,
+    /// Hart currently executing this task (only valid when Running)
     pub current_hart: AtomicUsize,
     /// Task entry point
     pub entry: TaskEntry,
@@ -123,9 +125,10 @@ impl Task {
             state: AtomicUsize::new(TaskState::Ready as usize),
             priority,
             hart_affinity: None,
+            assigned_hart: AtomicUsize::new(0),  // Default to hart 0
             current_hart: AtomicUsize::new(usize::MAX),
             entry,
-            created_at: crate::get_time_ms(),
+            created_at: crate::get_time_ms() as u64,
             cpu_time: AtomicU64::new(0),
             exit_code: AtomicUsize::new(0),
             is_daemon: false,
@@ -179,14 +182,20 @@ impl Task {
         self.cpu_time.load(Ordering::Relaxed)
     }
 
-    /// Get current hart (if running)
-    pub fn get_current_hart(&self) -> Option<usize> {
-        let hart = self.current_hart.load(Ordering::Acquire);
-        if hart == usize::MAX {
-            None
-        } else {
-            Some(hart)
-        }
+    /// Get current hart number where the task is actively running
+    /// Returns u64::MAX if not currently executing
+    pub fn get_current_hart(&self) -> u64 {
+        self.current_hart.load(Ordering::Acquire) as u64
+    }
+
+    /// Get the hart this task is assigned to (which queue it's in)
+    pub fn get_assigned_hart(&self) -> usize {
+        self.assigned_hart.load(Ordering::Acquire)
+    }
+
+    /// Set the assigned hart (called when task is enqueued)
+    pub fn set_assigned_hart(&self, hart_id: usize) {
+        self.assigned_hart.store(hart_id, Ordering::Release);
     }
 }
 
@@ -197,8 +206,8 @@ pub struct TaskInfo {
     pub name: String,
     pub state: TaskState,
     pub priority: Priority,
-    pub hart: Option<usize>,
-    pub cpu_time: u64,
+    /// CPU (hart number) this task is assigned to
+    pub cpu: usize,
     pub uptime: u64,
 }
 
@@ -210,8 +219,7 @@ impl Task {
             name: self.name.clone(),
             state: self.get_state(),
             priority: self.priority,
-            hart: self.get_current_hart(),
-            cpu_time: self.get_cpu_time(),
+            cpu: self.get_assigned_hart(),
             uptime: current_time.saturating_sub(self.created_at),
         }
     }
@@ -432,7 +440,7 @@ pub fn init_wait_queues() {
 
 /// Helper to add a task to the timer wait queue
 pub fn wait_timer(pid: Pid, timeout_ms: u64) {
-    let current_time = crate::get_time_ms();
+    let current_time = crate::get_time_ms() as u64;
     let deadline = current_time + timeout_ms;
 
     if let Some(ref wq) = *TIMER_WAITQ.lock() {

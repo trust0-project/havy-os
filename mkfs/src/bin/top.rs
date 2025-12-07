@@ -33,7 +33,7 @@ mod wasm {
         state_len: usize,
         priority: [u8; 8],
         priority_len: usize,
-        cpu_time: u64,
+        cpu: i64,  // Hart number (-1 if not running)
         uptime: u64,
     }
 
@@ -46,7 +46,7 @@ mod wasm {
         state_len: 0,
         priority: [0u8; 8],
         priority_len: 0,
-        cpu_time: 0,
+        cpu: -1,
         uptime: 0,
     }; 32];
 
@@ -187,13 +187,13 @@ mod wasm {
         print_int(sleeping as i64);
         console_log("\x1b[0m sleeping\n\n");
 
-        console_log("\x1b[1;7m  PID  STATE  PRI     CPU    UPTIME  NAME                        \x1b[0m\n");
+        console_log("\x1b[1;7m  PID  STATE  PRI  CPU    UPTIME  NAME                          \x1b[0m\n");
 
-        // Sort tasks by CPU time (descending) - simple bubble sort
+        // Sort tasks by PID (ascending) - simple bubble sort
         for i in 0..task_count {
             for j in 0..task_count - 1 - i {
                 unsafe {
-                    if TASKS[j].cpu_time < TASKS[j + 1].cpu_time {
+                    if TASKS[j].pid > TASKS[j + 1].pid {
                         // Swap
                         let tmp = TASKS[j];
                         TASKS[j] = TASKS[j + 1];
@@ -235,15 +235,12 @@ mod wasm {
             pad_spaces(6 - task.priority_len.min(6));
             console_log(" ");
 
-            // CPU time (6 chars + "ms", right-aligned)
-            // Cap at 999999 to fit in display and avoid i64 overflow
-            let cpu_capped = if task.cpu_time > 999999 { 999999 } else { task.cpu_time as i64 };
-            print_padded_int(cpu_capped, 6);
-            console_log("ms ");
+            // CPU (hart number, 3 chars, right-aligned)
+            print_padded_int(task.cpu as i64, 3);
+            console_log(" ");
 
-            // Uptime - cap at reasonable value before dividing
-            let uptime_sec = if task.uptime > 999999999000 { 999999999 } else { (task.uptime / 1000) as i64 };
-            print_uptime(uptime_sec);
+            // Uptime
+            print_uptime((task.uptime / 1000) as i64);
             console_log("  ");
 
             // Name
@@ -307,7 +304,7 @@ mod wasm {
             TASKS[idx].state[..TASKS[idx].state_len].copy_from_slice(&state_slice[..TASKS[idx].state_len]);
             TASKS[idx].priority_len = priority_slice.len().min(8);
             TASKS[idx].priority[..TASKS[idx].priority_len].copy_from_slice(&priority_slice[..TASKS[idx].priority_len]);
-            TASKS[idx].cpu_time = parse_u64(cpu_slice);
+            TASKS[idx].cpu = parse_i64(cpu_slice);
             TASKS[idx].uptime = parse_u64(uptime_slice);
         }
     }
@@ -320,6 +317,21 @@ mod wasm {
             }
         }
         n
+    }
+
+    fn parse_i64(bytes: &[u8]) -> i64 {
+        let mut n: i64 = 0;
+        let mut negative = false;
+        for &b in bytes {
+            match b {
+                b'-' if n == 0 => negative = true,
+                b'0'..=b'9' => {
+                    n = n.saturating_mul(10).saturating_add((b - b'0') as i64);
+                }
+                _ => {}
+            }
+        }
+        if negative { -n } else { n }
     }
 
     fn parse_usize(bytes: &[u8]) -> usize {
@@ -355,53 +367,6 @@ mod wasm {
         }
         pad_spaces(width.saturating_sub(digits));
         print_int(n);
-    }
-
-    fn print_padded_u64(n: u64, width: usize) {
-        let mut temp = if n == 0 { 1 } else { n };
-        let mut digits = 0usize;
-        while temp > 0 {
-            digits += 1;
-            temp /= 10;
-        }
-        pad_spaces(width.saturating_sub(digits));
-        print_u64(n);
-    }
-
-    fn print_u64(mut n: u64) {
-        if n == 0 {
-            console_log("0");
-            return;
-        }
-        let mut buf = [0u8; 20];
-        let mut i = 0;
-        while n > 0 {
-            buf[i] = b'0' + (n % 10) as u8;
-            n /= 10;
-            i += 1;
-        }
-        // Reverse and print
-        for j in (0..i).rev() {
-            let c = buf[j];
-            unsafe { mkfs::print(&c as *const u8, 1) };
-        }
-    }
-
-    fn print_uptime_u64(total_sec: u64) {
-        let hours = total_sec / 3600;
-        let mins = (total_sec % 3600) / 60;
-        let secs = total_sec % 60;
-
-        if hours > 0 {
-            print_u64(hours);
-            console_log("h ");
-        }
-        if hours > 0 || mins > 0 {
-            print_u64(mins);
-            console_log("m ");
-        }
-        print_u64(secs);
-        console_log("s");
     }
 
     fn pad_spaces(count: usize) {

@@ -479,7 +479,7 @@ fn execute_job(hart_id: usize, job: &WasmJob) {
     // Execute the WASM binary
     match crate::wasm::execute(&job.wasm_bytes, &args) {
         Ok(_) => {
-            let exec_time = crate::get_time_ms() - start_time;
+            let exec_time = (crate::get_time_ms() - start_time) as u64;
             job.exec_time_ms.store(exec_time, Ordering::Relaxed);
             job.set_status(JobStatus::Completed);
             

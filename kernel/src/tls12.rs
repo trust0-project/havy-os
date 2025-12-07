@@ -949,8 +949,8 @@ pub fn https_request_tls12(
     port: u16,
     hostname: &str,
     request_bytes: &[u8],
-    timeout_ms: u64,
-    get_time: fn() -> u64,
+    timeout_ms: i64,
+    get_time: fn() -> i64,
 ) -> Result<Vec<u8>, TlsError> {
     // Create blocking TCP socket and connect
     let mut socket = BlockingTcpSocket::new(net, timeout_ms, get_time);

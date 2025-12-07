@@ -153,7 +153,8 @@ impl Scheduler {
         // Determine target hart
         let target_hart = hart_affinity.unwrap_or_else(|| self.find_least_loaded_hart());
 
-        // Enqueue the task
+        // Set assigned hart and enqueue
+        task.set_assigned_hart(target_hart);
         self.queues[target_hart].lock().enqueue(task);
 
         crate::klog::klog_debug(
@@ -196,6 +197,7 @@ impl Scheduler {
         self.tasks.lock().insert(pid, task.clone());
 
         let target_hart = hart_affinity.unwrap_or_else(|| self.find_least_loaded_hart());
+        task.set_assigned_hart(target_hart);
         self.queues[target_hart].lock().enqueue(task);
 
         crate::klog::klog_debug(
@@ -240,6 +242,8 @@ impl Scheduler {
         for other in 0..num_harts {
             if other != hart_id {
                 if let Some(task) = self.queues[other].lock().steal() {
+                    // Update assigned_hart since task moved to this hart
+                    task.set_assigned_hart(hart_id);
                     crate::klog::klog_trace(
                         "sched",
                         &alloc::format!(
@@ -259,7 +263,10 @@ impl Scheduler {
 
     /// Requeue a task (e.g., after time slice expires)
     pub fn requeue(&self, task: Arc<Task>, hart_id: usize) {
+        // Reset current_hart since task is no longer running
+        task.current_hart.store(usize::MAX, core::sync::atomic::Ordering::Release);
         task.set_state(TaskState::Ready);
+        task.set_assigned_hart(hart_id);
         self.queues[hart_id].lock().enqueue(task);
     }
 
@@ -316,7 +323,7 @@ impl Scheduler {
 
     /// List all tasks
     pub fn list_tasks(&self) -> Vec<TaskInfo> {
-        let current_time = crate::get_time_ms();
+        let current_time = crate::get_time_ms() as u64;
         self.tasks
             .lock()
             .values()

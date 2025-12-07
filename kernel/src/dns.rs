@@ -243,8 +243,8 @@ pub fn resolve(
     net: &mut crate::net::NetState,
     hostname: &[u8],
     dns_server: Ipv4Address,
-    timeout_ms: u64,
-    get_time_ms: fn() -> u64,
+    timeout_ms: i64,
+    get_time_ms: fn() -> i64,
 ) -> Option<Ipv4Address> {
     use crate::uart;
 
@@ -254,7 +254,7 @@ pub fn resolve(
     // Send query
     let start_time = get_time_ms();
     if net
-        .udp_send(dns_server, crate::net::DNS_PORT, &query, start_time as i64)
+        .udp_send(dns_server, crate::net::DNS_PORT, &query, start_time)
         .is_err()
     {
         uart::write_line("Failed to send DNS query");
@@ -272,10 +272,10 @@ pub fn resolve(
         }
 
         // Poll network
-        net.poll(now as i64);
+        net.poll(now);
 
         // Try to receive response
-        if let Some((_src_ip, _src_port, len)) = net.udp_recv(&mut buf, now as i64) {
+        if let Some((_src_ip, _src_port, len)) = net.udp_recv(&mut buf, now) {
             match parse_response(&buf[..len], txid) {
                 DnsResult::Resolved(addrs) => {
                     return addrs.into_iter().next();
