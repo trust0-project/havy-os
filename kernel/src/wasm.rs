@@ -1608,8 +1608,10 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
     let module = Module::new(&engine, wasm_bytes).map_err(|e| format!("Invalid WASM: {:?}", e))?;
 
     let instance = linker
-        .instantiate_and_start(&mut store, &module)
-        .map_err(|e| format!("Link/Start: {:?}", e))?;
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("Instantiate: {:?}", e))?
+        .ensure_no_start(&mut store)
+        .map_err(|e| format!("Start: {:?}", e))?;
 
     let run = instance
         .get_typed_func::<(), ()>(&store, "_start")

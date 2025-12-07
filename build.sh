@@ -9,7 +9,7 @@ if command -v wasm-opt &> /dev/null; then
     for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
         if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
             # Use -O2 instead of -O3 to avoid aggressive optimizations that break integer handling
-            wasm-opt -O3 --enable-bulk-memory --enable-sign-ext "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
+            wasm-opt -O2 --enable-bulk-memory --enable-sign-ext "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
         fi
     done
 fi

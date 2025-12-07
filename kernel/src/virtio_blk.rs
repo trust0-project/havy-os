@@ -79,22 +79,18 @@ impl VirtioBlock {
         let data_idx = self.queue.alloc_desc().ok_or("No desc")?;
         let status_idx = self.queue.alloc_desc().ok_or("No desc")?;
 
-        static mut REQ_HDR: VirtioBlkReqHeader = VirtioBlkReqHeader {
-            req_type: 0,
+        // Use stack-allocated request header and status to avoid
+        // race conditions between harts. Each operation gets its own buffer.
+        let mut req_hdr = VirtioBlkReqHeader {
+            req_type: if is_write { 1 } else { 0 },
             reserved: 0,
-            sector: 0,
+            sector,
         };
-        static mut REQ_STATUS: u8 = 0;
+        let mut req_status: u8 = 0xFF; // Initialize to error state
 
         unsafe {
-            REQ_HDR = VirtioBlkReqHeader {
-                req_type: if is_write { 1 } else { 0 },
-                reserved: 0,
-                sector,
-            };
-
             // 1. Header (Read-only by device)
-            self.queue.desc[head_idx as usize].addr = &raw const REQ_HDR as u64;
+            self.queue.desc[head_idx as usize].addr = &raw const req_hdr as u64;
             self.queue.desc[head_idx as usize].len = 16;
             self.queue.desc[head_idx as usize].flags = 1; // NEXT
             self.queue.desc[head_idx as usize].next = data_idx;
@@ -106,7 +102,7 @@ impl VirtioBlock {
             self.queue.desc[data_idx as usize].next = status_idx;
 
             // 3. Status (Write-only by device)
-            self.queue.desc[status_idx as usize].addr = &raw mut REQ_STATUS as u64;
+            self.queue.desc[status_idx as usize].addr = &raw mut req_status as u64;
             self.queue.desc[status_idx as usize].len = 1;
             self.queue.desc[status_idx as usize].flags = 2; // WRITE
 
@@ -123,7 +119,7 @@ impl VirtioBlock {
             self.queue.free_desc(data_idx);
             self.queue.free_desc(status_idx);
 
-            if REQ_STATUS == 0 {
+            if req_status == 0 {
                 Ok(())
             } else {
                 Err("IO Error")

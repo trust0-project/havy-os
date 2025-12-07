@@ -530,46 +530,204 @@ fn spin_delay_ms(ms: u64) {
     }
 }
 
-/// Append a line to the kernel log file
-/// Returns true on success
-fn append_to_log(line: &str) -> bool {
-    // Use try_write to avoid blocking shell commands
-    // If locks are held by shell, we just skip this log entry
-    let mut fs_guard = match crate::FS_STATE.try_write() {
-        Some(guard) => guard,
-        None => return false, // Filesystem busy, skip logging
-    };
-    let mut blk_guard = match crate::BLK_DEV.try_write() {
-        Some(guard) => guard,
-        None => return false, // Block device busy, skip logging
-    };
+// ===============================================================================
+// LOG BUFFER SYSTEM
+// Daemons write to an in-memory buffer, hart 0 flushes to disk
+// This avoids VirtIO contention between harts
+// ===============================================================================
 
-    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-        // Read existing content
-        let existing = fs
-            .read_file(dev, "/var/log/kernel.log")
-            .map(|v| String::from_utf8_lossy(&v).into_owned())
-            .unwrap_or_default();
+/// Maximum log entries to buffer before forcing a flush
+const LOG_BUFFER_SIZE: usize = 32;
+/// Maximum length of each log line
+const LOG_LINE_MAX: usize = 128;
 
-        // Truncate if too large (keep last 16KB)
-        let trimmed = if existing.len() > 16384 {
-            String::from(&existing[existing.len() - 16384..])
-        } else {
-            existing
-        };
+/// A single log entry
+struct LogEntry {
+    data: [u8; LOG_LINE_MAX],
+    len: usize,
+    target: LogTarget,
+}
 
-        let new_content = format!("{}{}\n", trimmed, line);
+/// Which log file to write to
+#[derive(Clone, Copy, PartialEq)]
+enum LogTarget {
+    Kernel,   // /var/log/kernel.log
+    Sysmond,  // /var/log/sysmond.log
+}
 
-        if fs
-            .write_file(dev, "/var/log/kernel.log", new_content.as_bytes())
-            .is_ok()
-        {
-            // Sync to ensure data is written to disk
-            let _ = fs.sync(dev);
-            return true;
+/// Log buffer state
+struct LogBuffer {
+    entries: [Option<LogEntry>; LOG_BUFFER_SIZE],
+    count: usize,
+    last_flush_ms: i64,
+}
+
+impl LogBuffer {
+    const fn new() -> Self {
+        const NONE: Option<LogEntry> = None;
+        Self {
+            entries: [NONE; LOG_BUFFER_SIZE],
+            count: 0,
+            last_flush_ms: 0,
         }
     }
-    false
+    
+    /// Add a log entry to the buffer
+    fn push(&mut self, line: &str, target: LogTarget) {
+        if self.count >= LOG_BUFFER_SIZE {
+            // Buffer full, drop oldest entry (simple ring behavior)
+            for i in 1..LOG_BUFFER_SIZE {
+                self.entries[i - 1] = self.entries[i].take();
+            }
+            self.count = LOG_BUFFER_SIZE - 1;
+        }
+        
+        let mut entry = LogEntry {
+            data: [0u8; LOG_LINE_MAX],
+            len: 0,
+            target,
+        };
+        
+        let bytes = line.as_bytes();
+        let copy_len = bytes.len().min(LOG_LINE_MAX);
+        entry.data[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        entry.len = copy_len;
+        
+        self.entries[self.count] = Some(entry);
+        self.count += 1;
+    }
+    
+    /// Take all entries for flushing
+    fn drain(&mut self) -> Vec<(String, LogTarget)> {
+        let mut result = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            if let Some(entry) = self.entries[i].take() {
+                if let Ok(s) = core::str::from_utf8(&entry.data[..entry.len]) {
+                    result.push((String::from(s), entry.target));
+                }
+            }
+        }
+        self.count = 0;
+        result
+    }
+}
+
+/// Global log buffer protected by spinlock
+static LOG_BUFFER: crate::Spinlock<LogBuffer> = crate::Spinlock::new(LogBuffer::new());
+
+/// Queue a log entry (safe to call from any hart)
+fn queue_log(line: &str, target: LogTarget) {
+    let mut buffer = LOG_BUFFER.lock();
+    buffer.push(line, target);
+}
+
+/// Flush pending log entries to disk (ONLY call from hart 0!)
+/// Returns the number of entries flushed
+pub fn flush_log_buffer() -> usize {
+    // Only hart 0 should call this
+    let hart_id = crate::get_hart_id();
+    if hart_id != 0 {
+        return 0;
+    }
+    
+    // Get entries from buffer
+    let entries = {
+        let mut buffer = LOG_BUFFER.lock();
+        
+        // Only flush every 5 seconds or if buffer is getting full
+        let now = crate::get_time_ms();
+        if buffer.count < LOG_BUFFER_SIZE / 2 && now - buffer.last_flush_ms < 5000 {
+            return 0;
+        }
+        buffer.last_flush_ms = now;
+        buffer.drain()
+    };
+    
+    if entries.is_empty() {
+        return 0;
+    }
+    
+    let count = entries.len();
+    
+    // Now we can safely access the filesystem (we're on hart 0)
+    let mut fs_guard = crate::FS_STATE.write();
+    let mut blk_guard = crate::BLK_DEV.write();
+    
+    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
+        // Group entries by target
+        let mut kernel_lines = Vec::new();
+        let mut sysmond_lines = Vec::new();
+        
+        for (line, target) in entries {
+            match target {
+                LogTarget::Kernel => kernel_lines.push(line),
+                LogTarget::Sysmond => sysmond_lines.push(line),
+            }
+        }
+        
+        // Write kernel log entries
+        if !kernel_lines.is_empty() {
+            let existing = fs
+                .read_file(dev, "/var/log/kernel.log")
+                .map(|v| String::from_utf8_lossy(&v).into_owned())
+                .unwrap_or_default();
+            
+            let trimmed = if existing.len() > 16384 {
+                String::from(&existing[existing.len() - 16384..])
+            } else {
+                existing
+            };
+            
+            let mut new_content = trimmed;
+            for line in kernel_lines {
+                new_content.push_str(&line);
+                new_content.push('\n');
+            }
+            
+            let _ = fs.write_file(dev, "/var/log/kernel.log", new_content.as_bytes());
+        }
+        
+        // Write sysmond log entries
+        if !sysmond_lines.is_empty() {
+            let existing = fs
+                .read_file(dev, "/var/log/sysmond.log")
+                .map(|v| String::from_utf8_lossy(&v).into_owned())
+                .unwrap_or_default();
+            
+            let trimmed = if existing.len() > 8192 {
+                String::from(&existing[existing.len() - 8192..])
+            } else {
+                existing
+            };
+            
+            let mut new_content = trimmed;
+            for line in sysmond_lines {
+                new_content.push_str(&line);
+                new_content.push('\n');
+            }
+            
+            let _ = fs.write_file(dev, "/var/log/sysmond.log", new_content.as_bytes());
+        }
+        
+        // Sync once at the end
+        let _ = fs.sync(dev);
+    }
+    
+    count
+}
+
+/// Append a line to the kernel log (queued for hart 0 to flush)
+/// Safe to call from any hart
+fn append_to_log(line: &str) -> bool {
+    queue_log(line, LogTarget::Kernel);
+    true
+}
+
+/// Append a line to the sysmond log (queued for hart 0 to flush)
+/// Safe to call from any hart
+fn append_to_sysmond_log(line: &str) -> bool {
+    queue_log(line, LogTarget::Sysmond);
+    true
 }
 
 // ===============================================================================
@@ -605,7 +763,10 @@ pub fn klogd_tick() {
         
         KLOGD_INITIALIZED.store(true, Ordering::Relaxed);
         KLOGD_LAST_RUN.store(now, Ordering::Relaxed);
-        // Skip filesystem I/O - VirtIO doesn't work on secondary harts
+        
+        // Write initial log entry
+        let log_line = format!("[{}] klogd: started", now);
+        append_to_log(&log_line);
         return;
     }
 
@@ -614,13 +775,17 @@ pub fn klogd_tick() {
         return;
     }
 
-    // Update timing but skip actual filesystem writes
-    // VirtIO operations hang on secondary harts
+    // Update timing
     KLOGD_LAST_RUN.store(now, Ordering::Relaxed);
-    let _tick = KLOGD_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+    let tick = KLOGD_TICK.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Collect stats silently (could be used for /proc or API later)
-    let (_heap_used, _heap_free) = crate::allocator::heap_stats();
+    // Collect and log memory stats
+    let (heap_used, heap_free) = crate::allocator::heap_stats();
+    let log_line = format!(
+        "[{}] klogd[{}]: heap_used={}KB heap_free={}KB",
+        now, tick, heap_used / 1024, heap_free / 1024
+    );
+    append_to_log(&log_line);
 }
 
 /// Run sysmond work if 10 seconds have passed since last run
@@ -635,7 +800,10 @@ pub fn sysmond_tick() {
         }
         SYSMOND_INITIALIZED.store(true, Ordering::Relaxed);
         SYSMOND_LAST_RUN.store(now, Ordering::Relaxed);
-        // Skip filesystem I/O - VirtIO doesn't work on secondary harts
+        
+        // Write initial log entry
+        let log_line = format!("[{}] sysmond: started", now);
+        append_to_sysmond_log(&log_line);
         return;
     }
 
@@ -645,15 +813,21 @@ pub fn sysmond_tick() {
     }
 
     SYSMOND_LAST_RUN.store(now, Ordering::Relaxed);
-    let _tick = SYSMOND_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+    let tick = SYSMOND_TICK.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Collect system stats silently (could be used for /proc or API later)
-    let _process_count = PROC_SCHEDULER.process_count();
-    let _queued_count = PROC_SCHEDULER.total_queued();
-    let _num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
+    // Collect and log system stats
+    let process_count = PROC_SCHEDULER.process_count();
+    let queued_count = PROC_SCHEDULER.total_queued();
+    let num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
 
-    // Reap zombies (no filesystem needed)
-    let _reaped = PROC_SCHEDULER.reap_zombies();
+    // Reap zombies
+    let reaped = PROC_SCHEDULER.reap_zombies();
+
+    let log_line = format!(
+        "[{}] sysmond[{}]: procs={} queued={} harts={} reaped={}",
+        now, tick, process_count, queued_count, num_harts, reaped
+    );
+    append_to_sysmond_log(&log_line);
 }
 
 /// Daemon service entry point for klogd

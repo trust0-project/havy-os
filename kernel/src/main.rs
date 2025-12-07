@@ -440,6 +440,11 @@ fn hart_loop(hart_id: usize) -> ! {
             }
         }
 
+        // Hart 0 runs periodic tasks (log buffer flush, sysinfo update, etc.)
+        if hart_id == 0 {
+            run_hart0_tasks();
+        }
+
         // If we haven't done any work recently, sleep briefly to save power
         // Check for IPI wakeup periodically
         if !did_work {
@@ -1085,9 +1090,14 @@ pub fn get_time_ms() -> i64 {
 /// Since VirtIO is only accessible from hart 0 (which runs the shell loop),
 /// we call their tick functions directly from the shell loop.
 fn run_hart0_tasks() {
+
+    // Flush any pending log entries to disk (only hart 0 does this)
+    init::flush_log_buffer();
+    
     // Run daemon tick functions (they check their own timing internally)
     init::klogd_tick();
     init::sysmond_tick();
+    
     
     // Update system info MMIO device (for emulator UI)
     update_sysinfo();
