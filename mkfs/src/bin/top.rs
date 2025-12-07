@@ -314,6 +314,8 @@ mod wasm {
         for &b in bytes {
             if b >= b'0' && b <= b'9' {
                 n = n.saturating_mul(10).saturating_add((b - b'0') as u64);
+            } else {
+                break;  // Stop at first non-digit!
             }
         }
         n
@@ -322,15 +324,23 @@ mod wasm {
     fn parse_i64(bytes: &[u8]) -> i64 {
         let mut n: i64 = 0;
         let mut negative = false;
+        let mut started = false;
+
         for &b in bytes {
             match b {
-                b'-' if n == 0 => negative = true,
+                b'-' if !started => {
+                    negative = true;
+                    started = true;
+                }
                 b'0'..=b'9' => {
                     n = n.saturating_mul(10).saturating_add((b - b'0') as i64);
+                    started = true;
                 }
+                _ if started => break,  // Stop at first non-digit after starting!
                 _ => {}
             }
         }
+
         if negative { -n } else { n }
     }
 
