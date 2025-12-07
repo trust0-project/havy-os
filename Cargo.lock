@@ -537,6 +537,7 @@ name = "kernel"
 version = "0.1.25"
 dependencies = [
  "aes-gcm",
+ "bitflags 2.10.0",
  "embedded-io",
  "embedded-io-async",
  "embedded-tls",

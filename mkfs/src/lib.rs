@@ -108,6 +108,10 @@ pub mod syscalls {
         pub fn wasm_job_status(job_id: i32) -> i32;
         /// Get total hart count (including primary)
         pub fn hart_count() -> i32;
+        /// Get CPU info for a specific CPU
+        /// Writes to out_ptr: u32 state, u32 running_pid, u8 utilization, u64 context_switches = 17 bytes
+        /// Returns 0 on success, -1 if CPU not online or error
+        pub fn cpu_info(cpu_id: i32, out_ptr: *mut u8) -> i32;
         /// Get list of all processes/tasks
         /// Format: "pid:name:state:priority:cpu_time:uptime\n" per task
         /// Returns bytes written or -1 on error
@@ -439,6 +443,32 @@ pub mod syscalls {
     /// Get total hart count (including primary)
     pub fn get_hart_count() -> usize {
         unsafe { hart_count() as usize }
+    }
+
+    /// CPU information
+    pub struct CpuInfo {
+        pub state: u32,           // 0=Offline, 1=Online, 2=Idle, 3=Running, 4=Halted
+        pub running_pid: u32,     // 0 if idle
+        pub utilization: u8,      // 0-100%
+        pub context_switches: u64,
+    }
+
+    /// Get CPU info by ID
+    pub fn get_cpu_info(cpu_id: usize) -> Option<CpuInfo> {
+        let mut out = [0u8; 17];
+        let result = unsafe { cpu_info(cpu_id as i32, out.as_mut_ptr()) };
+        if result == 0 {
+            Some(CpuInfo {
+                state: u32::from_le_bytes([out[0], out[1], out[2], out[3]]),
+                running_pid: u32::from_le_bytes([out[4], out[5], out[6], out[7]]),
+                utilization: out[8],
+                context_switches: u64::from_le_bytes([
+                    out[9], out[10], out[11], out[12], out[13], out[14], out[15], out[16],
+                ]),
+            })
+        } else {
+            None
+        }
     }
 
     /// WASM worker statistics
@@ -845,7 +875,7 @@ pub use syscalls::{
     fs_list, fs_list_dir, fs_stat, fs_mkdir, klog_get, net_available, http_get,
     dns_resolve, env_get, random, sleep_ms, disk_stats, heap_stats, shutdown,
     wasm_worker_count, wasm_worker_stats, wasm_submit_job, wasm_job_status, hart_count,
-    ps_list, kill,
+    cpu_info, ps_list, kill,
     // Additional raw syscalls
     version, fs_available, net_info, fs_remove, fs_is_dir,
     service_list_defs, service_list_running, service_start, service_stop,
@@ -858,7 +888,7 @@ pub use syscalls::{
     write_file, list_files, list_dir, file_stat, mkdir, get_klog, is_net_available,
     http_fetch, resolve_dns, getenv, get_random, sleep, get_disk_stats, get_heap_stats,
     poweroff, print_int, int_to_str, format_ipv4,
-    get_worker_count, get_hart_count, get_worker_stats, submit_wasm_job, get_job_status,
+    get_worker_count, get_hart_count, get_cpu_info, get_worker_stats, submit_wasm_job, get_job_status,
     get_ps_list, kill_process,
     // Additional helper wrappers
     get_version, is_fs_available, get_net_info, remove_file, is_dir,
@@ -868,6 +898,6 @@ pub use syscalls::{
     set_parallel_result, get_parallel_result, sum_parallel_results,
     clear_parallel_results, max_parallel_slots, calculate_work_range,
     // Types
-    FileStat, DiskStats, HeapStats, WorkerStats, JobStatus, KillResult,
+    FileStat, DiskStats, HeapStats, CpuInfo, WorkerStats, JobStatus, KillResult,
     NetInfo, PingResult,
 };

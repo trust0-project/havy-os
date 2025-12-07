@@ -12,8 +12,8 @@ mod lock;
 mod wasm;
 mod wasm_service;
 
-// Re-export Spinlock for convenience
-pub use lock::Spinlock;
+// Re-export lock primitives for convenience
+pub use lock::{Spinlock, RwLock, TicketLock, fence_memory, fence_acquire, fence_release};
 mod fs;
 mod http;
 mod net;
@@ -31,7 +31,18 @@ mod klog;
 mod scheduler;
 mod task;
 
+// New process management (properly separating CPUs from processes)
+mod cpu;
+mod process;
+mod sched;
+mod shell;
+
 pub use scheduler::SCHEDULER;
+
+// New process management exports
+pub use cpu::CPU_TABLE;
+pub use process::PROCESS_TABLE;
+pub use sched::SCHEDULER as PROC_SCHEDULER;
 
 extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
@@ -328,73 +339,121 @@ fn secondary_hart_entry(hart_id: usize) -> ! {
     }
 
     // Memory fence ensures we see all init writes from primary hart
-    fence(Ordering::SeqCst);
+    // This is critical for RISC-V weak memory model
+    fence_memory();
 
-    // Register this hart as online
+    // Register this hart as online (legacy counter)
     HARTS_ONLINE.fetch_add(1, Ordering::SeqCst);
 
-    // Enter the secondary hart idle loop
-    secondary_hart_idle(hart_id);
+    // Wait for init to complete (scheduler init + service spawning)
+    // This is critical: we must not enter hart_loop until init_main() finishes
+    // Otherwise we get lock contention with klog and other subsystems
+    while !init::INIT_COMPLETE.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    
+    // Acquire fence after INIT_COMPLETE check ensures we see all
+    // initialization writes (heap allocator, filesystem, services)
+    fence_acquire();
+    
+    // Mark CPU as online in the new CPU table (now that it's initialized)
+    if let Some(cpu) = cpu::CPU_TABLE.get(hart_id) {
+        cpu.online();
+    }
+
+    // Enter the hart loop (same loop used by all harts)
+    hart_loop(hart_id);
 }
 
-/// Secondary hart idle loop.
+/// Universal hart idle loop - Round-Robin Scheduler
 ///
-/// Secondary harts wait for work (IPI wakeup), then check for:
-/// 1. Benchmark tasks (high priority, checked first)
-/// 2. Scheduler tasks (including long-running daemons)
-fn secondary_hart_idle(hart_id: usize) -> ! {
+/// This loop continuously runs all processes assigned to this hart in round-robin fashion.
+/// Each process's entry function is called repeatedly (it should do one "tick" of work).
+/// This is cooperative multitasking - processes must return promptly to allow others to run.
+///
+/// All harts (including hart 0) use this same loop after initialization is complete.
+/// This ensures all harts are treated equally for process scheduling.
+///
+/// For daemons with infinite loops, they should:
+/// 1. Do one iteration of their work
+/// 2. Return (yielding to the scheduler)
+/// The scheduler will call them again on the next round.
+fn hart_loop(hart_id: usize) -> ! {
+    // Track when we last did work (to avoid busy spinning)
+    let mut last_work_time = get_time_ms();
+    
     loop {
-        // Wait for work via IPI - this is the primary coordination mechanism
-        unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
-        }
-
-        // Check if we were woken by an IPI
-        if !is_my_msip_pending() {
-            // Spurious wakeup - go back to sleep
-            continue;
-        }
-
-        // Clear the IPI
-        clear_my_msip();
-
-        // Check for benchmark work first (high priority)
+        let mut did_work = false;
+        
+        // Check for benchmark work first (high priority, one-shot)
         if BENCHMARK.is_active() {
             let mode = BENCHMARK.mode.load(Ordering::Acquire);
             if mode == BenchmarkMode::PrimeCount as usize {
-                // Get our work range
                 let (start, end) = BENCHMARK.get_work_range(hart_id);
                 if start < end {
-                    // Count primes in our range
                     let count = count_primes_in_range(start, end);
-                    // Report result
                     BENCHMARK.report_result(hart_id, count);
                 } else {
-                    // No work for this hart
                     BENCHMARK.report_result(hart_id, 0);
                 }
-                continue;
+                did_work = true;
             }
         }
 
-        // Check for scheduler tasks
-        if SCHEDULER.is_running() {
-            if let Some(task) = SCHEDULER.pick_next(hart_id) {
-                // Mark task as running on this hart
-                task.mark_running(hart_id);
+        // Run scheduler round-robin: pick a process, run one tick, requeue, repeat
+        if sched::SCHEDULER.is_active() {
+            if let Some(process) = sched::SCHEDULER.pick_next(hart_id) {
+                did_work = true;
+                
+                // Mark CPU as running this process
+                if let Some(cpu) = cpu::CPU_TABLE.get(hart_id) {
+                    cpu.assign_process(process.pid, get_time_ms() as u64);
+                }
+
+                // Mark process as running on this CPU
+                process.mark_running(hart_id);
 
                 let start_time = get_time_ms() as u64;
 
-                // Execute the task's entry point
-                // Note: Daemon tasks have infinite loops and won't return
-                (task.entry)();
+                // Execute ONE TICK of the process
+                // Daemons should do one iteration of work and return
+                (process.entry)();
 
-                // If we get here, the task returned (non-daemon or daemon that exited)
+                // Process returned - update stats
                 let elapsed = (get_time_ms() as u64).saturating_sub(start_time);
-                task.add_cpu_time(elapsed);
+                process.add_cpu_time(elapsed);
 
-                // Mark task as finished
-                SCHEDULER.finish_task(task.pid, 0);
+                // Clear CPU's current process
+                if let Some(cpu) = cpu::CPU_TABLE.get(hart_id) {
+                    cpu.clear_process(get_time_ms() as u64, elapsed);
+                }
+
+                // Requeue daemon processes for the next round
+                // Non-daemon processes are one-shot and exit
+                if process.is_daemon() {
+                    sched::requeue(process, hart_id);
+                } else {
+                    sched::SCHEDULER.exit(process.pid, 0);
+                }
+                
+                last_work_time = get_time_ms();
+            }
+        }
+
+        // If we haven't done any work recently, sleep briefly to save power
+        // Check for IPI wakeup periodically
+        if !did_work {
+            let now = get_time_ms();
+            if now - last_work_time > 100 {
+                // Sleep until IPI wakes us
+                if is_my_msip_pending() {
+                    clear_my_msip();
+                    last_work_time = now;
+                } else {
+                    // Brief wait - don't use WFI as it may block indefinitely
+                    // Just yield the CPU briefly
+                    core::hint::spin_loop();
+                }
             }
         }
     }
@@ -510,7 +569,7 @@ fn update_sysinfo() {
     
     // Get disk stats (if filesystem available)
     let (disk_used, disk_total) = {
-        let fs_guard = FS_STATE.lock();
+        let fs_guard = FS_STATE.read();
         if let Some(ref fs) = *fs_guard {
             fs.disk_usage_bytes()
         } else {
@@ -542,11 +601,13 @@ fn update_sysinfo() {
 /// Network state, protected by spinlock.
 static NET_STATE: Spinlock<Option<net::NetState>> = Spinlock::new(None);
 
-/// Filesystem state, protected by spinlock.
-static FS_STATE: Spinlock<Option<fs::FileSystem>> = Spinlock::new(None);
+/// Filesystem state, protected by RwLock for concurrent read access.
+/// Multiple readers (shell commands) can access simultaneously.
+/// Writers (daemon logging) get exclusive access.
+static FS_STATE: RwLock<Option<fs::FileSystem>> = RwLock::new(None);
 
-/// Block device, protected by spinlock.
-static BLK_DEV: Spinlock<Option<virtio_blk::VirtioBlock>> = Spinlock::new(None);
+/// Block device, protected by RwLock for concurrent read access.
+static BLK_DEV: RwLock<Option<virtio_blk::VirtioBlock>> = RwLock::new(None);
 
 /// State for continuous ping (like Linux ping command)
 struct PingState {
@@ -618,7 +679,7 @@ static COMMAND_RUNNING: Spinlock<bool> = Spinlock::new(false);
 // --- TAIL FOLLOW STATE (for tail -f) ----------------------------------------
 
 /// State for tail -f follow mode
-struct TailFollowState {
+pub struct TailFollowState {
     active: bool,
     path: [u8; 128],
     path_len: usize,
@@ -661,7 +722,7 @@ impl TailFollowState {
 }
 
 /// Global tail follow state
-static TAIL_FOLLOW_STATE: Spinlock<TailFollowState> = Spinlock::new(TailFollowState::new());
+pub static TAIL_FOLLOW_STATE: Spinlock<TailFollowState> = Spinlock::new(TailFollowState::new());
 
 /// Poll tail follow for new content (called from uart during blocking reads)
 /// Returns true if content was found and printed
@@ -742,8 +803,8 @@ impl ShellCmdState {
         self.is_running = true;
         // Reset CPU time for this command (don't accumulate from previous commands)
         self.accumulated_cpu_time = 0;
-        // Allocate a real PID from the scheduler
-        self.pid = scheduler::SCHEDULER.allocate_pid();
+        // Allocate a real PID from the process module
+        self.pid = process::allocate_pid();
     }
 
     fn end_command(&mut self, current_time: u64) {
@@ -831,7 +892,7 @@ impl CwdState {
 static CWD_STATE: Spinlock<CwdState> = Spinlock::new(CwdState::new());
 
 /// Initialize CWD to root
-fn cwd_init() {
+pub fn cwd_init() {
     let mut cwd = CWD_STATE.lock();
     cwd.path[0] = b'/';
     cwd.len = 1;
@@ -852,6 +913,11 @@ pub fn cwd_set(path: &str) {
     let len = core::cmp::min(bytes.len(), CWD_MAX_LEN);
     cwd.path[..len].copy_from_slice(&bytes[..len]);
     cwd.len = len;
+}
+
+/// Alias for cwd_get used by shell module
+pub fn get_cwd() -> alloc::string::String {
+    cwd_get()
 }
 
 // --- OUTPUT CAPTURE FOR REDIRECTION ------------------------------------------────
@@ -1030,8 +1096,8 @@ fn run_hart0_tasks() {
 /// Check for new content in a file being followed by tail -f
 /// Returns the new file size if content was found, None otherwise
 fn check_tail_follow(path: &str, last_size: usize) -> Option<usize> {
-    let mut fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
+    let mut fs_guard = FS_STATE.write();
+    let mut blk_guard = BLK_DEV.write();
 
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         if let Some(content) = fs.read_file(dev, path) {
@@ -1062,7 +1128,7 @@ fn check_tail_follow(path: &str, last_size: usize) -> Option<usize> {
 
 /// Parse a command to see if it's a tail -f command
 /// Returns Some((filepath, num_lines)) if it's a follow command, None otherwise
-fn parse_tail_follow_command(cmd: &[u8]) -> Option<(String, usize)> {
+pub fn parse_tail_follow_command(cmd: &[u8]) -> Option<(String, usize)> {
     let cmd_str = core::str::from_utf8(cmd).ok()?;
     let cmd_str = cmd_str.trim();
 
@@ -1129,9 +1195,9 @@ fn parse_tail_follow_command(cmd: &[u8]) -> Option<(String, usize)> {
 
 /// Start tail follow mode for a file
 /// Returns (success, initial_size)
-fn start_tail_follow(path: &str, num_lines: usize) -> (bool, usize) {
-    let mut fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
+pub fn start_tail_follow(path: &str, num_lines: usize) -> (bool, usize) {
+    let mut fs_guard = FS_STATE.write();
+    let mut blk_guard = BLK_DEV.write();
 
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         if let Some(content) = fs.read_file(dev, path) {
@@ -1302,10 +1368,14 @@ fn main() -> ! {
 
     print_section("PROCESS MANAGER");
 
-    // Initialize scheduler with number of online harts
-    SCHEDULER.init(online);
-    print_boot_status("Scheduler initialized", true);
-    print_boot_info("Run queues", &format!("{} (one per hart)", online));
+    // Initialize CPU table (mark primary hart online)
+    cpu::init(get_hart_id, online);
+    print_boot_status("CPU table initialized", true);
+
+    // Initialize process scheduler
+    sched::init(online);
+    print_boot_status("Process scheduler initialized", true);
+    print_boot_info("Run queues", &format!("{} (one per CPU)", online));
 
     // Run init directly on primary hart (spawns daemons to secondary harts)
     // Note: We don't spawn init as a task - it runs synchronously during boot
@@ -1319,248 +1389,60 @@ fn main() -> ! {
         services > 0,
     );
 
-    // --- BOOT COMPLETE ---------------------------------------------------────
-    print_section(&format!("\x1b[1;97mBAVY OS BOOT COMPLETE!\x1b[0m"));
+    // ═══════════════════════════════════════════════════════════════════
+    // SPAWN SHELL AS HIGH-PRIORITY DAEMON
+    // ═══════════════════════════════════════════════════════════════════
+    // The shell is now a schedulable process instead of a hardcoded loop.
+    // This makes hart 0 equal to all other harts - they all run processes
+    // from the scheduler.
+    
+    // Register shell service definition
+    init::register_service_def(
+        "shell",
+        "Interactive command shell",
+        shell::shell_service,
+        process::Priority::High,  // High priority for responsive input
+        None,  // Can run on any hart
+    );
+    
+    // Spawn shell as a high-priority daemon
+    // Using Realtime priority to ensure it runs frequently for responsive input
+    let shell_pid = sched::SCHEDULER.spawn_daemon_on_cpu(
+        "shell",
+        shell::shell_service,
+        process::Priority::Realtime,
+        Some(0),  // Start on hart 0 but can migrate
+    );
+    
+    init::register_service("shell", shell_pid, Some(0));
+    
+    print_boot_info("Shell daemon", &format!("PID {} (priority: realtime)", shell_pid));
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // RELEASE SECONDARY HARTS
+    // ═══════════════════════════════════════════════════════════════════
+    // Now that ALL processes (daemons + shell) are spawned and in their
+    // respective queues, we can release secondary harts to start running.
+    
+    // Full memory fence ensures all process spawning is visible to secondary harts
+    fence_memory();
+    
+    // Set INIT_COMPLETE - this releases secondary harts from their spin loop
+    init::INIT_COMPLETE.store(true, Ordering::Release);
+    print_boot_info("Secondary harts", "released");
+    
+    // ═══════════════════════════════════════════════════════════════════
+    // ENTER UNIFIED HART LOOP
+    // ═══════════════════════════════════════════════════════════════════
+    // Hart 0 now joins the same scheduler loop as secondary harts.
+    // All harts are equal - they all pick processes from their queues
+    // and run them cooperatively.
+    
+    print_boot_info("Hart 0", "entering scheduler loop");
     uart::write_line("");
-
-    uart::write_line("");
-
-    cwd_init();
-    shell_cmd_init();
-    print_prompt();
-
-    let console = uart::Console::new();
-    let mut buffer = [0u8; 128];
-    let mut len = 0usize;
-    let mut count: usize = 0;
-    let mut last_newline: u8 = 0; // Track last newline char to handle \r\n sequences
-
-    // Command history
-    const HISTORY_SIZE: usize = 16;
-    let mut history: [[u8; 128]; HISTORY_SIZE] = [[0u8; 128]; HISTORY_SIZE];
-    let mut history_lens: [usize; HISTORY_SIZE] = [0; HISTORY_SIZE];
-    let mut history_count: usize = 0; // Total commands stored
-    let mut history_pos: usize = 0; // Current position when navigating (0 = newest)
-    let mut browsing_history: bool = false;
-
-    // Escape sequence state
-    let mut esc_state: u8 = 0; // 0 = normal, 1 = got ESC, 2 = got ESC[
-
-    // Track last time we ran scheduled tasks
-    let mut last_task_run: i64 = get_time_ms();
-
-    // Tail follow mode state
-    let mut tail_follow_mode = false;
-    let mut tail_follow_path: [u8; 128] = [0u8; 128];
-    let mut tail_follow_path_len: usize = 0;
-    let mut tail_follow_last_size: usize = 0;
-    let mut tail_follow_last_check: i64 = 0;
-
-    loop {
-        // Poll network stack (non-blocking)
-        poll_network();
-
-        // Use blocking read - wait for input
-        let byte = console.read_byte_blocking();
-
-        // Blocking read always returns valid byte, so no need to check for 0
-
-        // Check for Ctrl+C (0x03) to cancel running commands or exit follow mode
-        if byte == 0x03 {
-            if tail_follow_mode {
-                // Exit tail follow mode
-                tail_follow_mode = false;
-                TAIL_FOLLOW_STATE.lock().stop();
-                uart::write_line("");
-                uart::write_line("\x1b[2m--- tail -f stopped ---\x1b[0m");
-                print_prompt();
-                len = 0;
-                continue;
-            }
-            if cancel_running_command() {
-                // Command was cancelled, print new prompt
-                print_prompt();
-                len = 0;
-                browsing_history = false;
-                history_pos = 0;
-            }
-            continue;
-        }
-
-        // In follow mode, 'q' also exits
-        if tail_follow_mode && (byte == b'q' || byte == b'Q') {
-            tail_follow_mode = false;
-            TAIL_FOLLOW_STATE.lock().stop();
-            uart::write_line("");
-            uart::write_line("\x1b[2m--- tail -f stopped ---\x1b[0m");
-            print_prompt();
-            len = 0;
-            continue;
-        }
-
-        // Ignore other input while in follow mode
-        if tail_follow_mode {
-            continue;
-        }
-
-        // Handle escape sequences for arrow keys
-        if esc_state == 1 {
-            if byte == b'[' {
-                esc_state = 2;
-                continue;
-            } else {
-                esc_state = 0;
-                // Fall through to handle the byte normally
-            }
-        } else if esc_state == 2 {
-            esc_state = 0;
-            match byte {
-                b'A' => {
-                    // Up arrow - go to older command
-                    if history_count > 0 {
-                        let max_pos = if history_count < HISTORY_SIZE {
-                            history_count
-                        } else {
-                            HISTORY_SIZE
-                        };
-                        if history_pos < max_pos {
-                            if !browsing_history {
-                                browsing_history = true;
-                                history_pos = 0;
-                            }
-                            if history_pos < max_pos {
-                                // Clear current line
-                                clear_input_line(len);
-
-                                // Get command from history (0 = most recent)
-                                let idx =
-                                    ((history_count - 1 - history_pos) % HISTORY_SIZE) as usize;
-                                len = history_lens[idx];
-                                buffer[..len].copy_from_slice(&history[idx][..len]);
-
-                                // Display the command
-                                uart::write_bytes(&buffer[..len]);
-
-                                if history_pos + 1 < max_pos {
-                                    history_pos += 1;
-                                }
-                            }
-                        }
-                    }
-                    continue;
-                }
-                b'B' => {
-                    // Down arrow - go to newer command
-                    if browsing_history && history_pos > 0 {
-                        history_pos -= 1;
-
-                        // Clear current line
-                        clear_input_line(len);
-
-                        if history_pos == 0 {
-                            // Back to empty line (current input)
-                            browsing_history = false;
-                            len = 0;
-                        } else {
-                            // Get command from history
-                            let idx = ((history_count - history_pos) % HISTORY_SIZE) as usize;
-                            len = history_lens[idx];
-                            buffer[..len].copy_from_slice(&history[idx][..len]);
-
-                            // Display the command
-                            uart::write_bytes(&buffer[..len]);
-                        }
-                    } else if browsing_history {
-                        // At position 0, clear and go back to empty
-                        clear_input_line(len);
-                        browsing_history = false;
-                        len = 0;
-                    }
-                    continue;
-                }
-                b'C' | b'D' => {
-                    // Right/Left arrow - ignore for now
-                    continue;
-                }
-                _ => {
-                    // Unknown escape sequence, ignore
-                    continue;
-                }
-            }
-        }
-
-        match byte {
-            0x1b => {
-                // ESC - start of escape sequence
-                esc_state = 1;
-            }
-            b'\r' | b'\n' => {
-                // Skip second char of \r\n or \n\r sequence
-                if (last_newline == b'\r' && byte == b'\n')
-                    || (last_newline == b'\n' && byte == b'\r')
-                {
-                    last_newline = 0;
-                    continue;
-                }
-                last_newline = byte;
-                uart::write_line(""); // Echo the newline
-
-                // Save to history if non-empty
-                if len > 0 {
-                    let idx = history_count % HISTORY_SIZE;
-                    history[idx][..len].copy_from_slice(&buffer[..len]);
-                    history_lens[idx] = len;
-                    history_count += 1;
-                }
-
-                // Check for tail -f command (handle specially for real-time following)
-                if let Some((path, num_lines)) = parse_tail_follow_command(&buffer[..len]) {
-                    // Resolve the path
-                    let resolved = resolve_path(&path);
-
-                    // Start follow mode
-                    let (success, initial_size) = start_tail_follow(&resolved, num_lines);
-                    if success {
-                        tail_follow_mode = true;
-                        // Store in static state for uart polling
-                        TAIL_FOLLOW_STATE.lock().start(&resolved, initial_size);
-                        // Don't print prompt - we're in follow mode
-                    } else {
-                        print_prompt();
-                    }
-                } else {
-                    handle_line(&buffer, len, &mut count);
-                    print_prompt();
-                }
-                len = 0;
-                browsing_history = false;
-                history_pos = 0;
-            }
-            // Backspace / Delete
-            8 | 0x7f => {
-                if len > 0 {
-                    len -= 1;
-                    // Move cursor back, erase char, move back again.
-                    // (Simple TTY-style backspace handling.)
-                    uart::write_str("\u{8} \u{8}");
-                }
-            }
-            // Tab - autocomplete
-            b'\t' => {
-                last_newline = 0;
-                let new_len = handle_tab_completion(&mut buffer, len);
-                len = new_len;
-            }
-            _ => {
-                last_newline = 0; // Reset newline tracking on regular input
-                if len < buffer.len() {
-                    buffer[len] = byte;
-                    len += 1;
-                    uart::Console::new().write_byte(byte);
-                }
-            }
-        }
-    }
+    
+    // Enter the hart loop (never returns)
+    hart_loop(0);
 }
 
 /// Clear the current input line on the terminal
@@ -1573,7 +1455,7 @@ fn clear_input_line(len: usize) {
 
 /// Handle tab completion
 /// Returns the new buffer length after completion
-fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
+pub fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -1613,8 +1495,8 @@ fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
 
         // Also check /usr/bin/ for scripts
         {
-            let mut fs_guard = FS_STATE.lock();
-            let mut blk_guard = BLK_DEV.lock();
+            let mut fs_guard = FS_STATE.write();
+            let mut blk_guard = BLK_DEV.write();
             if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let files = fs.list_dir(dev, "/");
                 for f in files {
@@ -1653,8 +1535,8 @@ fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
         };
 
         {
-            let mut fs_guard = FS_STATE.lock();
-            let mut blk_guard = BLK_DEV.lock();
+            let mut fs_guard = FS_STATE.write();
+            let mut blk_guard = BLK_DEV.write();
             if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let files = fs.list_dir(dev, "/");
                 let mut seen_dirs: Vec<String> = Vec::new();
@@ -1827,17 +1709,17 @@ fn init_storage() {
         uart::write_str("    \x1b[0;90m+-\x1b[0m Block Device: \x1b[1;97m");
         uart::write_u64(blk.capacity() * 512 / 1024 / 1024);
         uart::write_line(" MiB\x1b[0m");
-        *BLK_DEV.lock() = Some(blk);
+        *BLK_DEV.write() = Some(blk);
         print_boot_status("VirtIO-Block driver loaded", true);
     } else {
         print_boot_status("No storage device found", false);
     }
 
-    let mut blk_guard = BLK_DEV.lock();
+    let mut blk_guard = BLK_DEV.write();
     if let Some(ref mut blk) = *blk_guard {
         if let Some(fs) = fs::FileSystem::init(blk) {
             uart::write_line("    \x1b[1;32m[OK]\x1b[0m SFS Mounted (R/W)");
-            *FS_STATE.lock() = Some(fs);
+            *FS_STATE.write() = Some(fs);
         }
     }
 }
@@ -1845,12 +1727,12 @@ fn init_storage() {
 fn init_fs() {
     if let Some(blk) = virtio_blk::VirtioBlock::probe() {
         uart::write_line("    \x1b[1;32m[OK]\x1b[0m VirtIO Block found");
-        *BLK_DEV.lock() = Some(blk);
+        *BLK_DEV.write() = Some(blk);
 
-        let mut blk_guard = BLK_DEV.lock();
+        let mut blk_guard = BLK_DEV.write();
         if let Some(ref mut dev) = *blk_guard {
             if let Some(fs) = fs::FileSystem::init(dev) {
-                *FS_STATE.lock() = Some(fs);
+                *FS_STATE.write() = Some(fs);
                 uart::write_line("    \x1b[1;32m[OK]\x1b[0m FileSystem Mounted");
             }
         }
@@ -1924,7 +1806,7 @@ fn init_network() {
 }
 
 /// Cancel any running command (called when Ctrl+C is pressed)
-fn cancel_running_command() -> bool {
+pub fn cancel_running_command() -> bool {
     let running = *COMMAND_RUNNING.lock();
     if !running {
         return false;
@@ -2122,7 +2004,7 @@ fn trim_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
+pub fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
     // Trim leading/trailing whitespace (spaces and tabs only)
     let mut start = 0;
     let mut end = len;
@@ -2181,8 +2063,8 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
             // Resolve path relative to CWD
             let resolved_path = resolve_path(filename);
 
-            let mut fs_guard = FS_STATE.lock();
-            let mut blk_guard = BLK_DEV.lock();
+            let mut fs_guard = FS_STATE.write();
+            let mut blk_guard = BLK_DEV.write();
             if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                 let final_data = if redirect_mode == RedirectMode::Append {
                     // Read existing file content and append
@@ -2231,6 +2113,8 @@ fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
 fn execute_command(cmd: &[u8], args: &[u8]) {
     let cmd_str = core::str::from_utf8(cmd).unwrap_or("");
     let args_str = core::str::from_utf8(args).unwrap_or("");
+
+    
     // =============================================================================
     // SCRIPT RESOLUTION (PATH-like)
     // Fallback to script-based commands for flexibility/customization
@@ -2327,8 +2211,8 @@ pub fn resolve_path(path: &str) -> alloc::string::String {
 
 /// Check if a path exists (has files under it or is a file)
 pub fn path_exists(path: &str) -> bool {
-    let mut fs_guard = FS_STATE.lock();
-    let mut blk_guard = BLK_DEV.lock();
+    let mut fs_guard = FS_STATE.write();
+    let mut blk_guard = BLK_DEV.write();
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         // Root always exists
         if path == "/" {

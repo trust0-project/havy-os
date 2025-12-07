@@ -140,8 +140,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let fs_guard = crate::FS_STATE.read();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_ref(), blk_guard.as_mut())
                                 {
@@ -177,8 +177,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let fs_guard = crate::FS_STATE.read();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_ref(), blk_guard.as_mut())
                                 {
@@ -221,8 +221,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             && mem.read(&caller, data_ptr as usize, &mut data_buf).is_ok()
                         {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let mut fs_guard = crate::FS_STATE.write();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -247,8 +247,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
-                    let mut fs_guard = crate::FS_STATE.lock();
-                    let mut blk_guard = crate::BLK_DEV.lock();
+                    let mut fs_guard = crate::FS_STATE.write();
+                    let mut blk_guard = crate::BLK_DEV.write();
                     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                         let files = fs.list_dir(dev, "/");
                         // Format as simple newline-separated list: "name:size\n"
@@ -505,8 +505,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let mut fs_guard = crate::FS_STATE.write();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -568,8 +568,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(dir_path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let mut fs_guard = crate::FS_STATE.write();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -625,8 +625,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let mut fs_guard = crate::FS_STATE.write();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -754,7 +754,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, out_ptr: i32| -> i32 {
                     if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
-                        let fs_guard = crate::FS_STATE.lock();
+                        let fs_guard = crate::FS_STATE.read();
                         if let Some(ref fs) = *fs_guard {
                             let (used, total) = fs.disk_usage_bytes();
                             let mut out = [0u8; 16];
@@ -941,9 +941,50 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         )
         .map_err(|e| format!("define hart_count: {:?}", e))?;
 
+    // Syscall: cpu_info(cpu_id, out_ptr) -> i32
+    // Gets information about a specific CPU.
+    // Writes to out_ptr: u32 state, u32 running_pid, u8 utilization, u64 context_switches = 17 bytes
+    // Returns 0 on success, -1 if CPU not online or error.
+    linker
+        .define(
+            "env",
+            "cpu_info",
+            Func::wrap(
+                &mut store,
+                |mut caller: Caller<'_, WasmContext>, cpu_id: i32, out_ptr: i32| -> i32 {
+                    if cpu_id < 0 {
+                        return -1;
+                    }
+                    
+                    if let Some(cpu) = crate::cpu::CPU_TABLE.get(cpu_id as usize) {
+                        if !cpu.is_online() {
+                            return -1;
+                        }
+                        
+                        let info = cpu.info();
+                        
+                        if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                            // Pack: state(4) + running_pid(4) + utilization(1) + context_switches(8) = 17 bytes
+                            let mut out = [0u8; 17];
+                            out[0..4].copy_from_slice(&(info.state as u32).to_le_bytes());
+                            out[4..8].copy_from_slice(&info.running_process.unwrap_or(0).to_le_bytes());
+                            out[8] = info.utilization;
+                            out[9..17].copy_from_slice(&info.context_switches.to_le_bytes());
+                            
+                            if mem.write(&mut caller, out_ptr as usize, &out).is_ok() {
+                                return 0;
+                            }
+                        }
+                    }
+                    -1
+                },
+            ),
+        )
+        .map_err(|e| format!("define cpu_info: {:?}", e))?;
+
     // Syscall: ps_list(buf_ptr, buf_len) -> i32
-    // Gets list of all processes/tasks. Returns bytes written or -1 on error.
-    // Format: "pid:name:state:priority:cpu:uptime\n" for each task (cpu = hart number, -1 if not running)
+    // Gets list of all running processes. Returns bytes written or -1 on error.
+    // Format: "pid:name:state:priority:cpu:uptime\n" for each process (cpu = hart number, -1 if not assigned)
     linker
         .define(
             "env",
@@ -951,61 +992,64 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
-                    let tasks = crate::scheduler::SCHEDULER.list_tasks();
                     let mut output = String::new();
+                    let mut seen_pids: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
                     
                     // Include the current shell command (which is the one calling ps_list)
-                    // This shows the currently running WASM command with its CPU (hart number)
                     if let Some((name, pid, cpu, uptime, is_running)) = crate::get_shell_cmd_info() {
                         let state = if is_running { "R+" } else { "S" };
+                        seen_pids.insert(pid);
                         output.push_str(&format!(
                             "{}:{}:{}:{}:{}:{}\n",
-                            pid,
-                            name,
-                            state,
-                            "normal",
+                            pid, name, state, "normal", cpu, uptime
+                        ));
+                    }
+                    
+                    // Include processes from new scheduler
+                    let processes = crate::sched::list_processes();
+                    for proc in &processes {
+                        if seen_pids.contains(&proc.pid) {
+                            continue;
+                        }
+                        seen_pids.insert(proc.pid);
+                        let cpu = proc.cpu.map(|c| c as i64).unwrap_or(-1);
+                        output.push_str(&format!(
+                            "{}:{}:{}:{}:{}:{}\n",
+                            proc.pid,
+                            proc.name,
+                            proc.state.code(),
+                            match proc.priority {
+                                crate::process::Priority::Idle => "idle",
+                                crate::process::Priority::Low => "low",
+                                crate::process::Priority::Normal => "normal",
+                                crate::process::Priority::High => "high",
+                                crate::process::Priority::Realtime => "rt",
+                            },
                             cpu,
-                            uptime
+                            proc.uptime_ms
                         ));
                     }
                     
-                    // Include scheduler tasks
-                    let mut seen_names: alloc::collections::BTreeSet<&str> = alloc::collections::BTreeSet::new();
-                    for task in &tasks {
-                        seen_names.insert(&task.name);
-                        // Format: pid:name:state:priority:cpu:uptime\n (cpu = assigned hart number)
-                        output.push_str(&format!(
-                            "{}:{}:{}:{}:{}:{}\n",
-                            task.pid,
-                            task.name,
-                            task.state.as_str(),
-                            task.priority.as_str(),
-                            task.cpu,
-                            task.uptime
-                        ));
-                    }
-                    
-                    // Include registered services (klogd, sysmond, etc.)
-                    // Skip services that already appear as scheduler tasks (to avoid duplicates)
+                    // Include kernel services (klogd, sysmond)
+                    // Only show services that aren't wasmworkerd (those are CPUs, not processes)
                     let services = crate::init::list_services();
                     for svc in services {
-                        if svc.status == crate::init::ServiceStatus::Running {
-                            // Skip if this service name is already in the task list
-                            if seen_names.contains(svc.name.as_str()) {
-                                continue;
-                            }
-                            let hart = svc.hart.unwrap_or(0);
-                            let uptime = crate::get_time_ms() as u64 - svc.started_at;
-                            output.push_str(&format!(
-                                "{}:{}:{}:{}:{}:{}\n",
-                                svc.pid,
-                                svc.name,
-                                "R+", // Running via polling
-                                "normal",
-                                hart,
-                                uptime
-                            ));
+                        if svc.status != crate::init::ServiceStatus::Running {
+                            continue;
                         }
+                        if seen_pids.contains(&svc.pid) {
+                            continue;
+                        }
+                        // Skip wasmworkerd services - they are internal and not user-visible processes
+                        if svc.name.starts_with("wasmworkerd") {
+                            continue;
+                        }
+                        let hart = svc.hart.unwrap_or(0);
+                        let uptime = crate::get_time_ms() as u64 - svc.started_at;
+                        output.push_str(&format!(
+                            "{}:{}:{}:{}:{}:{}\n",
+                            svc.pid, svc.name, "R+", "normal", hart, uptime
+                        ));
                     }
                     
                     let bytes = output.as_bytes();
@@ -1040,12 +1084,12 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         return -2; // Cannot kill init
                     }
                     
-                    // First try to kill as a scheduler task
-                    if crate::scheduler::SCHEDULER.kill(pid as u32) {
+                    // Try to kill as a process
+                    if crate::sched::kill(pid as u32) {
                         return 0; // Success
                     }
                     
-                    // Then try to stop as a service
+                    // Try to stop as a service
                     if crate::init::stop_service_by_pid(pid as u32) {
                         return 0; // Success
                     }
@@ -1092,7 +1136,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             "env",
             "fs_available",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
-                let fs_guard = crate::FS_STATE.lock();
+                let fs_guard = crate::FS_STATE.read();
                 if fs_guard.is_some() { 1 } else { 0 }
             }),
         )
@@ -1153,8 +1197,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let mut fs_guard = crate::FS_STATE.write();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -1184,8 +1228,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.lock();
-                                let mut blk_guard = crate::BLK_DEV.lock();
+                                let mut fs_guard = crate::FS_STATE.write();
+                                let mut blk_guard = crate::BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {

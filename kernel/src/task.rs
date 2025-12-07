@@ -1,5 +1,21 @@
 //! Task/Process abstraction for the kernel
 //!
+//! **DEPRECATED**: This module is being replaced by `process.rs`.
+//! New code should use `crate::process::Process` instead of `crate::task::Task`.
+//! The `Pid` type from this module is deprecated - use `crate::process::Pid`.
+//!
+//! This module remains for backward compatibility with:
+//! - `scheduler.rs` (legacy scheduler)
+//! - Existing code that hasn't been migrated yet
+//!
+//! ## Migration Guide
+//! - `Task` → `Process`
+//! - `TaskState` → `ProcessState`
+//! - `Priority` → `process::Priority`
+//! - `TaskEntry` → `ProcessEntry`
+//! - `Pid` → `process::Pid`
+//!
+//! ## Original Description
 //! Provides Linux-like task management with:
 //! - Task Control Block (TCB) similar to Linux's task_struct
 //! - Task states (Ready, Running, Sleeping, Zombie)

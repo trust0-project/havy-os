@@ -1,5 +1,17 @@
 //! Multi-hart task scheduler
 //!
+//! **DEPRECATED**: This module is being replaced by `sched.rs`.
+//! New code should use `crate::sched::SCHEDULER` instead of `crate::scheduler::SCHEDULER`.
+//!
+//! This module remains for backward compatibility during the migration period.
+//! Once all code is migrated to use the new process scheduler, this module will be removed.
+//!
+//! ## Migration Guide
+//! - `SCHEDULER.spawn_daemon()` → `sched::SCHEDULER.spawn_daemon()`
+//! - `SCHEDULER.kill()` → `sched::kill()`
+//! - `SCHEDULER.allocate_pid()` → `process::allocate_pid()`
+//!
+//! ## Original Description
 //! Provides a simple priority-based scheduler that distributes tasks across
 //! available harts. Features:
 //! - Per-hart run queues

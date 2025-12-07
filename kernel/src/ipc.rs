@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::task::Pid;
+use crate::process::Pid;
 use crate::Spinlock;
 
 /// Channel identifier

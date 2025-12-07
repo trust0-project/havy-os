@@ -134,6 +134,11 @@ pub fn write_bytes(bytes: &[u8]) {
     }
 }
 
+/// Write a single byte to the UART.
+pub fn write_byte(byte: u8) {
+    Console::new().write_byte(byte);
+}
+
 /// Write an unsigned integer in decimal.
 pub fn write_u64(mut n: u64) {
     let mut console = Console::new();

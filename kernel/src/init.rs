@@ -14,15 +14,17 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::klog::{klog_debug, klog_error, klog_info};
-use crate::scheduler::SCHEDULER;
-use crate::task::Priority;
 use crate::Spinlock;
+
+// Process management
+use crate::process::{Priority, ProcessEntry};
+use crate::sched::SCHEDULER as PROC_SCHEDULER;
 
 /// Init system state
 static INIT_STATE: Spinlock<InitState> = Spinlock::new(InitState::new());
 
-/// Whether init has completed startup
-static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
+/// Whether init has completed startup (public for secondary hart sync)
+pub static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 /// Number of services started
 static SERVICES_STARTED: AtomicUsize = AtomicUsize::new(0);
@@ -50,8 +52,8 @@ impl ServiceStatus {
 pub struct ServiceDef {
     pub name: String,
     pub description: String,
-    pub entry: crate::task::TaskEntry,
-    pub priority: crate::task::Priority,
+    pub entry: ProcessEntry,
+    pub priority: Priority,
     pub preferred_hart: Option<usize>,
 }
 
@@ -90,34 +92,31 @@ impl InitState {
 ///
 /// This runs on the primary hart and is responsible for bringing up the system.
 pub fn init_main() {
-    klog_info("init", "Starting init system (PID 1)");
+    // Use raw UART output to avoid any locking (heap allocator, klog buffer)
+    // Secondary harts are spinning but may affect shared resources
+    crate::uart::write_line("[init] Starting init system (PID 1)");
 
     // Phase 1: Create required directories
-    klog_info("init", "Phase 1: Creating system directories");
+    crate::uart::write_line("[init] Phase 1: Creating system directories");
     ensure_directories();
 
     // Phase 2: Start system services
-    klog_info("init", "Phase 2: Starting system services");
+    crate::uart::write_line("[init] Phase 2: Starting system services");
     start_system_services();
 
     // Phase 3: Run init scripts
-    klog_info("init", "Phase 3: Running init scripts");
+    crate::uart::write_line("[init] Phase 3: Running init scripts");
     run_init_scripts();
 
-    // Mark init complete
-    INIT_COMPLETE.store(true, Ordering::Release);
-
-    let services = SERVICES_STARTED.load(Ordering::Relaxed);
-    klog_info(
-        "init",
-        &format!("Init complete. {} services started.", services),
-    );
-
-    // Write initial boot message to kernel.log
+    // NOTE: We do NOT set INIT_COMPLETE here anymore!
+    // The shell is spawned in main() after init_main() returns,
+    // and INIT_COMPLETE is set only after shell is spawned.
+    // This prevents secondary harts from racing with shell initialization.
+    
+    crate::uart::write_line("[init] Init phase complete, waiting for shell spawn...");
+    
+    // Write initial boot message to kernel.log (now safe to use allocator)
     write_boot_log();
-
-    // Init process is done - it doesn't need to loop
-    // The scheduler will continue running other tasks
 }
 
 /// Ensure required system directories exist
@@ -132,85 +131,123 @@ fn ensure_directories() {
     }
 }
 
-/// Get the least loaded hart for scheduling a new service
-/// Returns hart 0 if single-hart mode, otherwise finds the least loaded hart
+/// Get the least loaded secondary hart for scheduling a new service
+/// Returns a secondary hart if available, falls back to hart 0 only if single-hart mode.
+/// NOTE: Hart 0 (BSP) runs the shell loop and doesn't pick processes from the scheduler,
+/// so we should prefer secondary harts for spawning daemon processes.
 fn get_least_loaded_hart() -> usize {
     let num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
     if num_harts <= 1 {
+        // Single hart mode - everything runs on hart 0
         return 0;
     }
     
-    // Use the scheduler's load balancing to find least loaded hart
-    SCHEDULER.find_least_loaded_hart()
+    // Find least loaded secondary hart (avoiding BSP/hart 0)
+    let mut best_hart = 1; // Start with first secondary hart
+    let mut min_load = usize::MAX;
+    
+    for hart_id in 1..num_harts {
+        if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
+            if !cpu.is_online() {
+                continue;
+            }
+            // Check queue length from scheduler
+            let queue_len = PROC_SCHEDULER.queue_length(hart_id);
+            if queue_len < min_load {
+                min_load = queue_len;
+                best_hart = hart_id;
+            }
+        }
+    }
+    
+    best_hart
 }
 
 /// Start core system services
 fn start_system_services() {
     let num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
-    klog_info(
-        "init",
-        &format!("{} harts available for parallel tasks", num_harts),
-    );
+    let num_secondary_harts = if num_harts > 1 { num_harts - 1 } else { 0 };
+    
+    // Use raw UART to avoid heap allocation during init
+    crate::uart::write_str("[init] Harts available: ");
+    crate::uart::write_u64(num_harts as u64);
+    crate::uart::write_str(" (");
+    crate::uart::write_u64(num_secondary_harts as u64);
+    crate::uart::write_line(" secondary)");
 
-    // Initialize WASM service for multi-hart execution FIRST
-    // This creates IPC channels for each secondary hart
+    // Initialize WASM service for multi-hart execution
     if num_harts > 1 {
         crate::wasm_service::init(num_harts);
-        klog_info(
-            "init",
-            &format!("WASM service initialized for {} worker harts", num_harts - 1),
-        );
-
-        // Register and start WASM worker services on secondary harts
-        for hart_id in 1..num_harts {
-            let service_name = format!("wasmworkerd-{}", hart_id);
-            register_service_def(
-                &service_name,
-                &format!("WASM worker daemon on hart {}", hart_id),
-                wasm_worker_service,
-                Priority::Normal,
-                Some(hart_id),
-            );
-
-            if let Ok(()) = start_service(&service_name) {
-                klog_info("init", &format!("Started WASM worker on hart {}", hart_id));
-            } else {
-                klog_error("init", &format!("Failed to start WASM worker on hart {}", hart_id));
-            }
-        }
+        crate::uart::write_line("[init] WASM service initialized");
     }
 
-    // Register klogd and sysmond as "virtual" services
-    // These run via the uart polling loop on hart 0, not as separate tasks
-    // This avoids scheduling issues where they sit in the ready queue forever
-    
     // Register service definitions (for service list/status display)
     register_service_def(
         "klogd",
-        "Kernel logger daemon - logs system memory stats (hart 0 polling)",
+        "Kernel logger daemon - logs system memory stats",
         klogd_service,
         Priority::Normal,
-        Some(0), // Runs on hart 0 via uart polling
+        None,
     );
     
     register_service_def(
         "sysmond",
-        "System monitor daemon - monitors system health (hart 0 polling)",
+        "System monitor daemon - monitors system health",
         sysmond_service,
         Priority::Normal,
-        Some(0), // Runs on hart 0 via uart polling
+        None,
     );
     
-    // Register them as running immediately (they're polled by uart loop, not spawned as tasks)
-    // Use scheduler's allocate_pid() for consistent PID numbering
-    let klogd_pid = SCHEDULER.allocate_pid();
-    let sysmond_pid = SCHEDULER.allocate_pid();
+    // ─── SPAWN DAEMONS ─────────────────────────────────────────────────────────────
+    // 
+    // With cooperative time-slicing, multiple daemons can run on the same hart.
+    // Each daemon does one tick of work and returns, allowing the scheduler to
+    // run the next process. This works even with just 1 secondary hart.
+    //
+    // - 0 secondary harts (single hart): Use shell-loop cooperative ticks on hart 0
+    // - 1+ secondary harts:              Spawn as processes, they'll time-slice
     
-    register_service("klogd", klogd_pid, Some(0));
-    register_service("sysmond", sysmond_pid, Some(0));
-    
-    klog_info("init", &format!("klogd (PID {}) running via uart polling on hart 0", klogd_pid));
-    klog_info("init", &format!("sysmond (PID {}) running via uart polling on hart 0", sysmond_pid));
+    if num_secondary_harts >= 1 {
+        // ─── PROCESS MODE (TIME-SLICING) ──────────────────────────────────────────
+        // Daemons run as processes on secondary harts, time-slicing cooperatively
+        // Note: Daemons use try_lock to avoid blocking shell commands
+        
+        let klogd_hart = get_least_loaded_hart();
+        let klogd_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("klogd", klogd_service, Priority::Low, Some(klogd_hart));
+        register_service("klogd", klogd_pid, Some(klogd_hart));
+        crate::uart::write_str("[init] klogd spawned (PID ");
+        crate::uart::write_u64(klogd_pid as u64);
+        crate::uart::write_str(") on CPU ");
+        crate::uart::write_u64(klogd_hart as u64);
+        crate::uart::write_line("");
+        
+        // Sysmond goes to the same or different hart based on load
+        let sysmond_hart = get_least_loaded_hart();
+        let sysmond_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("sysmond", sysmond_service, Priority::Low, Some(sysmond_hart));
+        register_service("sysmond", sysmond_pid, Some(sysmond_hart));
+        crate::uart::write_str("[init] sysmond spawned (PID ");
+        crate::uart::write_u64(sysmond_pid as u64);
+        crate::uart::write_str(") on CPU ");
+        crate::uart::write_u64(sysmond_hart as u64);
+        crate::uart::write_line("");
+        
+    } else {
+        // ─── SHELL-LOOP COOPERATIVE MODE ──────────────────────────────────────────
+        // Single-hart mode: services are ticked by the shell loop on hart 0
+        
+        let klogd_pid = crate::process::allocate_pid();
+        let sysmond_pid = crate::process::allocate_pid();
+        
+        register_service("klogd", klogd_pid, Some(0));
+        register_service("sysmond", sysmond_pid, Some(0));
+        
+        crate::uart::write_str("[init] klogd (PID ");
+        crate::uart::write_u64(klogd_pid as u64);
+        crate::uart::write_line(") cooperative on CPU 0");
+        crate::uart::write_str("[init] sysmond (PID ");
+        crate::uart::write_u64(sysmond_pid as u64);
+        crate::uart::write_line(") cooperative on CPU 0");
+    }
 }
 
 // ===============================================================================
@@ -240,28 +277,27 @@ pub fn start_service(name: &str) -> Result<(), &'static str> {
     let priority = def.priority;
     let preferred_hart = def.preferred_hart;
     let name_owned = def.name.clone();
-    
-    // Check if this is a virtual service (runs via uart polling)
-    let is_virtual = name == "klogd" || name == "sysmond";
 
     drop(state); // Release lock before spawning
 
-    if is_virtual {
-        // Virtual services don't need to spawn tasks - they run via uart polling
-        // Just register them as running with a new PID
-        let pid = SCHEDULER.allocate_pid();
-        register_service(&name_owned, pid, Some(0)); // Always on hart 0 for uart polling
-        klog_info("init", &format!("Started {} (PID {}) via uart polling on hart 0", name_owned, pid));
-    } else {
-        // Regular services spawn as scheduler tasks
-        let pid = SCHEDULER.spawn_daemon_on_hart(&name_owned, entry, priority, preferred_hart);
-        register_service(&name_owned, pid, preferred_hart);
+    // Determine target CPU - use preferred or find least loaded
+    let target_cpu = preferred_hart.unwrap_or_else(get_least_loaded_hart);
+    
+    // Spawn using process scheduler
+    let pid = PROC_SCHEDULER.spawn_on_cpu(
+        &name_owned,
+        entry,
+        priority,
+        Some(target_cpu),
+    );
+    register_service(&name_owned, pid, Some(target_cpu));
 
-        // Wake the target hart
-        if let Some(hart) = preferred_hart {
-            crate::send_ipi(hart);
-        }
+    // Wake the target hart
+    if target_cpu != 0 {
+        crate::send_ipi(target_cpu);
     }
+    
+    klog_info("init", &format!("Started {} (PID {}) on CPU {}", name_owned, pid, target_cpu));
 
     Ok(())
 }
@@ -285,9 +321,9 @@ pub fn stop_service(name: &str) -> Result<(), &'static str> {
     let pid = svc.pid;
     drop(state); // Release lock before killing
 
-    // Kill the service task
+    // Kill the process
     if pid > 0 {
-        SCHEDULER.kill(pid);
+        crate::sched::kill(pid);
     }
 
     // Mark as stopped
@@ -357,11 +393,11 @@ pub fn list_service_defs() -> Vec<(String, String)> {
 }
 
 /// Register a service definition (what the service is and how to start it)
-fn register_service_def(
+pub fn register_service_def(
     name: &str,
     description: &str,
-    entry: crate::task::TaskEntry,
-    priority: crate::task::Priority,
+    entry: ProcessEntry,
+    priority: Priority,
     preferred_hart: Option<usize>,
 ) {
     let mut state = INIT_STATE.lock();
@@ -375,7 +411,7 @@ fn register_service_def(
 }
 
 /// Register a running service instance
-fn register_service(name: &str, pid: u32, hart: Option<usize>) {
+pub fn register_service(name: &str, pid: u32, hart: Option<usize>) {
     let mut state = INIT_STATE.lock();
 
     // Update existing or add new
@@ -409,8 +445,8 @@ fn mark_service_stopped(name: &str) {
 /// Run init scripts from /etc/init.d/
 /// Note: Init scripts must be WASM binaries
 fn run_init_scripts() {
-    let mut fs_guard = crate::FS_STATE.lock();
-    let mut blk_guard = crate::BLK_DEV.lock();
+    let mut fs_guard = crate::FS_STATE.write();
+    let mut blk_guard = crate::BLK_DEV.write();
 
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         // Look for init scripts
@@ -463,8 +499,8 @@ fn write_boot_log() {
     );
 
     // Write to kernel.log
-    let mut fs_guard = crate::FS_STATE.lock();
-    let mut blk_guard = crate::BLK_DEV.lock();
+    let mut fs_guard = crate::FS_STATE.write();
+    let mut blk_guard = crate::BLK_DEV.write();
 
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         if let Err(e) = fs.write_file(dev, "/var/log/kernel.log", boot_msg.as_bytes()) {
@@ -472,7 +508,6 @@ fn write_boot_log() {
         } else {
             // Sync to ensure data is written to disk
             let _ = fs.sync(dev);
-            klog_info("init", "Boot log written to /var/log/kernel.log");
         }
     }
 }
@@ -498,8 +533,16 @@ fn spin_delay_ms(ms: u64) {
 /// Append a line to the kernel log file
 /// Returns true on success
 fn append_to_log(line: &str) -> bool {
-    let mut fs_guard = crate::FS_STATE.lock();
-    let mut blk_guard = crate::BLK_DEV.lock();
+    // Use try_write to avoid blocking shell commands
+    // If locks are held by shell, we just skip this log entry
+    let mut fs_guard = match crate::FS_STATE.try_write() {
+        Some(guard) => guard,
+        None => return false, // Filesystem busy, skip logging
+    };
+    let mut blk_guard = match crate::BLK_DEV.try_write() {
+        Some(guard) => guard,
+        None => return false, // Block device busy, skip logging
+    };
 
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
         // Read existing content
@@ -552,20 +595,17 @@ pub fn klogd_tick() {
     let now = crate::get_time_ms();
     let last = KLOGD_LAST_RUN.load(Ordering::Relaxed);
 
-    // First run: initialize
+    // First run: initialize (but delay filesystem access by 10 seconds)
     if !KLOGD_INITIALIZED.load(Ordering::Relaxed) {
+        // Wait 10 seconds after boot before initializing
+        // This avoids VirtIO contention with shell on secondary harts
+        if now < 10000 {
+            return;
+        }
+        
         KLOGD_INITIALIZED.store(true, Ordering::Relaxed);
         KLOGD_LAST_RUN.store(now, Ordering::Relaxed);
-
-        let startup_msg = format!(
-            "================================================================\n\
-             BAVY OS - Kernel Logger Started\n\
-             ================================================================\n\
-             Time: {}ms | Hart: 0 | klogd daemon initialized\n\
-             ----------------------------------------------------------------",
-            now
-        );
-        append_to_log(&startup_msg);
+        // Skip filesystem I/O - VirtIO doesn't work on secondary harts
         return;
     }
 
@@ -574,23 +614,13 @@ pub fn klogd_tick() {
         return;
     }
 
+    // Update timing but skip actual filesystem writes
+    // VirtIO operations hang on secondary harts
     KLOGD_LAST_RUN.store(now, Ordering::Relaxed);
-    let tick = KLOGD_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+    let _tick = KLOGD_TICK.fetch_add(1, Ordering::Relaxed) + 1;
 
-    let (heap_used, _heap_free) = crate::allocator::heap_stats();
-    let heap_total = crate::allocator::heap_size();
-    let usage_pct = (heap_used * 100) / heap_total.max(1);
-
-    let log_entry = format!(
-        "[{:>10}ms] klogd #{}: mem={}%({}/{}KB)",
-        now,
-        tick,
-        usage_pct,
-        heap_used / 1024,
-        heap_total / 1024,
-    );
-
-    append_to_log(&log_entry);
+    // Collect stats silently (could be used for /proc or API later)
+    let (_heap_used, _heap_free) = crate::allocator::heap_stats();
 }
 
 /// Run sysmond work if 10 seconds have passed since last run
@@ -598,16 +628,14 @@ pub fn sysmond_tick() {
     let now = crate::get_time_ms();
     let last = SYSMOND_LAST_RUN.load(Ordering::Relaxed);
 
-    // First run: initialize (with 2 second delay after klogd)
+    // First run: initialize (delay 15 seconds to avoid contention)
     if !SYSMOND_INITIALIZED.load(Ordering::Relaxed) {
-        if now < 2000 {
+        if now < 15000 {
             return; // Wait for initial delay
         }
         SYSMOND_INITIALIZED.store(true, Ordering::Relaxed);
         SYSMOND_LAST_RUN.store(now, Ordering::Relaxed);
-
-        let startup_msg = format!("[{:>10}ms] sysmond started on hart 0", now);
-        append_to_log(&startup_msg);
+        // Skip filesystem I/O - VirtIO doesn't work on secondary harts
         return;
     }
 
@@ -617,63 +645,56 @@ pub fn sysmond_tick() {
     }
 
     SYSMOND_LAST_RUN.store(now, Ordering::Relaxed);
-    let tick = SYSMOND_TICK.fetch_add(1, Ordering::Relaxed) + 1;
+    let _tick = SYSMOND_TICK.fetch_add(1, Ordering::Relaxed) + 1;
 
-    // Collect system stats
-    let task_count = SCHEDULER.task_count();
-    let queued = SCHEDULER.queued_count();
-    let num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
+    // Collect system stats silently (could be used for /proc or API later)
+    let _process_count = PROC_SCHEDULER.process_count();
+    let _queued_count = PROC_SCHEDULER.total_queued();
+    let _num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
 
-    let net_ok = crate::NET_STATE.lock().is_some();
-    let fs_ok = crate::FS_STATE.lock().is_some();
-
-    let log_entry = format!(
-        "[{:>10}ms] sysmond #{}: harts={} tasks={} queued={} net={} fs={}",
-        now,
-        tick,
-        num_harts,
-        task_count,
-        queued,
-        if net_ok { "UP" } else { "DOWN" },
-        if fs_ok { "OK" } else { "ERR" },
-    );
-
-    append_to_log(&log_entry);
-
-    // Reap zombie processes
-    let reaped = SCHEDULER.reap_zombies();
-    if reaped > 0 {
-        let reap_msg = format!(
-            "[{:>10}ms] sysmond: reaped {} zombie process(es)",
-            crate::get_time_ms(),
-            reaped
-        );
-        append_to_log(&reap_msg);
-    }
+    // Reap zombies (no filesystem needed)
+    let _reaped = PROC_SCHEDULER.reap_zombies();
 }
 
 /// Daemon service entry point for klogd
-/// This runs as an infinite loop on its assigned hart
+/// Cooperative time-slicing: does one tick of work and returns.
+/// The scheduler will requeue this daemon to run again.
+/// Note: klogd_tick has internal timing (runs every 5 seconds)
 pub fn klogd_service() {
-    loop {
-        klogd_tick();
-        
-        // Sleep for 1 second between checks
-        // Use spin_delay since secondary harts may not have timer interrupts
-        spin_delay_ms(1000);
+    // Quick check: only do real work if 4+ seconds since last run
+    // This reduces the frequency of even attempting to acquire locks
+    let now = crate::get_time_ms();
+    let last = KLOGD_LAST_RUN.load(Ordering::Relaxed);
+    
+    if KLOGD_INITIALIZED.load(Ordering::Relaxed) && (now - last) < 4000 {
+        // Not time yet - yield briefly and return
+        spin_delay_ms(10);
+        return;
     }
+    
+    // Time to potentially do work
+    klogd_tick();
+    spin_delay_ms(10);
 }
 
 /// Daemon service entry point for sysmond
-/// This runs as an infinite loop on its assigned hart
+/// Cooperative time-slicing: does one tick of work and returns.
+/// The scheduler will requeue this daemon to run again.
+/// Note: sysmond_tick has internal timing (runs every 10 seconds)
 pub fn sysmond_service() {
-    loop {
-        sysmond_tick();
-        
-        // Sleep for 1 second between checks
-        // Use spin_delay since secondary harts may not have timer interrupts
-        spin_delay_ms(1000);
+    // Quick check: only do real work if 9+ seconds since last run
+    let now = crate::get_time_ms();
+    let last = SYSMOND_LAST_RUN.load(Ordering::Relaxed);
+    
+    if SYSMOND_INITIALIZED.load(Ordering::Relaxed) && (now - last) < 9000 {
+        // Not time yet - yield briefly and return
+        spin_delay_ms(10);
+        return;
     }
+    
+    // Time to potentially do work
+    sysmond_tick();
+    spin_delay_ms(10);
 }
 
 /// WASM worker service entry point
