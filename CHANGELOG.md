@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.23](https://github.com/trust0-project/havy-os/compare/v0.1.22...v0.1.23) (2025-12-07)
+
+
+### Bug Fixes
+
+* version ([d126e04](https://github.com/trust0-project/havy-os/commit/d126e0430887b4d566117d4bd9957752cfe6492b))
+
 ## [0.1.22](https://github.com/trust0-project/havy-os/compare/v0.1.21...v0.1.22) (2025-12-06)
 
 
@@ -84,4 +91,3 @@
 * remove line ([63248c8](https://github.com/elribonazo/havy-os/commit/63248c8))
 * release ([86c920a](https://github.com/elribonazo/havy-os/commit/86c920a))
 * add initial package ([34bead4](https://github.com/elribonazo/havy-os/commit/34bead4))
-
