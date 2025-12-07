@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.25](https://github.com/trust0-project/havy-os/compare/v0.1.24...v0.1.25) (2025-12-07)
+
+
+### Bug Fixes
+
+* havy improvements ([007eb24](https://github.com/trust0-project/havy-os/commit/007eb2407987301b991fbb36ea3bf7c66605e0e5))
+
 ## [0.1.24](https://github.com/trust0-project/havy-os/compare/v0.1.23...v0.1.24) (2025-12-07)
 
 
