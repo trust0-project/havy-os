@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.26](https://github.com/trust0-project/havy-os/compare/v0.1.25...v0.1.26) (2025-12-07)
+
+
+### Bug Fixes
+
+* improve kernel for parallel processing and multi harts ([0bfbf9a](https://github.com/trust0-project/havy-os/commit/0bfbf9ac3f6212157dcfe962d5a95e86b7691d6e))
+
 ## [0.1.25](https://github.com/trust0-project/havy-os/compare/v0.1.24...v0.1.25) (2025-12-07)
 
 
