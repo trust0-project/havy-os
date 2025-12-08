@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.28](https://github.com/trust0-project/havy-os/compare/v0.1.27...v0.1.28) (2025-12-08)
+
+
+### Bug Fixes
+
+* restore pwd command ([0664cbc](https://github.com/trust0-project/havy-os/commit/0664cbcdd4a8643dcd85c21fb5421a2b85815a2b))
+
 ## [0.1.27](https://github.com/trust0-project/havy-os/compare/v0.1.26...v0.1.27) (2025-12-07)
 
 
