@@ -206,6 +206,10 @@ impl VirtQueue {
             return None;
         }
 
+        // Memory barrier: ensure we see data written by device before used_idx update
+        // VirtIO spec requires this barrier after reading the used ring index
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
         let elem = &self.used.ring[(self.last_used_idx as usize) % QUEUE_SIZE];
         let id = elem.id as u16;
         let len = elem.len;
@@ -448,7 +452,34 @@ impl VirtioNet {
                     let data_start = VirtioNetHdr::SIZE;
                     let data_len = total_len as usize - VirtioNetHdr::SIZE;
                     if data_len > 0 && data_start + data_len <= buf.data.len() {
-                        return Some(&buf.data[data_start..data_start + data_len]);
+                        let data = &buf.data[data_start..data_start + data_len];
+                        
+                        // Log TCP packets (EtherType 0x0800 = IPv4, Protocol 6 = TCP)
+                        // TCP flags at: 14 (eth) + 20 (IP) + 13 (TCP flags offset) = byte 47
+                        if data.len() >= 54 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 6 {
+                            let tcp_flags = data[47];
+                            let src_port = u16::from_be_bytes([data[34], data[35]]);
+                            let dst_port = u16::from_be_bytes([data[36], data[37]]);
+                            let flags_str = if tcp_flags & 0x02 != 0 && tcp_flags & 0x10 != 0 {
+                                "SYN-ACK"
+                            } else if tcp_flags & 0x02 != 0 {
+                                "SYN"
+                            } else if tcp_flags & 0x10 != 0 && tcp_flags & 0x01 != 0 {
+                                "FIN-ACK" 
+                            } else if tcp_flags & 0x10 != 0 {
+                                "ACK"
+                            } else if tcp_flags & 0x04 != 0 {
+                                "RST"
+                            } else {
+                                "OTHER"
+                            };
+                            crate::klog::klog_info("virtio-rx", &alloc::format!(
+                                "TCP {} packet, {} bytes, port {}->{}",
+                                flags_str, data.len(), src_port, dst_port
+                            ));
+                        }
+                        
+                        return Some(data);
                     }
                 }
             }
@@ -528,6 +559,28 @@ impl VirtioNet {
 
         // Notify device
         self.write32(QUEUE_NOTIFY_OFFSET, 1);
+
+        // Log TCP packets (EtherType 0x0800 = IPv4, Protocol 6 = TCP)
+        // TCP flags at: 14 (eth) + 20 (IP) + 13 (TCP flags offset) = byte 47
+        if data.len() >= 54 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 6 {
+            let tcp_flags = data[47];
+            let flags_str = if tcp_flags & 0x02 != 0 && tcp_flags & 0x10 != 0 {
+                "SYN-ACK"
+            } else if tcp_flags & 0x02 != 0 {
+                "SYN"
+            } else if tcp_flags & 0x10 != 0 && tcp_flags & 0x01 != 0 {
+                "FIN-ACK"
+            } else if tcp_flags & 0x10 != 0 {
+                "ACK"
+            } else if tcp_flags & 0x04 != 0 {
+                "RST"
+            } else {
+                "OTHER"
+            };
+            crate::klog::klog_info("virtio-tx", &alloc::format!(
+                "TCP {} packet, {} bytes", flags_str, data.len()
+            ));
+        }
 
         Ok(())
     }

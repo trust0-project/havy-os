@@ -36,6 +36,7 @@ mod cpu;
 mod process;
 mod sched;
 mod shell;
+mod tcpd;
 
 pub use scheduler::SCHEDULER;
 
@@ -50,6 +51,34 @@ use core::arch::asm;
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use panic_halt as _;
 use riscv_rt::entry;
+
+// Simple logger for smoltcp debug output
+struct UartLogger;
+
+impl log::Log for UartLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        // Only log smoltcp TCP-related messages at trace level
+        metadata.level() <= log::Level::Debug && metadata.target().contains("smoltcp")
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            uart::write_str("[SMOLTCP] ");
+            uart::write_str(&alloc::format!("{}", record.args()));
+            uart::write_line("");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: UartLogger = UartLogger;
+
+/// Initialize the logger (call once at boot)
+pub fn init_logger() {
+    let _ = log::set_logger(&LOGGER);
+    log::set_max_level(log::LevelFilter::Debug);
+}
 
 /// Flag indicating primary boot is complete.
 /// Secondary harts spin on this before proceeding.
@@ -1751,6 +1780,9 @@ fn init_fs() {
 
 /// Initialize the network stack
 fn init_network() {
+    // Initialize logger for smoltcp debug output
+    init_logger();
+    
     uart::write_line("    \x1b[0;90m+-\x1b[0m Probing for VirtIO devices...");
 
     // Probe for VirtIO network device

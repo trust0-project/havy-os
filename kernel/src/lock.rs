@@ -772,6 +772,8 @@ pub fn fence_acquire() {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]

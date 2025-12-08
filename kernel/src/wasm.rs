@@ -53,6 +53,51 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         )
         .map_err(|e| format!("define time: {:?}", e))?;
 
+    // Syscall: console_available() -> i32
+    // Check if console input is available (non-blocking check)
+    // Returns 1 if input is available, 0 otherwise
+    linker
+        .define(
+            "env",
+            "console_available",
+            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
+                // Check if UART has pending input
+                if crate::uart::has_pending_input() {
+                    1
+                } else {
+                    0
+                }
+            }),
+        )
+        .map_err(|e| format!("define console_available: {:?}", e))?;
+
+    // Syscall: console_read(buf_ptr, buf_len) -> i32
+    // Read from console (non-blocking). Returns bytes read, 0 if no data.
+    linker
+        .define(
+            "env",
+            "console_read",
+            Func::wrap(
+                &mut store,
+                |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
+                    if buf_len <= 0 {
+                        return 0;
+                    }
+                    if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        // Try to read one character (non-blocking)
+                        if let Some(ch) = crate::uart::read_char_nonblocking() {
+                            let buf = [ch];
+                            if mem.write(&mut caller, buf_ptr as usize, &buf).is_ok() {
+                                return 1;
+                            }
+                        }
+                    }
+                    0
+                },
+            ),
+        )
+        .map_err(|e| format!("define console_read: {:?}", e))?;
+
     // Syscall: arg_count() -> i32
     linker
         .define(
@@ -474,7 +519,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                                     5000,
                                     crate::get_time_ms,
                                 ) {
-                                    if mem.write(&mut caller, ip_buf_ptr as usize, &ip.0).is_ok() {
+                                    if mem.write(&mut caller, ip_buf_ptr as usize, &ip.octets()).is_ok() {
                                         return 4;
                                     }
                                 }
@@ -1167,9 +1212,9 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     
                     // Pack: IP (4) + Gateway (4) + DNS (4) + MAC (6) + prefix_len (1) = 19 bytes
                     let mut out = [0u8; 19];
-                    out[0..4].copy_from_slice(&ip.0);
-                    out[4..8].copy_from_slice(&crate::net::GATEWAY.0);
-                    out[8..12].copy_from_slice(&crate::net::DNS_SERVER.0);
+                    out[0..4].copy_from_slice(&ip.octets());
+                    out[4..8].copy_from_slice(&crate::net::GATEWAY.octets());
+                    out[8..12].copy_from_slice(&crate::net::DNS_SERVER.octets());
                     out[12..18].copy_from_slice(&mac);
                     out[18] = crate::net::PREFIX_LEN;
                     
@@ -1447,7 +1492,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             return -2;
                         }
                         
-                        let target = smoltcp::wire::Ipv4Address(ip_buf);
+                        let target = smoltcp::wire::Ipv4Address::new(ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3]);
                         let seq = seq as u16;
                         let timestamp = crate::get_time_ms();
                         
@@ -1604,6 +1649,208 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             }),
         )
         .map_err(|e| format!("define parallel_max_slots: {:?}", e))?;
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // TCP SOCKET SYSCALLS - For user-space TCP clients
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    // Syscall: tcp_connect(ip_ptr, ip_len, port) -> i32
+    // Connect to a TCP server. ip_ptr points to IP address bytes (4 bytes for IPv4).
+    // Returns 0 on success (connection initiated), -1 on error.
+    linker
+        .define(
+            "env",
+            "tcp_connect",
+            Func::wrap(
+                &mut store,
+                |caller: Caller<'_, WasmContext>, ip_ptr: i32, _ip_len: i32, port: i32| -> i32 {
+                    if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        let mut ip_buf = [0u8; 4];
+                        if mem.read(&caller, ip_ptr as usize, &mut ip_buf).is_ok() {
+                            crate::klog::klog_info("telnet", &alloc::format!(
+                                "tcp_connect to {}.{}.{}.{}:{}",
+                                ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3], port
+                            ));
+                            let mut net_guard = crate::NET_STATE.lock();
+                            if let Some(ref mut net) = *net_guard {
+                                let ip = smoltcp::wire::Ipv4Address::new(ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3]);
+                                let now = crate::get_time_ms();
+                                match net.tcp_connect(ip, port as u16, now) {
+                                    Ok(()) => {
+                                        // Poll to actually send the SYN packet
+                                        net.poll(now);
+                                        crate::klog::klog_info("telnet", "SYN sent");
+                                        return 0;
+                                    }
+                                    Err(e) => {
+                                        crate::klog::klog_info("telnet", &alloc::format!("connect error: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    -1
+                },
+            ),
+        )
+        .map_err(|e| format!("define tcp_connect: {:?}", e))?;
+
+    // Syscall: tcp_send(data_ptr, data_len) -> i32
+    // Send data over TCP connection. Returns bytes sent or -1 on error.
+    linker
+        .define(
+            "env",
+            "tcp_send",
+            Func::wrap(
+                &mut store,
+                |caller: Caller<'_, WasmContext>, data_ptr: i32, data_len: i32| -> i32 {
+                    if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        let mut data_buf = vec![0u8; data_len as usize];
+                        if mem.read(&caller, data_ptr as usize, &mut data_buf).is_ok() {
+                            let mut net_guard = crate::NET_STATE.lock();
+                            if let Some(ref mut net) = *net_guard {
+                                let now = crate::get_time_ms();
+                                match net.tcp_send(&data_buf, now) {
+                                    Ok(sent) => {
+                                        // Poll network to actually transmit
+                                        net.poll(now);
+                                        return sent as i32;
+                                    }
+                                    Err(_) => return -1,
+                                }
+                            }
+                        }
+                    }
+                    -1
+                },
+            ),
+        )
+        .map_err(|e| format!("define tcp_send: {:?}", e))?;
+
+    // Syscall: tcp_recv(buf_ptr, buf_len, timeout_ms) -> i32
+    // Receive data from TCP connection. Returns bytes received, 0 if no data, -1 on error/closed.
+    linker
+        .define(
+            "env",
+            "tcp_recv",
+            Func::wrap(
+                &mut store,
+                |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32, timeout_ms: i32| -> i32 {
+                    if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                        let mut net_guard = crate::NET_STATE.lock();
+                        if let Some(ref mut net) = *net_guard {
+                            let start = crate::get_time_ms();
+                            let deadline = if timeout_ms > 0 {
+                                start + timeout_ms as i64
+                            } else {
+                                start // No timeout, just try once
+                            };
+                            
+                            let mut recv_buf = vec![0u8; buf_len as usize];
+                            
+                            loop {
+                                let now = crate::get_time_ms();
+                                
+                                // Poll network to process incoming packets and recycle TX buffers
+                                net.poll(now);
+                                
+                                match net.tcp_recv(&mut recv_buf, now) {
+                                    Ok(len) if len > 0 => {
+                                        if mem.write(&mut caller, buf_ptr as usize, &recv_buf[..len]).is_ok() {
+                                            return len as i32;
+                                        }
+                                        return -1;
+                                    }
+                                    Ok(_) => {
+                                        // No data yet
+                                        if timeout_ms <= 0 || now >= deadline {
+                                            return 0;
+                                        }
+                                        // Brief delay before retry
+                                        for _ in 0..1000 { core::hint::spin_loop(); }
+                                    }
+                                    Err(_) => return -1,
+                                }
+                            }
+                        }
+                    }
+                    -1
+                },
+            ),
+        )
+        .map_err(|e| format!("define tcp_recv: {:?}", e))?;
+
+    // Syscall: tcp_close() -> i32
+    // Close TCP connection. Returns 0 on success.
+    linker
+        .define(
+            "env",
+            "tcp_close",
+            Func::wrap(
+                &mut store,
+                |_caller: Caller<'_, WasmContext>| -> i32 {
+                    let mut net_guard = crate::NET_STATE.lock();
+                    if let Some(ref mut net) = *net_guard {
+                        let now = crate::get_time_ms();
+                        net.tcp_close(now);
+                        return 0;
+                    }
+                    -1
+                },
+            ),
+        )
+        .map_err(|e| format!("define tcp_close: {:?}", e))?;
+
+    // Syscall: tcp_status() -> i32
+    // Get TCP connection status.
+    // Returns: 0=closed, 1=connecting, 2=connected, 3=failed
+    linker
+        .define(
+            "env",
+            "tcp_status",
+            Func::wrap(
+                &mut store,
+                |_caller: Caller<'_, WasmContext>| -> i32 {
+                    let mut net_guard = crate::NET_STATE.lock();
+                    if let Some(ref mut net) = *net_guard {
+                        // Poll multiple times to ensure we catch pending handshake packets
+                        // This is critical for TCP connections as SYN-ACK may arrive between polls
+                        let now = crate::get_time_ms();
+                        for _ in 0..5 {
+                            net.poll(now);
+                        }
+                        
+                        // Get the actual socket state for debugging
+                        let socket_state = net.tcp_client_state();
+                        
+                        // Log socket state periodically (every ~500ms)
+                        static mut LAST_LOG: i64 = 0;
+                        static mut LAST_STATE: &str = "";
+                        unsafe {
+                            if socket_state != LAST_STATE || now - LAST_LOG > 500 {
+                                crate::klog::klog_info("telnet", &alloc::format!(
+                                    "client socket state: {}", socket_state
+                                ));
+                                LAST_LOG = now;
+                                LAST_STATE = socket_state;
+                            }
+                        }
+                        
+                        if net.tcp_is_connected() {
+                            return 2; // Connected
+                        } else if net.tcp_is_connecting() {
+                            return 1; // Connecting
+                        } else if net.tcp_connection_failed() {
+                            return 3; // Failed
+                        } else {
+                            return 0; // Closed
+                        }
+                    }
+                    0
+                },
+            ),
+        )
+        .map_err(|e| format!("define tcp_status: {:?}", e))?;
 
     let module = Module::new(&engine, wasm_bytes).map_err(|e| format!("Invalid WASM: {:?}", e))?;
 

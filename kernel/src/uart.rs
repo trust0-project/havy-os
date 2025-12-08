@@ -197,6 +197,21 @@ pub fn write_hex_byte(b: u8) {
     console.write_byte(hex_digits[(b & 0xf) as usize]);
 }
 
+/// Check if console has pending input
+pub fn has_pending_input() -> bool {
+    Console::is_rx_ready_public()
+}
+
+/// Read a character from console (non-blocking)
+/// Returns None if no character is available
+pub fn read_char_nonblocking() -> Option<u8> {
+    if Console::is_rx_ready_public() {
+        Some(Console::new().read_byte())
+    } else {
+        None
+    }
+}
+
 /// Format and print to UART using core::fmt::Arguments
 pub fn print_fmt(args: fmt::Arguments) {
     let mut console = Console::new();

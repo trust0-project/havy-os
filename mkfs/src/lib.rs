@@ -178,6 +178,32 @@ pub mod syscalls {
         pub fn parallel_clear_results();
         /// Returns the maximum number of parallel result slots available.
         pub fn parallel_max_slots() -> i32;
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // TCP Socket Syscalls
+        // ═══════════════════════════════════════════════════════════════════
+        
+        /// Connect to a TCP server. ip_ptr points to 4 bytes IPv4 address.
+        /// Returns 0 on success (connection initiated), -1 on error.
+        pub fn tcp_connect(ip_ptr: *const u8, ip_len: i32, port: i32) -> i32;
+        /// Send data over TCP connection. Returns bytes sent or -1 on error.
+        pub fn tcp_send(data_ptr: *const u8, data_len: i32) -> i32;
+        /// Receive data from TCP. Returns bytes received, 0 if no data, -1 on error.
+        pub fn tcp_recv(buf_ptr: *mut u8, buf_len: i32, timeout_ms: i32) -> i32;
+        /// Close TCP connection. Returns 0 on success.
+        pub fn tcp_close() -> i32;
+        /// Get TCP connection status.
+        /// Returns: 0=closed, 1=connecting, 2=connected, 3=failed
+        pub fn tcp_status() -> i32;
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // Console Input Syscalls
+        // ═══════════════════════════════════════════════════════════════════
+        
+        /// Check if console input is available. Returns 1 if available, 0 otherwise.
+        pub fn console_available() -> i32;
+        /// Read from console (non-blocking). Returns bytes read, 0 if no data.
+        pub fn console_read(buf_ptr: *mut u8, buf_len: i32) -> i32;
     }
 
     // --- Helper Wrappers ---
@@ -858,6 +884,72 @@ pub mod syscalls {
         pos
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // TCP Socket Helpers
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// TCP connection status
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum TcpStatus {
+        Closed = 0,
+        Connecting = 1,
+        Connected = 2,
+        Failed = 3,
+    }
+    
+    /// Connect to a TCP server by IP address
+    pub fn tcp_connect_ip(ip: &[u8; 4], port: u16) -> bool {
+        unsafe { tcp_connect(ip.as_ptr(), 4, port as i32) == 0 }
+    }
+    
+    /// Send data over TCP connection
+    pub fn tcp_send_data(data: &[u8]) -> Option<usize> {
+        let result = unsafe { tcp_send(data.as_ptr(), data.len() as i32) };
+        if result >= 0 {
+            Some(result as usize)
+        } else {
+            None
+        }
+    }
+    
+    /// Receive data from TCP connection
+    pub fn tcp_recv_data(buf: &mut [u8], timeout_ms: u32) -> Option<usize> {
+        let result = unsafe { tcp_recv(buf.as_mut_ptr(), buf.len() as i32, timeout_ms as i32) };
+        if result > 0 {
+            Some(result as usize)
+        } else if result == 0 {
+            Some(0) // No data yet
+        } else {
+            None // Error
+        }
+    }
+    
+    /// Close TCP connection
+    pub fn tcp_disconnect() -> bool {
+        unsafe { tcp_close() == 0 }
+    }
+    
+    /// Get TCP connection status
+    pub fn tcp_get_status() -> TcpStatus {
+        match unsafe { tcp_status() } {
+            1 => TcpStatus::Connecting,
+            2 => TcpStatus::Connected,
+            3 => TcpStatus::Failed,
+            _ => TcpStatus::Closed,
+        }
+    }
+    
+    /// Check if console input is available
+    pub fn is_console_available() -> bool {
+        unsafe { console_available() == 1 }
+    }
+    
+    /// Read character from console (non-blocking)
+    pub fn read_console(buf: &mut [u8]) -> usize {
+        let result = unsafe { console_read(buf.as_mut_ptr(), buf.len() as i32) };
+        if result > 0 { result as usize } else { 0 }
+    }
+
     // --- Mandatory Panic Handler for no_std WASM ---
     #[panic_handler]
     fn panic(_info: &PanicInfo) -> ! {
@@ -883,6 +975,9 @@ pub use syscalls::{
     // Parallel execution syscalls
     parallel_set_result, parallel_get_result, parallel_sum_results,
     parallel_clear_results, parallel_max_slots,
+    // TCP and console syscalls
+    tcp_connect, tcp_send, tcp_recv, tcp_close, tcp_status,
+    console_available, console_read,
     // Helper wrappers
     console_log, get_time, argc, argv, get_cwd, set_cwd, file_exists, read_file,
     write_file, list_files, list_dir, file_stat, mkdir, get_klog, is_net_available,
@@ -897,7 +992,10 @@ pub use syscalls::{
     // Parallel execution helpers
     set_parallel_result, get_parallel_result, sum_parallel_results,
     clear_parallel_results, max_parallel_slots, calculate_work_range,
+    // TCP and console helpers
+    tcp_connect_ip, tcp_send_data, tcp_recv_data, tcp_disconnect, tcp_get_status,
+    is_console_available, read_console,
     // Types
     FileStat, DiskStats, HeapStats, CpuInfo, WorkerStats, JobStatus, KillResult,
-    NetInfo, PingResult,
+    NetInfo, PingResult, TcpStatus,
 };

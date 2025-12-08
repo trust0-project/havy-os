@@ -198,6 +198,14 @@ fn start_system_services() {
         None,
     );
     
+    register_service_def(
+        "tcpd",
+        "TCP daemon - listens on port 30, responds with hello",
+        tcpd_service,
+        Priority::Normal,
+        None,
+    );
+    
     // ─── SPAWN DAEMONS ─────────────────────────────────────────────────────────────
     // 
     // With cooperative time-slicing, multiple daemons can run on the same hart.
@@ -231,6 +239,28 @@ fn start_system_services() {
         crate::uart::write_u64(sysmond_hart as u64);
         crate::uart::write_line("");
         
+        // Initialize and spawn tcpd (TCP daemon on port 30)
+        // Only if networking is available
+        if crate::NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false) {
+            // Initialize tcpd (binds to port 30)
+            if crate::tcpd::init().is_ok() {
+                let tcpd_hart = get_least_loaded_hart();
+                let tcpd_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("tcpd", tcpd_service, Priority::Normal, Some(tcpd_hart));
+                register_service("tcpd", tcpd_pid, Some(tcpd_hart));
+                crate::uart::write_str("[init] tcpd spawned (PID ");
+                crate::uart::write_u64(tcpd_pid as u64);
+                crate::uart::write_str(") on CPU ");
+                crate::uart::write_u64(tcpd_hart as u64);
+                crate::uart::write_str(" - listening on port ");
+                crate::uart::write_u64(crate::tcpd::TCPD_PORT as u64);
+                crate::uart::write_line("");
+            } else {
+                crate::uart::write_line("[init] tcpd: failed to initialize");
+            }
+        } else {
+            crate::uart::write_line("[init] tcpd: skipped (no network)");
+        }
+        
     } else {
         // ─── SHELL-LOOP COOPERATIVE MODE ──────────────────────────────────────────
         // Single-hart mode: services are ticked by the shell loop on hart 0
@@ -247,6 +277,19 @@ fn start_system_services() {
         crate::uart::write_str("[init] sysmond (PID ");
         crate::uart::write_u64(sysmond_pid as u64);
         crate::uart::write_line(") cooperative on CPU 0");
+        
+        // Initialize tcpd in cooperative mode if networking is available
+        if crate::NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false) {
+            if crate::tcpd::init().is_ok() {
+                let tcpd_pid = crate::process::allocate_pid();
+                register_service("tcpd", tcpd_pid, Some(0));
+                crate::uart::write_str("[init] tcpd (PID ");
+                crate::uart::write_u64(tcpd_pid as u64);
+                crate::uart::write_str(") cooperative on CPU 0 - port ");
+                crate::uart::write_u64(crate::tcpd::TCPD_PORT as u64);
+                crate::uart::write_line("");
+            }
+        }
     }
 }
 
@@ -868,6 +911,15 @@ pub fn sysmond_service() {
     
     // Time to potentially do work
     sysmond_tick();
+    spin_delay_ms(10);
+}
+
+/// Daemon service entry point for tcpd
+/// Cooperative time-slicing: does one tick of work and returns.
+/// The scheduler will requeue this daemon to run again.
+/// tcpd_tick handles its own timing (polls every 50ms)
+pub fn tcpd_service() {
+    crate::tcpd::tick();
     spin_delay_ms(10);
 }
 
