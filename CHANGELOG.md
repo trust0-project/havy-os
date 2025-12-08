@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.29](https://github.com/trust0-project/havy-os/compare/v0.1.28...v0.1.29) (2025-12-08)
+
+
+### Bug Fixes
+
+* TCP listen ([905d3c9](https://github.com/trust0-project/havy-os/commit/905d3c9871eb577aa97a18bd28ce096c4a6c9733))
+
 ## [0.1.28](https://github.com/trust0-project/havy-os/compare/v0.1.27...v0.1.28) (2025-12-08)
 
 
