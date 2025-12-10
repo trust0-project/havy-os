@@ -206,6 +206,14 @@ fn start_system_services() {
         None,
     );
     
+    register_service_def(
+        "httpd",
+        "HTTP server daemon - listens on port 80, serves web content",
+        httpd_service,
+        Priority::Normal,
+        None,
+    );
+    
     // ─── SPAWN DAEMONS ─────────────────────────────────────────────────────────────
     // 
     // With cooperative time-slicing, multiple daemons can run on the same hart.
@@ -257,8 +265,25 @@ fn start_system_services() {
             } else {
                 crate::uart::write_line("[init] tcpd: failed to initialize");
             }
+            
+            // Initialize and spawn httpd (HTTP server on port 80)
+            if crate::httpd::init().is_ok() {
+                let httpd_hart = get_least_loaded_hart();
+                let httpd_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("httpd", httpd_service, Priority::Normal, Some(httpd_hart));
+                register_service("httpd", httpd_pid, Some(httpd_hart));
+                crate::uart::write_str("[init] httpd spawned (PID ");
+                crate::uart::write_u64(httpd_pid as u64);
+                crate::uart::write_str(") on CPU ");
+                crate::uart::write_u64(httpd_hart as u64);
+                crate::uart::write_str(" - listening on port ");
+                crate::uart::write_u64(crate::httpd::HTTPD_PORT as u64);
+                crate::uart::write_line("");
+            } else {
+                crate::uart::write_line("[init] httpd: failed to initialize");
+            }
         } else {
             crate::uart::write_line("[init] tcpd: skipped (no network)");
+            crate::uart::write_line("[init] httpd: skipped (no network)");
         }
         
     } else {
@@ -287,6 +312,17 @@ fn start_system_services() {
                 crate::uart::write_u64(tcpd_pid as u64);
                 crate::uart::write_str(") cooperative on CPU 0 - port ");
                 crate::uart::write_u64(crate::tcpd::TCPD_PORT as u64);
+                crate::uart::write_line("");
+            }
+            
+            // Initialize httpd in cooperative mode
+            if crate::httpd::init().is_ok() {
+                let httpd_pid = crate::process::allocate_pid();
+                register_service("httpd", httpd_pid, Some(0));
+                crate::uart::write_str("[init] httpd (PID ");
+                crate::uart::write_u64(httpd_pid as u64);
+                crate::uart::write_str(") cooperative on CPU 0 - port ");
+                crate::uart::write_u64(crate::httpd::HTTPD_PORT as u64);
                 crate::uart::write_line("");
             }
         }
@@ -920,6 +956,15 @@ pub fn sysmond_service() {
 /// tcpd_tick handles its own timing (polls every 50ms)
 pub fn tcpd_service() {
     crate::tcpd::tick();
+    spin_delay_ms(10);
+}
+
+/// Daemon service entry point for httpd
+/// Cooperative time-slicing: does one tick of work and returns.
+/// The scheduler will requeue this daemon to run again.
+/// httpd_tick handles its own timing (polls every 10ms)
+pub fn httpd_service() {
+    crate::httpd::tick();
     spin_delay_ms(10);
 }
 

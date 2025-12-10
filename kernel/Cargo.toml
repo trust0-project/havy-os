@@ -67,4 +67,32 @@ version = "2"
 default-features = false
 features = ["static_secrets", "alloc"]
 
+# Embassy async runtime for HTTP server
+[dependencies.embassy-executor]
+version = "0.7"
+default-features = false
+features = ["arch-spin", "executor-thread"]
+
+[dependencies.embassy-net]
+version = "0.7"
+default-features = false
+features = ["tcp", "proto-ipv4", "medium-ethernet"]
+
+[dependencies.embassy-time]
+version = "0.4"
+default-features = false
+features = ["tick-hz-1_000"]
+
+[dependencies.embassy-sync]
+version = "0.6"
+default-features = false
+
+[dependencies.embassy-net-driver]
+version = "0.2"
+default-features = false
+
+[dependencies.static_cell]
+version = "2"
+default-features = false
+
 # Note: Release profile is defined at workspace root (Cargo.toml)

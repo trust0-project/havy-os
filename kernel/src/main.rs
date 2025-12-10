@@ -37,6 +37,7 @@ mod process;
 mod sched;
 mod shell;
 mod tcpd;
+mod httpd;
 
 pub use scheduler::SCHEDULER;
 
@@ -77,7 +78,8 @@ static LOGGER: UartLogger = UartLogger;
 /// Initialize the logger (call once at boot)
 pub fn init_logger() {
     let _ = log::set_logger(&LOGGER);
-    log::set_max_level(log::LevelFilter::Debug);
+    // Disable smoltcp debug logging in production
+    log::set_max_level(log::LevelFilter::Off);
 }
 
 /// Flag indicating primary boot is complete.

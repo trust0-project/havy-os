@@ -1,179 +1,29 @@
-//! Network stack using smoltcp.
+//! Network state management.
 //!
-//! This module provides the TCP/IP stack for the kernel using the smoltcp crate.
+//! This module contains the NetState struct that manages the entire network stack,
+//! including sockets, interfaces, and device operations.
 
-use crate::virtio_net::VirtioNet;
-use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
-use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet, SocketStorage};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+
+use smoltcp::iface::{Interface, SocketHandle, SocketSet, Config};
 use smoltcp::socket::{icmp, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
-/// Network configuration
-/// Default IP address (used as fallback if no IP is assigned by relay)
-pub const DEFAULT_IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
-pub const GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
-pub const PREFIX_LEN: u8 = 24;
-
-/// Dynamic IP address assigned by the relay/network controller
-/// This is set during network initialization
-pub static mut MY_IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
-
-/// Get the current IP address (safe wrapper)
-pub fn get_my_ip() -> Ipv4Address {
-    unsafe { MY_IP_ADDR }
-}
-
-/// Store the last received SYN's sequence number so we can patch SYN-ACK if needed
-/// This is a workaround for the smoltcp ack=0/1 bug (SERVER ROLE)
-static mut LAST_SYN_SEQ: Option<u32> = None;
-
-/// Store the server's SYN-ACK seq number so we can patch incoming ACKs (SERVER ROLE)
-static mut SERVER_SYNACK_SEQ: Option<u32> = None;
-
-/// Store the connection port for matching (SERVER ROLE - destination port of incoming SYN)
-static mut PATCHING_PORT: Option<u16> = None;
-
-// CLIENT ROLE patching state (for outgoing connections like telnet)
-/// Store the server's seq from SYN-ACK so we can patch outgoing ACKs (CLIENT ROLE)
-static mut CLIENT_SERVER_SEQ: Option<u32> = None;
-
-/// Store the remote port we're connecting to (CLIENT ROLE)
-static mut CLIENT_REMOTE_PORT: Option<u16> = None;
-
-/// DNS server (Google Public DNS)
-pub const DNS_SERVER: Ipv4Address = Ipv4Address::new(8, 8, 8, 8);
-/// DNS port
-pub const DNS_PORT: u16 = 53;
-
-/// Loopback address
-pub const LOOPBACK: Ipv4Address = Ipv4Address::new(127, 0, 0, 1);
-
-/// ICMP identifier for our ping socket
-const ICMP_IDENT: u16 = 0x1234;
-
-/// Local port for DNS queries
-const DNS_LOCAL_PORT: u16 = 10053;
+use crate::virtio_net::VirtioNet;
+use super::config::*;
+use super::buffers::*;
+use super::server::*;
+use super::device::DeviceWrapper;
+use super::patching::{reset_client_patching_state, reset_server_patching_for_port};
 
 /// Pending loopback ping reply
 struct LoopbackReply {
     from: Ipv4Address,
     ident: u16,
     seq: u16,
-}
-
-/// Static storage for sockets (expanded for server sockets)
-static mut SOCKET_STORAGE: [SocketStorage<'static>; 16] = [SocketStorage::EMPTY; 16];
-
-/// Static storage for ICMP buffers - need larger buffers for proper ICMP
-static mut ICMP_RX_META: [icmp::PacketMetadata; 8] = [icmp::PacketMetadata::EMPTY; 8];
-static mut ICMP_TX_META: [icmp::PacketMetadata; 8] = [icmp::PacketMetadata::EMPTY; 8];
-static mut ICMP_RX_DATA: [u8; 512] = [0; 512];
-static mut ICMP_TX_DATA: [u8; 512] = [0; 512];
-
-/// Static storage for UDP buffers (for DNS queries)
-static mut UDP_RX_META: [udp::PacketMetadata; 8] = [udp::PacketMetadata::EMPTY; 8];
-static mut UDP_TX_META: [udp::PacketMetadata; 8] = [udp::PacketMetadata::EMPTY; 8];
-static mut UDP_RX_DATA: [u8; 1024] = [0; 1024];
-static mut UDP_TX_DATA: [u8; 1024] = [0; 1024];
-
-/// Static storage for TCP buffers (for HTTP client connections)
-static mut TCP_RX_DATA: [u8; 8192] = [0; 8192];
-static mut TCP_TX_DATA: [u8; 4096] = [0; 4096];
-
-// =============================================================================
-// TCP SERVER SOCKET INFRASTRUCTURE
-// =============================================================================
-
-/// Maximum number of server TCP sockets
-pub const MAX_SERVER_SOCKETS: usize = 4;
-
-/// TCP socket ID for multi-socket operations
-pub type TcpSocketId = u8;
-
-/// Static storage for server TCP buffers
-static mut TCP_SERVER_RX_DATA: [[u8; 2048]; MAX_SERVER_SOCKETS] = [[0; 2048]; MAX_SERVER_SOCKETS];
-static mut TCP_SERVER_TX_DATA: [[u8; 1024]; MAX_SERVER_SOCKETS] = [[0; 1024]; MAX_SERVER_SOCKETS];
-
-/// Server socket state
-#[derive(Clone, Copy, PartialEq)]
-pub enum ServerSocketState {
-    /// Socket slot is free
-    Free,
-    /// Socket is listening for connections
-    Listening,
-    /// Socket has an active connection
-    Connected,
-    /// Socket is closing
-    Closing,
-}
-
-/// A server socket entry
-struct ServerSocket {
-    handle: Option<SocketHandle>,
-    port: u16,
-    state: ServerSocketState,
-}
-
-impl ServerSocket {
-    const fn new() -> Self {
-        Self {
-            handle: None,
-            port: 0,
-            state: ServerSocketState::Free,
-        }
-    }
-}
-
-/// Manager for server TCP sockets
-struct TcpServerManager {
-    sockets: [ServerSocket; MAX_SERVER_SOCKETS],
-}
-
-impl TcpServerManager {
-    const fn new() -> Self {
-        Self {
-            sockets: [
-                ServerSocket::new(),
-                ServerSocket::new(),
-                ServerSocket::new(),
-                ServerSocket::new(),
-            ],
-        }
-    }
-    
-    /// Allocate a free socket slot, returns socket ID
-    fn allocate(&mut self) -> Option<TcpSocketId> {
-        for (i, slot) in self.sockets.iter_mut().enumerate() {
-            if slot.state == ServerSocketState::Free {
-                return Some(i as TcpSocketId);
-            }
-        }
-        None
-    }
-    
-    /// Get socket info by ID
-    fn get(&self, id: TcpSocketId) -> Option<&ServerSocket> {
-        self.sockets.get(id as usize)
-    }
-    
-    /// Get mutable socket info by ID    
-    fn get_mut(&mut self, id: TcpSocketId) -> Option<&mut ServerSocket> {
-        self.sockets.get_mut(id as usize)
-    }
-    
-    /// Release a socket slot
-    fn release(&mut self, id: TcpSocketId) {
-        if let Some(slot) = self.sockets.get_mut(id as usize) {
-            slot.handle = None;
-            slot.port = 0;
-            slot.state = ServerSocketState::Free;
-        }
-    }
 }
 
 /// Cached ARP entry
@@ -730,6 +580,9 @@ impl NetState {
             }
         }
 
+        // Reset client patching state for the new connection
+        reset_client_patching_state();
+
         // Generate a local port that won't conflict with server ports
         // Use a combination of timestamp and a counter for uniqueness
         static mut PORT_COUNTER: u16 = 0;
@@ -877,6 +730,9 @@ impl NetState {
         let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp_handle);
         socket.close();
 
+        // Note: Don't reset patching state here - FIN-ACK exchange still needs it
+        // State will be reset when a new connection is initiated
+
         // Poll to process the close
         self.iface.poll(
             timestamp,
@@ -889,6 +745,9 @@ impl NetState {
     pub fn tcp_abort(&mut self) {
         let socket = self.sockets.get_mut::<tcp::Socket>(self.tcp_handle);
         socket.abort();
+        
+        // Reset client patching state since abort is immediate (no FIN exchange)
+        reset_client_patching_state();
     }
 
     /// Get TCP socket state (for debugging)
@@ -1097,6 +956,9 @@ impl NetState {
             let socket = self.sockets.get_mut::<tcp::Socket>(h);
             socket.close();
             
+            // Note: Don't reset patching state here - FIN-ACK exchange still needs it
+            // State will be reset in tcp_release_server() after socket is fully closed
+            
             // Poll to process the close
             self.iface.poll(
                 timestamp,
@@ -1154,6 +1016,9 @@ impl NetState {
     /// Release a server socket slot back to the pool
     /// Call this after the socket is fully closed
     pub fn tcp_release_server(&mut self, socket_id: TcpSocketId) {
+        // Get the port before releasing, to reset patching state for this port
+        let socket_port = self.server_sockets.get(socket_id).map(|s| s.port);
+        
         if let Some(slot) = self.server_sockets.get(socket_id) {
             if let Some(handle) = slot.handle {
                 // Remove socket from socket set
@@ -1161,309 +1026,10 @@ impl NetState {
             }
         }
         self.server_sockets.release(socket_id);
-    }
-}
-
-/// Wrapper for VirtioNet to implement smoltcp Device trait
-struct DeviceWrapper<'a>(&'a mut VirtioNet);
-
-impl Device for DeviceWrapper<'_> {
-    type RxToken<'a>
-        = VirtioRxToken
-    where
-        Self: 'a;
-    type TxToken<'a>
-        = VirtioTxToken<'a>
-    where
-        Self: 'a;
-
-    fn capabilities(&self) -> DeviceCapabilities {
-        let mut caps = DeviceCapabilities::default();
-        caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = 1500; // Standard Ethernet MTU (IP payload size)
-        caps.max_burst_size = Some(1);
-        // Explicitly tell smoltcp to compute all checksums in software
-        // (no hardware offload)
-        caps.checksum = smoltcp::phy::ChecksumCapabilities::default();
-        caps
-    }
-
-    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        // Check if there's a received packet
-        if let Some((desc_idx, data)) = self.0.recv_with_desc() {
-            // Copy data since we need to recycle the buffer
-            let mut buf = vec![0u8; data.len()];
-            buf.copy_from_slice(data);
-
-            // Recycle the RX buffer immediately
-            self.0.recycle_rx(desc_idx);
-
-            Some((
-                VirtioRxToken { buffer: buf },
-                VirtioTxToken { device: self.0 },
-            ))
-        } else {
-            None
-        }
-    }
-
-    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        // Always allow transmit (the device will handle buffer exhaustion)
-        Some(VirtioTxToken { device: self.0 })
-    }
-}
-
-/// RX token for received packets
-struct VirtioRxToken {
-    buffer: Vec<u8>,
-}
-
-impl RxToken for VirtioRxToken {
-    fn consume<R, F>(self, f: F) -> R
-    where
-        F: FnOnce(&[u8]) -> R,
-    {
-        let mut buffer = self.buffer;
         
-        // Process TCP packets for state tracking and patching
-        if buffer.len() >= 54 && buffer[12] == 0x08 && buffer[13] == 0x00 && buffer[23] == 6 {
-            let ip_ihl = (buffer[14] & 0x0F) as usize * 4;
-            let tcp_offset = 14 + ip_ihl;
-            
-            if buffer.len() >= tcp_offset + 20 {
-                let seq = u32::from_be_bytes([buffer[tcp_offset + 4], buffer[tcp_offset + 5], buffer[tcp_offset + 6], buffer[tcp_offset + 7]]);
-                let ack = u32::from_be_bytes([buffer[tcp_offset + 8], buffer[tcp_offset + 9], buffer[tcp_offset + 10], buffer[tcp_offset + 11]]);
-                let tcp_flags = buffer[tcp_offset + 13];
-                let src_port = u16::from_be_bytes([buffer[tcp_offset], buffer[tcp_offset + 1]]);
-                let dst_port = u16::from_be_bytes([buffer[tcp_offset + 2], buffer[tcp_offset + 3]]);
-                
-                // Store sequence numbers for patching workaround
-                if tcp_flags & 0x02 != 0 && tcp_flags & 0x10 == 0 {
-                    // Pure SYN - store seq and port for later patching of SYN-ACK (SERVER ROLE)
-                    unsafe { 
-                        LAST_SYN_SEQ = Some(seq);
-                        PATCHING_PORT = Some(dst_port);
-                    }
-                } else if tcp_flags & 0x02 != 0 && tcp_flags & 0x10 != 0 {
-                    // SYN-ACK received - store server's seq for client role patching
-                    unsafe {
-                        CLIENT_SERVER_SEQ = Some(seq);
-                        CLIENT_REMOTE_PORT = Some(src_port);
-                    }
-                }
-                
-                // Patch incoming ACK packets (SERVER ROLE)
-                if tcp_flags & 0x10 != 0 && tcp_flags & 0x02 == 0 && tcp_flags & 0x04 == 0 {
-                    if let (Some(server_seq), Some(port)) = unsafe { (SERVER_SYNACK_SEQ, PATCHING_PORT) } {
-                        if dst_port == port {
-                            let expected_ack = server_seq.wrapping_add(1);
-                            if ack != expected_ack && ack < 1000 {
-                                // Patch the ack number
-                                let ack_bytes = expected_ack.to_be_bytes();
-                                buffer[tcp_offset + 8] = ack_bytes[0];
-                                buffer[tcp_offset + 9] = ack_bytes[1];
-                                buffer[tcp_offset + 10] = ack_bytes[2];
-                                buffer[tcp_offset + 11] = ack_bytes[3];
-                                
-                                // Recalculate TCP checksum
-                                recalculate_tcp_checksum(&mut buffer, tcp_offset);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        f(&buffer)
-    }
-}
-
-/// TX token for transmitting packets
-struct VirtioTxToken<'a> {
-    device: &'a mut VirtioNet,
-}
-
-/// Helper function to recalculate TCP checksum after patching
-fn recalculate_tcp_checksum(buffer: &mut [u8], tcp_offset: usize) {
-    // Zero out the checksum field
-    buffer[tcp_offset + 16] = 0;
-    buffer[tcp_offset + 17] = 0;
-    
-    // Calculate pseudo-header checksum
-    let ip_offset = 14;
-    let src_ip = u32::from_be_bytes([buffer[ip_offset + 12], buffer[ip_offset + 13], buffer[ip_offset + 14], buffer[ip_offset + 15]]);
-    let dst_ip = u32::from_be_bytes([buffer[ip_offset + 16], buffer[ip_offset + 17], buffer[ip_offset + 18], buffer[ip_offset + 19]]);
-    let tcp_len = buffer.len() - tcp_offset;
-    
-    let mut sum: u32 = 0;
-    sum += (src_ip >> 16) as u32;
-    sum += (src_ip & 0xFFFF) as u32;
-    sum += (dst_ip >> 16) as u32;
-    sum += (dst_ip & 0xFFFF) as u32;
-    sum += 6u32; // TCP protocol number
-    sum += tcp_len as u32;
-    
-    // Add TCP segment (16-bit words)
-    let tcp_data = &buffer[tcp_offset..];
-    let mut i = 0;
-    while i + 1 < tcp_data.len() {
-        sum += u16::from_be_bytes([tcp_data[i], tcp_data[i + 1]]) as u32;
-        i += 2;
-    }
-    if i < tcp_data.len() {
-        sum += (tcp_data[i] as u32) << 8;
-    }
-    
-    // Fold 32-bit sum to 16 bits
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    let checksum = !(sum as u16);
-    let checksum_bytes = checksum.to_be_bytes();
-    buffer[tcp_offset + 16] = checksum_bytes[0];
-    buffer[tcp_offset + 17] = checksum_bytes[1];
-}
-
-impl TxToken for VirtioTxToken<'_> {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut buffer = vec![0u8; len];
-        let result = f(&mut buffer);
-
-        // Apply TCP ACK patching workaround for smoltcp bug
-        if buffer.len() >= 40 && buffer[12] == 0x08 && buffer[13] == 0x00 {
-            let ip_ihl = (buffer[14] & 0x0F) as usize * 4;
-            let tcp_offset = 14 + ip_ihl;
-            
-            if buffer.len() >= tcp_offset + 20 && buffer[23] == 6 {
-                let tcp_flags = buffer[tcp_offset + 13];
-                let src_port = u16::from_be_bytes([buffer[tcp_offset], buffer[tcp_offset + 1]]);
-                let dst_port = u16::from_be_bytes([buffer[tcp_offset + 2], buffer[tcp_offset + 3]]);
-                let seq_num = u32::from_be_bytes([buffer[tcp_offset + 4], buffer[tcp_offset + 5], buffer[tcp_offset + 6], buffer[tcp_offset + 7]]);
-                let ack_num = u32::from_be_bytes([buffer[tcp_offset + 8], buffer[tcp_offset + 9], buffer[tcp_offset + 10], buffer[tcp_offset + 11]]);
-                
-                // SYN-ACK patching (SERVER ROLE)
-                if tcp_flags & 0x02 != 0 && tcp_flags & 0x10 != 0 {
-                    if let Some(syn_seq) = unsafe { LAST_SYN_SEQ } {
-                        let correct_ack = syn_seq.wrapping_add(1);
-                        if ack_num != correct_ack {
-                            // Patch the ack number
-                            let ack_bytes = correct_ack.to_be_bytes();
-                            buffer[tcp_offset + 8] = ack_bytes[0];
-                            buffer[tcp_offset + 9] = ack_bytes[1];
-                            buffer[tcp_offset + 10] = ack_bytes[2];
-                            buffer[tcp_offset + 11] = ack_bytes[3];
-                            
-                            recalculate_tcp_checksum(&mut buffer, tcp_offset);
-                            
-                            // Store server's seq for patching incoming ACKs
-                            unsafe { SERVER_SYNACK_SEQ = Some(seq_num); }
-                        }
-                    }
-                } else if tcp_flags & 0x10 != 0 {
-                    // ACK packets - patch if ack is suspiciously low
-                    
-                    // SERVER ROLE: we're sending from our listening port
-                    if let Some(syn_seq) = unsafe { LAST_SYN_SEQ } {
-                        if let Some(port) = unsafe { PATCHING_PORT } {
-                            if src_port == port && ack_num < 1000 {
-                                let correct_ack = syn_seq.wrapping_add(1);
-                                let ack_bytes = correct_ack.to_be_bytes();
-                                buffer[tcp_offset + 8] = ack_bytes[0];
-                                buffer[tcp_offset + 9] = ack_bytes[1];
-                                buffer[tcp_offset + 10] = ack_bytes[2];
-                                buffer[tcp_offset + 11] = ack_bytes[3];
-                                recalculate_tcp_checksum(&mut buffer, tcp_offset);
-                            }
-                        }
-                    }
-                    
-                    // CLIENT ROLE: we're sending TO a remote server port
-                    if let Some(server_seq) = unsafe { CLIENT_SERVER_SEQ } {
-                        if let Some(remote_port) = unsafe { CLIENT_REMOTE_PORT } {
-                            if dst_port == remote_port && ack_num < 1000 {
-                                let correct_ack = server_seq.wrapping_add(1);
-                                let ack_bytes = correct_ack.to_be_bytes();
-                                buffer[tcp_offset + 8] = ack_bytes[0];
-                                buffer[tcp_offset + 9] = ack_bytes[1];
-                                buffer[tcp_offset + 10] = ack_bytes[2];
-                                buffer[tcp_offset + 11] = ack_bytes[3];
-                                recalculate_tcp_checksum(&mut buffer, tcp_offset);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Send the packet
-        let _ = self.device.send(&buffer);
-
-        result
-    }
-}
-
-/// Parse an IPv4 address from bytes
-pub fn parse_ipv4(s: &[u8]) -> Option<Ipv4Address> {
-    let mut octets = [0u8; 4];
-    let mut octet_idx = 0;
-    let mut current = 0u16;
-    let mut has_digit = false;
-
-    for &b in s {
-        if b >= b'0' && b <= b'9' {
-            current = current * 10 + (b - b'0') as u16;
-            has_digit = true;
-            if current > 255 {
-                return None;
-            }
-        } else if b == b'.' {
-            if !has_digit || octet_idx >= 3 {
-                return None;
-            }
-            octets[octet_idx] = current as u8;
-            octet_idx += 1;
-            current = 0;
-            has_digit = false;
-        } else {
-            return None;
+        // Reset per-port patching state for this specific port
+        if let Some(port) = socket_port {
+            reset_server_patching_for_port(port);
         }
     }
-
-    if !has_digit || octet_idx != 3 {
-        return None;
-    }
-    octets[3] = current as u8;
-
-    Some(Ipv4Address::new(octets[0], octets[1], octets[2], octets[3]))
-}
-
-/// Format an IPv4 address to a buffer
-pub fn format_ipv4(addr: Ipv4Address, buf: &mut [u8]) -> usize {
-    let octets = addr.octets();
-    let mut pos = 0;
-
-    for (i, &octet) in octets.iter().enumerate() {
-        // Write octet
-        if octet >= 100 {
-            buf[pos] = b'0' + (octet / 100);
-            pos += 1;
-        }
-        if octet >= 10 {
-            buf[pos] = b'0' + ((octet / 10) % 10);
-            pos += 1;
-        }
-        buf[pos] = b'0' + (octet % 10);
-        pos += 1;
-
-        // Write dot (except after last octet)
-        if i < 3 {
-            buf[pos] = b'.';
-            pos += 1;
-        }
-    }
-
-    pos
 }
