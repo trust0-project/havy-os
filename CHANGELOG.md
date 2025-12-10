@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.31](https://github.com/trust0-project/havy-os/compare/v0.1.30...v0.1.31) (2025-12-10)
+
+
+### Bug Fixes
+
+* improve httpd and tcpd services with single and multi hart ([8edb67a](https://github.com/trust0-project/havy-os/commit/8edb67ab8eaeaec601ac4005e85883f1ee60998d))
+
 ## [0.1.30](https://github.com/trust0-project/havy-os/compare/v0.1.29...v0.1.30) (2025-12-10)
 
 
@@ -140,4 +147,3 @@
 * remove line ([63248c8](https://github.com/elribonazo/havy-os/commit/63248c8))
 * release ([86c920a](https://github.com/elribonazo/havy-os/commit/86c920a))
 * add initial package ([34bead4](https://github.com/elribonazo/havy-os/commit/34bead4))
-
