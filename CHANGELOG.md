@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.30](https://github.com/trust0-project/havy-os/compare/v0.1.29...v0.1.30) (2025-12-10)
+
+
+### Features
+
+* implement TCP listen and http server ([c76bb29](https://github.com/trust0-project/havy-os/commit/c76bb29edb134037d837b1f84ab6becaaeba89cc))
+
 ## [0.1.29](https://github.com/trust0-project/havy-os/compare/v0.1.28...v0.1.29) (2025-12-08)
 
 
