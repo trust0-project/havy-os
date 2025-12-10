@@ -148,6 +148,9 @@ fn shell_tick() {
     if num_harts <= 1 {
         crate::init::klogd_tick();
         crate::init::sysmond_tick();
+        // Also tick network daemons in single-hart mode
+        crate::tcpd::tick();
+        crate::httpd::tick();
     }
     
     // Poll tail follow mode (always)

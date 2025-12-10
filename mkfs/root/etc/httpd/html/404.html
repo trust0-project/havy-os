@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>404 Not Found</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #0f0f1a;
+            color: #e0e0e0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            text-align: center;
+            padding: 2rem;
+        }
+
+        h1 {
+            font-size: 4rem;
+            color: #ff6b6b;
+            margin-bottom: 0.5rem;
+        }
+
+        p {
+            color: #a0a0a0;
+        }
+
+        code {
+            background: #1a1a2e;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            color: #00d9ff;
+        }
+
+        a {
+            color: #00d9ff;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+
+<body>
+    <div class='container'>
+        <h1>404</h1>
+        <h2>Not Found</h2>
+        <p>The requested path <code>{{PATH}}</code> was not found on this server.</p>
+        <p><a href="/">Go Home</a></p>
+        <hr style="border-color: #333; margin: 2rem 0;">
+        <p><i>BAVY OS httpd (embassy-net)</i></p>
+    </div>
+</body>
+
+</html>

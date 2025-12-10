@@ -2,7 +2,13 @@
 //!
 //! This driver communicates with the VirtIO MMIO network device
 //! to send and receive Ethernet frames.
+//!
+//! ## Thread Safety
+//!
+//! Queue memory is heap-allocated per-device (not static), eliminating
+//! race conditions when multiple harts access the network device.
 
+use alloc::boxed::Box;
 use core::ptr::{read_volatile, write_volatile};
 
 /// VirtIO MMIO base address for first device slot.
@@ -235,24 +241,30 @@ struct TxBuffer {
 pub struct VirtioNet {
     base: usize,
     pub mac: [u8; 6],
+    /// Heap-allocated RX queue memory (must stay alive as long as device is in use)
+    rx_queue_mem: Box<NetQueueMem>,
+    /// Heap-allocated TX queue memory (must stay alive as long as device is in use)
+    tx_queue_mem: Box<NetQueueMem>,
     rx_queue: VirtQueue,
     tx_queue: VirtQueue,
     rx_buffers: [Option<RxBuffer>; QUEUE_SIZE],
     tx_buffers: [Option<TxBuffer>; QUEUE_SIZE],
 }
 
-// Static storage for queues (must be page-aligned)
+/// Heap-allocated, page-aligned queue memory for network device.
 #[repr(C, align(4096))]
-struct QueueMem {
+struct NetQueueMem {
     data: [u8; PAGE_SIZE * 2],
 }
 
-static mut RX_QUEUE_MEM: QueueMem = QueueMem {
-    data: [0; PAGE_SIZE * 2],
-};
-static mut TX_QUEUE_MEM: QueueMem = QueueMem {
-    data: [0; PAGE_SIZE * 2],
-};
+impl NetQueueMem {
+    /// Allocate zeroed queue memory on the heap
+    fn new() -> Box<Self> {
+        Box::new(Self {
+            data: [0; PAGE_SIZE * 2],
+        })
+    }
+}
 
 impl VirtioNet {
     /// Read a 32-bit MMIO register
@@ -299,9 +311,13 @@ impl VirtioNet {
             return None;
         }
 
-        // Create uninitialized driver
-        let rx_queue = unsafe { VirtQueue::new(RX_QUEUE_MEM.data.as_mut_ptr(), 0) };
-        let tx_queue = unsafe { VirtQueue::new(TX_QUEUE_MEM.data.as_mut_ptr(), 1) };
+        // Allocate queue memory on heap
+        let mut rx_queue_mem = NetQueueMem::new();
+        let mut tx_queue_mem = NetQueueMem::new();
+        
+        // Create VirtQueues using the heap-allocated memory
+        let rx_queue = unsafe { VirtQueue::new(rx_queue_mem.data.as_mut_ptr(), 0) };
+        let tx_queue = unsafe { VirtQueue::new(tx_queue_mem.data.as_mut_ptr(), 1) };
 
         const NONE_RX: Option<RxBuffer> = None;
         const NONE_TX: Option<TxBuffer> = None;
@@ -309,6 +325,8 @@ impl VirtioNet {
         Some(VirtioNet {
             base,
             mac: [0; 6],
+            rx_queue_mem,
+            tx_queue_mem,
             rx_queue,
             tx_queue,
             rx_buffers: [NONE_RX; QUEUE_SIZE],
@@ -364,8 +382,8 @@ impl VirtioNet {
         }
         self.write32(QUEUE_NUM_OFFSET, QUEUE_SIZE as u32);
 
-        // Calculate PFN (page frame number) for RX queue
-        let rx_pfn = unsafe { RX_QUEUE_MEM.data.as_ptr() as u64 / PAGE_SIZE as u64 };
+        // Calculate PFN (page frame number) for RX queue using heap-allocated memory
+        let rx_pfn = self.rx_queue_mem.data.as_ptr() as u64 / PAGE_SIZE as u64;
         self.write32(QUEUE_PFN_OFFSET, rx_pfn as u32);
 
         // 10. Configure TX queue (queue 1)
@@ -376,7 +394,8 @@ impl VirtioNet {
         }
         self.write32(QUEUE_NUM_OFFSET, QUEUE_SIZE as u32);
 
-        let tx_pfn = unsafe { TX_QUEUE_MEM.data.as_ptr() as u64 / PAGE_SIZE as u64 };
+        // Calculate PFN for TX queue using heap-allocated memory
+        let tx_pfn = self.tx_queue_mem.data.as_ptr() as u64 / PAGE_SIZE as u64;
         self.write32(QUEUE_PFN_OFFSET, tx_pfn as u32);
 
         // 11. Read MAC address from config space

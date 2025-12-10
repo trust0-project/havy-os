@@ -22,11 +22,29 @@
 //! ```
 
 use crate::Spinlock;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+// Include the context switch assembly
+core::arch::global_asm!(include_str!("switch_context.S"));
+
+// External declaration for the context switch function
+extern "C" {
+    /// Switch from the current context to a new context.
+    ///
+    /// Saves all callee-saved registers to `old` and loads them from `new`.
+    /// Returns when another context switches back to us.
+    ///
+    /// # Safety
+    /// Both pointers must be valid Context structures.
+    /// The new context must have a valid stack pointer and return address.
+    pub fn switch_context(old: *mut Context, new: *mut Context);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROCESS IDENTIFIERS
@@ -163,6 +181,57 @@ impl Default for ProcessFlags {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CONTEXT (CPU Register State for Context Switching)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Default kernel stack size per process (4KB)
+pub const KSTACK_SIZE: usize = 4096;
+
+/// Saved CPU context for context switching.
+///
+/// On RISC-V, we save all callee-saved registers plus ra (return address)
+/// and sp (stack pointer). The caller-saved registers are saved by the
+/// caller before calling switch_context, so we don't need them here.
+///
+/// Layout matches what switch_context.S expects.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Context {
+    /// Return address (where to resume)
+    pub ra: u64,
+    /// Stack pointer
+    pub sp: u64,
+    /// Callee-saved registers s0-s11
+    pub s: [u64; 12],
+}
+
+impl Context {
+    /// Create a zeroed context
+    pub const fn zero() -> Self {
+        Self {
+            ra: 0,
+            sp: 0,
+            s: [0; 12],
+        }
+    }
+
+    /// Create a new context ready to start executing at `entry` with stack `sp`
+    pub fn new(entry: u64, sp: u64) -> Self {
+        Self {
+            ra: entry,
+            sp,
+            s: [0; 12],
+        }
+    }
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // PROCESS CONTROL BLOCK (PCB)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -201,6 +270,15 @@ pub struct Process {
     /// Exit code (valid when Zombie)
     pub exit_code: AtomicUsize,
 
+    // ─── Context Switching ───────────────────────────────────────────────────
+    /// Saved CPU context (registers) for context switching.
+    /// Wrapped in UnsafeCell because it's mutated during context switch
+    /// while the Process is behind an Arc.
+    pub context: UnsafeCell<Context>,
+    /// Kernel stack for this process (heap allocated)
+    /// The top of this stack is used as SP when context switching into the process.
+    pub kstack: Option<Box<[u8; KSTACK_SIZE]>>,
+
     // ─── Statistics ─────────────────────────────────────────────────────────
     /// Creation timestamp (ms since boot)
     pub created_at: u64,
@@ -210,9 +288,35 @@ pub struct Process {
     pub schedule_count: AtomicU64,
 }
 
+// SAFETY: Process uses UnsafeCell for context, but context is only accessed
+// during context switch which is synchronized by scheduler state transitions.
+// The scheduler ensures only one CPU accesses a process's context at a time.
+unsafe impl Sync for Process {}
+
 impl Process {
-    /// Create a new process
+    /// Get a raw pointer to the context for use in context switching.
+    ///
+    /// # Safety
+    /// The caller must ensure exclusive access during context switch.
+    /// This is enforced by the scheduler: only the CPU that picks a process
+    /// can switch into it, and only while it's marked Running.
+    #[inline]
+    pub fn context_ptr(&self) -> *mut Context {
+        self.context.get()
+    }
+
+    /// Create a new process with its own kernel stack.
+    ///
+    /// The process context is initialized so that when switched to,
+    /// it will start executing at the entry point function.
     pub fn new(pid: Pid, name: &str, entry: ProcessEntry) -> Self {
+        // Allocate kernel stack
+        let kstack = Box::new([0u8; KSTACK_SIZE]);
+        // Stack grows down on RISC-V, so SP points to top of stack
+        let stack_top = kstack.as_ptr() as u64 + KSTACK_SIZE as u64;
+        // Initialize context to start at entry function with proper stack
+        let context = Context::new(entry as u64, stack_top);
+
         Self {
             pid,
             name: String::from(name),
@@ -224,6 +328,8 @@ impl Process {
             entry,
             flags: ProcessFlags::empty(),
             exit_code: AtomicUsize::new(0),
+            context: UnsafeCell::new(context),
+            kstack: Some(kstack),
             created_at: crate::get_time_ms() as u64,
             cpu_time_ms: AtomicU64::new(0),
             schedule_count: AtomicU64::new(0),

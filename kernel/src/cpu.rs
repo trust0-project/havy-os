@@ -20,9 +20,10 @@
 //! processes to CPUs, not the other way around.
 
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use crate::process::Pid;
+use crate::process::{Context, Pid};
 use crate::Spinlock;
 use crate::MAX_HARTS;
 
@@ -104,6 +105,13 @@ pub struct Cpu {
 
     /// Whether CPU is in interrupt handler
     in_interrupt: AtomicBool,
+
+    // ─── Context Switching ──────────────────────────────────────────────────
+
+    /// Scheduler context - stores the register state of the scheduler loop
+    /// when switching into a process. When the process yields or is preempted,
+    /// we switch back to this context to resume the scheduler.
+    scheduler_context: UnsafeCell<Context>,
 }
 
 impl Cpu {
@@ -120,6 +128,7 @@ impl Cpu {
             interrupts: AtomicU64::new(0),
             idle_start: AtomicU64::new(0),
             in_interrupt: AtomicBool::new(false),
+            scheduler_context: UnsafeCell::new(Context::zero()),
         }
     }
 
@@ -239,7 +248,25 @@ impl Cpu {
     pub fn interrupt_count(&self) -> u64 {
         self.interrupts.load(Ordering::Relaxed)
     }
+
+    // ─── Context Switching ───────────────────────────────────────────────────
+
+    /// Get a pointer to the scheduler context for use in context switching.
+    ///
+    /// # Safety
+    /// The caller must ensure this is only used during context switching
+    /// operations on this specific CPU. Only the hart that owns this CPU
+    /// should call this method.
+    #[inline]
+    pub fn scheduler_context_ptr(&self) -> *mut Context {
+        self.scheduler_context.get()
+    }
 }
+
+// SAFETY: Cpu uses UnsafeCell for scheduler_context, but the context is only
+// accessed by the hart that owns this CPU entry. The scheduler ensures that
+// context switches only happen on the owning hart.
+unsafe impl Sync for Cpu {}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CPU TABLE

@@ -38,6 +38,8 @@ mod sched;
 mod shell;
 mod tcpd;
 mod httpd;
+mod trap;
+mod waitqueue;
 
 pub use scheduler::SCHEDULER;
 
@@ -391,6 +393,9 @@ fn secondary_hart_entry(hart_id: usize) -> ! {
     if let Some(cpu) = cpu::CPU_TABLE.get(hart_id) {
         cpu.online();
     }
+
+    // Initialize trap handlers for this hart
+    trap::init(hart_id);
 
     // Enter the hart loop (same loop used by all harts)
     hart_loop(hart_id);
@@ -1417,6 +1422,10 @@ fn main() -> ! {
     sched::init(online);
     print_boot_status("Process scheduler initialized", true);
     print_boot_info("Run queues", &format!("{} (one per CPU)", online));
+
+    // Initialize trap handlers for preemptive scheduling
+    trap::init(0);
+    print_boot_status("Trap handlers initialized", true);
 
     // Run init directly on primary hart (spawns daemons to secondary harts)
     // Note: We don't spawn init as a task - it runs synchronously during boot

@@ -28,10 +28,15 @@ static CACHE_ACCESS_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct DirEntry {
-    name: [u8; 24],
+    name: [u8; 64],  // Increased from 24 to support longer paths
     size: u32,
     head: u32,
 }
+
+/// Directory entry size: 64 (name) + 4 (size) + 4 (head) = 72 bytes
+const DIR_ENTRY_SIZE: usize = 72;
+/// Entries per sector: 512 / 72 = 7
+const ENTRIES_PER_SECTOR: usize = 7;
 
 /// Information about a file in the filesystem
 /// Used by the scripting engine to expose directory listing
@@ -347,18 +352,17 @@ impl FileSystem {
             };
 
             let mut sector_empty = true;
-            for j in 0..16 {
-                // 512 / 32 = 16 entries
-                let offset = j * 32;
+            for j in 0..ENTRIES_PER_SECTOR {
+                let offset = j * DIR_ENTRY_SIZE;
                 if buf[offset] == 0 {
                     continue;
                 }
 
                 sector_empty = false;
-                let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
+                let entry = unsafe { &*(buf[offset..offset + DIR_ENTRY_SIZE].as_ptr() as *const DirEntry) };
 
                 // Decode Name
-                let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(24);
+                let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(64);
                 let name = core::str::from_utf8(&entry.name[..name_len])
                     .unwrap_or("???")
                     .into();
@@ -398,18 +402,17 @@ impl FileSystem {
             };
 
             let mut sector_empty = true;
-            for j in 0..16 {
-                // 512 / 32 = 16 entries
-                let offset = j * 32;
+            for j in 0..ENTRIES_PER_SECTOR {
+                let offset = j * DIR_ENTRY_SIZE;
                 if buf[offset] == 0 {
                     continue;
                 }
 
                 sector_empty = false;
-                let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
+                let entry = unsafe { &*(buf[offset..offset + DIR_ENTRY_SIZE].as_ptr() as *const DirEntry) };
 
                 // Decode Name
-                let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(24);
+                let name_len = entry.name.iter().position(|&c| c == 0).unwrap_or(64);
                 let name = core::str::from_utf8(&entry.name[..name_len]).unwrap_or("???");
 
                 // Print
@@ -436,13 +439,19 @@ impl FileSystem {
     }
 
     pub fn read_file(&self, dev: &mut VirtioBlock, filename: &str) -> Option<Vec<u8>> {
-        let entry = self.find_entry(dev, filename)?;
+        let entry = match self.find_entry(dev, filename) {
+            Some(e) => e,
+            None => return None,
+        };
+        
         let mut data = Vec::with_capacity(entry.size as usize);
         let mut next = entry.head;
         let mut buf = [0u8; 512];
 
         while next != 0 && (data.len() < entry.size as usize) {
-            dev.read_sector(next as u64, &mut buf).ok()?;
+            if dev.read_sector(next as u64, &mut buf).is_err() {
+                return None;
+            }
             let next_ptr = u32::from_le_bytes(buf[0..4].try_into().unwrap());
 
             let remaining = entry.size as usize - data.len();
@@ -451,6 +460,7 @@ impl FileSystem {
 
             next = next_ptr;
         }
+        
         Some(data)
     }
 
@@ -502,9 +512,9 @@ impl FileSystem {
         }
 
         // Update Dir Entry
-        let mut name = [0u8; 24];
+        let mut name = [0u8; 64];
         let fname_bytes = filename.as_bytes();
-        let len = core::cmp::min(fname_bytes.len(), 24);
+        let len = core::cmp::min(fname_bytes.len(), 64);
         name[..len].copy_from_slice(&fname_bytes[..len]);
 
         let entry = DirEntry {
@@ -516,7 +526,7 @@ impl FileSystem {
         // Write Entry (using cache)
         {
             let buf = self.cache.read_mut(dev, sector)?;
-            let offset = index * 32;
+            let offset = index * DIR_ENTRY_SIZE;
             let ptr = &mut buf[offset] as *mut u8 as *mut DirEntry;
             unsafe {
                 *ptr = entry;
@@ -549,8 +559,8 @@ impl FileSystem {
         if let Some((sec, idx)) = self.find_entry_pos(dev, name) {
             let mut buf = [0u8; 512];
             dev.read_sector(sec, &mut buf).ok()?;
-            let offset = idx * 32;
-            let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
+            let offset = idx * DIR_ENTRY_SIZE;
+            let entry = unsafe { &*(buf[offset..offset + DIR_ENTRY_SIZE].as_ptr() as *const DirEntry) };
             return Some(*entry);
         }
         None
@@ -558,22 +568,29 @@ impl FileSystem {
 
     fn find_entry_pos(&self, dev: &mut VirtioBlock, name: &str) -> Option<(u64, usize)> {
         let mut buf = [0u8; 512];
+        
         for i in 0..SEC_DIR_COUNT {
             let sector = SEC_DIR_START + i;
-            dev.read_sector(sector, &mut buf).ok()?;
-            for j in 0..16 {
-                let offset = j * 32;
+            
+            if dev.read_sector(sector, &mut buf).is_err() {
+                return None;
+            }
+            
+            for j in 0..ENTRIES_PER_SECTOR {
+                let offset = j * DIR_ENTRY_SIZE;
                 if buf[offset] == 0 {
                     continue;
                 }
-                let entry = unsafe { &*(buf[offset..offset + 32].as_ptr() as *const DirEntry) };
-                let len = entry.name.iter().position(|&c| c == 0).unwrap_or(24);
+                let entry = unsafe { &*(buf[offset..offset + DIR_ENTRY_SIZE].as_ptr() as *const DirEntry) };
+                let len = entry.name.iter().position(|&c| c == 0).unwrap_or(64);
                 let entry_name = core::str::from_utf8(&entry.name[..len]).unwrap_or("");
+                
                 if entry_name == name {
                     return Some((sector, j));
                 }
             }
         }
+        
         None
     }
 
@@ -582,8 +599,8 @@ impl FileSystem {
         for i in 0..SEC_DIR_COUNT {
             let sector = SEC_DIR_START + i;
             dev.read_sector(sector, &mut buf).ok()?;
-            for j in 0..16 {
-                if buf[j * 32] == 0 {
+            for j in 0..ENTRIES_PER_SECTOR {
+                if buf[j * DIR_ENTRY_SIZE] == 0 {
                     return Some((sector, j));
                 }
             }
@@ -660,8 +677,8 @@ impl FileSystem {
 
         // Zero out the directory entry
         let buf = self.cache.read_mut(dev, sector)?;
-        let offset = index * 32;
-        for i in 0..32 {
+        let offset = index * DIR_ENTRY_SIZE;
+        for i in 0..DIR_ENTRY_SIZE {
             buf[offset + i] = 0;
         }
         self.cache.mark_dirty(sector);

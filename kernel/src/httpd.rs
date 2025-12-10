@@ -7,6 +7,7 @@
 //! integrated with the existing smoltcp infrastructure.
 
 use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 
@@ -14,6 +15,60 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 
 use crate::klog::klog_info;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Filesystem Access Helpers (Thread-Safe)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Read a file from the filesystem with proper locking.
+/// 
+/// Lock Ordering (per lock.rs protocol):
+/// 1. FS_STATE (Level 4) - Read lock allows concurrent readers
+/// 2. BLK_DEV (Level 5) - Write lock serializes hardware access
+/// 
+/// This ordering prevents deadlocks with other services (klogd, sysmond).
+fn read_from_fs(path: &str) -> Option<Vec<u8>> {
+    crate::uart::write_str("[httpd] read_from_fs: ");
+    crate::uart::write_line(path);
+    
+    // 1. Acquire Read Lock on FS_STATE (Level 4)
+    let fs_guard = crate::FS_STATE.read();
+    crate::uart::write_line("[httpd] FS_STATE lock acquired");
+    
+    if let Some(ref fs) = *fs_guard {
+        crate::uart::write_line("[httpd] FS is Some, acquiring BLK_DEV...");
+        
+        // 2. Acquire Write Lock on BLK_DEV (Level 5)
+        // VirtioBlock requires &mut self for all operations
+        let mut blk_guard = crate::BLK_DEV.write();
+        crate::uart::write_line("[httpd] BLK_DEV lock acquired");
+        
+        if let Some(ref mut dev) = *blk_guard {
+            crate::uart::write_line("[httpd] DEV is Some, calling read_file...");
+            
+            // 3. Perform Read Operation
+            let result = fs.read_file(dev, path);
+            
+            match &result {
+                Some(data) => {
+                    crate::uart::write_str("[httpd] read_file SUCCESS: ");
+                    crate::uart::write_u64(data.len() as u64);
+                    crate::uart::write_line(" bytes");
+                }
+                None => {
+                    crate::uart::write_line("[httpd] read_file returned None");
+                }
+            }
+            
+            return result;
+        } else {
+            crate::uart::write_line("[httpd] ERROR: DEV is None");
+        }
+    } else {
+        crate::uart::write_line("[httpd] ERROR: FS is None");
+    }
+    None
+}
 
 /// HTTP daemon listen port (default HTTP port)
 pub const HTTPD_PORT: u16 = 80;
@@ -73,7 +128,7 @@ fn build_simple_response(status: u16, status_text: &str, content_type: &str, bod
     response
 }
 
-/// Build the main index page
+/// Build the main index page from filesystem template
 fn build_index_response() -> Vec<u8> {
     let uptime_ms = crate::get_time_ms();
     let uptime_secs = uptime_ms / 1000;
@@ -85,182 +140,40 @@ fn build_index_response() -> Vec<u8> {
     let requests = HTTPD_REQUESTS_SERVED.load(Ordering::Relaxed);
     let version = env!("CARGO_PKG_VERSION");
     
-    let body = format!(
-        r#"<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>BAVY OS Web Server</title>
-    <style>
-        :root {{
-            --bg-primary: #0f0f1a;
-            --bg-secondary: #1a1a2e;
-            --bg-card: #16213e;
-            --accent: #0f3460;
-            --text-primary: #e0e0e0;
-            --text-secondary: #a0a0a0;
-            --highlight: #00d9ff;
-            --success: #00ff88;
-        }}
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
-            color: var(--text-primary);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 2rem;
-        }}
-        .container {{ max-width: 800px; width: 100%; }}
-        header {{ text-align: center; margin-bottom: 3rem; }}
-        h1 {{
-            font-size: 2.5rem;
-            font-weight: 700;
-            background: linear-gradient(90deg, var(--highlight), var(--success));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 0.5rem;
-        }}
-        .subtitle {{ color: var(--text-secondary); font-size: 1.1rem; }}
-        .badge {{
-            display: inline-block;
-            background: var(--accent);
-            color: var(--highlight);
-            padding: 0.25rem 0.75rem;
-            border-radius: 999px;
-            font-size: 0.75rem;
-            margin-top: 0.5rem;
-        }}
-        .card {{
-            background: var(--bg-card);
-            border-radius: 16px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-        }}
-        .card h2 {{
-            font-size: 1.2rem;
-            color: var(--highlight);
-            margin-bottom: 1rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }}
-        .stats-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 1rem;
-        }}
-        .stat {{
-            background: var(--accent);
-            padding: 1rem;
-            border-radius: 12px;
-            text-align: center;
-        }}
-        .stat-value {{
-            font-size: 1.8rem;
-            font-weight: 700;
-            color: var(--success);
-        }}
-        .stat-label {{
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-            margin-top: 0.25rem;
-        }}
-        .status-indicator {{
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            background: var(--success);
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-        }}
-        @keyframes pulse {{
-            0%, 100% {{ opacity: 1; }}
-            50% {{ opacity: 0.5; }}
-        }}
-        footer {{
-            margin-top: 2rem;
-            text-align: center;
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-        }}
-        a {{ color: var(--highlight); text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-    </style>
-</head>
-<body>
-    <div class='container'>
-        <header>
-            <h1>BAVY OS</h1>
-            <p class='subtitle'>RISC-V Operating System with Async HTTP Server</p>
-            <span class='badge'>Powered by Embassy-Net</span>
-        </header>
-        
-        <div class='card'>
-            <h2><span class='status-indicator'></span> System Status</h2>
-            <div class='stats-grid'>
-                <div class='stat'>
-                    <div class='stat-value'>{:02}:{:02}:{:02}</div>
-                    <div class='stat-label'>Uptime</div>
-                </div>
-                <div class='stat'>
-                    <div class='stat-value'>{}</div>
-                    <div class='stat-label'>CPU Cores</div>
-                </div>
-                <div class='stat'>
-                    <div class='stat-value'>{}</div>
-                    <div class='stat-label'>Requests Served</div>
-                </div>
-            </div>
-        </div>
-        
-        <div class='card'>
-            <h2>API Endpoints</h2>
-            <ul style='list-style: none; line-height: 2;'>
-                <li><a href='/status'>/status</a> - Human-readable status page</li>
-                <li><a href='/api/status'>/api/status</a> - JSON status API</li>
-            </ul>
-        </div>
-        
-        <footer>
-            <p>Powered by <strong>BAVY OS httpd v{}</strong></p>
-            <p>Async networking with Embassy-Net + smoltcp on RISC-V</p>
-        </footer>
-    </div>
-</body>
-</html>"#,
-        hours, mins, secs,
-        num_harts,
-        requests,
-        version
-    );
+    // Try to read template from filesystem, fallback to minimal error page
+    let template = read_from_fs("/etc/httpd/html/index.html")
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| String::from("<html><body><h1>Error: /etc/httpd/html/index.html not found</h1></body></html>"));
+    
+    // Perform template substitutions
+    let body = template
+        .replace("{{UPTIME}}", &format!("{:02}:{:02}:{:02}", hours, mins, secs))
+        .replace("{{CPU_CORES}}", &num_harts.to_string())
+        .replace("{{REQUESTS}}", &requests.to_string())
+        .replace("{{VERSION}}", version);
     
     build_simple_response(200, "OK", "text/html; charset=utf-8", body.as_bytes())
 }
 
-/// Build plain text status response
+/// Build plain text status response from filesystem template
 fn build_status_response() -> Vec<u8> {
     let uptime_ms = crate::get_time_ms();
     let uptime_secs = uptime_ms / 1000;
     let num_harts = crate::HARTS_ONLINE.load(Ordering::Relaxed);
     let requests = HTTPD_REQUESTS_SERVED.load(Ordering::Relaxed);
     
-    let body = format!(
-        "BAVY OS Status (Embassy-Net)\n\
-         ============================\n\
-         Uptime: {} seconds\n\
-         CPU Cores: {}\n\
-         HTTP Requests Served: {}\n\
-         HTTP Port: {}\n\
-         Async Runtime: embassy-executor (arch-spin)\n",
-        uptime_secs, num_harts, requests, HTTPD_PORT
-    );
+    // Try to read template from filesystem, fallback to hardcoded
+    let template = read_from_fs("/etc/httpd/html/status.html")
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| String::from(
+            "BAVY OS Status\n============================\nUptime: {{UPTIME_SEC}} seconds\nCPU Cores: {{CPU_CORES}}\n"
+        ));
+    
+    // Perform template substitutions
+    let body = template
+        .replace("{{UPTIME_SEC}}", &uptime_secs.to_string())
+        .replace("{{CPU_CORES}}", &num_harts.to_string())
+        .replace("{{REQUESTS}}", &requests.to_string());
     
     build_simple_response(200, "OK", "text/plain; charset=utf-8", body.as_bytes())
 }
@@ -280,18 +193,17 @@ fn build_json_response() -> Vec<u8> {
     build_simple_response(200, "OK", "application/json", body.as_bytes())
 }
 
-/// Build 404 response
+/// Build 404 response from filesystem template
 fn build_404_response(path: &str) -> Vec<u8> {
-    let body = format!(
-        r#"<!DOCTYPE html>
-<html><head><title>404 Not Found</title></head>
-<body style='font-family: system-ui; text-align: center; padding: 50px;'>
-<h1>404 Not Found</h1>
-<p>The requested path <code>{}</code> was not found on this server.</p>
-<hr><p><i>BAVY OS httpd (embassy-net)</i></p>
-</body></html>"#,
-        path
-    );
+    // Try to read template from filesystem, fallback to minimal error page
+    let template = read_from_fs("/etc/httpd/html/404.html")
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| String::from(
+            "<html><body><h1>404 Not Found</h1><p>Path: {{PATH}}</p></body></html>"
+        ));
+    
+    // Perform template substitution
+    let body = template.replace("{{PATH}}", path);
     
     build_simple_response(404, "Not Found", "text/html; charset=utf-8", body.as_bytes())
 }
@@ -314,8 +226,24 @@ pub fn init() -> Result<(), &'static str> {
         return Err("Network not available");
     }
     
+    // Verify httpd templates exist in filesystem
+    {
+        let mut fs_guard = crate::FS_STATE.write();
+        let mut blk_guard = crate::BLK_DEV.write();
+        
+        if let (Some(ref mut fs), Some(ref mut dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
+            let files = fs.list_dir(dev, "/");
+            let httpd_files: usize = files.iter().filter(|f| f.name.contains("httpd")).count();
+            if httpd_files > 0 {
+                klog_info("httpd", &format!("Found {} template files in /etc/httpd/html/", httpd_files));
+            } else {
+                klog_info("httpd", "WARNING: No httpd template files found");
+            }
+        }
+    }
+    
     HTTPD_INITIALIZED.store(true, Ordering::Release);
-    klog_info("httpd", &format!("Embassy-net HTTP server initialized on port {}", HTTPD_PORT));
+    klog_info("httpd", &format!("HTTP server initialized on port {}", HTTPD_PORT));
     
     Ok(())
 }

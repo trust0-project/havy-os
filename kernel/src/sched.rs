@@ -520,3 +520,68 @@ pub fn kill(pid: Pid) -> bool {
 pub fn list_processes() -> Vec<ProcessInfo> {
     SCHEDULER.list_processes()
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONTEXT SWITCHING & YIELDING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Flag indicating if a yield was requested from interrupt context
+static YIELD_PENDING: [AtomicBool; crate::MAX_HARTS] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; crate::MAX_HARTS]
+};
+
+/// Voluntarily yield the CPU to another process.
+///
+/// This should be called by processes that want to give up their time slice.
+/// For cooperative multitasking, processes should call this periodically.
+pub fn yield_now() {
+    let hart_id = crate::get_hart_id();
+    
+    // Get current process if any
+    if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
+        if let Some(pid) = cpu.running_process() {
+            if let Some(process) = SCHEDULER.get_process(pid) {
+                // Mark process as ready (it's voluntarily yielding)
+                process.mark_ready();
+                
+                // Requeue the process
+                SCHEDULER.requeue(process, hart_id);
+            }
+        }
+    }
+    
+    // The actual context switch happens in the hart loop
+    // This function just marks the yield as pending
+    if hart_id < crate::MAX_HARTS {
+        YIELD_PENDING[hart_id].store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Called from interrupt handler to request a yield.
+///
+/// This is used by the timer interrupt to trigger preemption.
+/// The actual context switch is deferred until it's safe.
+pub fn yield_from_interrupt() {
+    let hart_id = crate::get_hart_id();
+    
+    if hart_id < crate::MAX_HARTS {
+        YIELD_PENDING[hart_id].store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Check if a yield is pending for this hart
+pub fn yield_pending(hart_id: usize) -> bool {
+    if hart_id < crate::MAX_HARTS {
+        YIELD_PENDING[hart_id].swap(false, core::sync::atomic::Ordering::AcqRel)
+    } else {
+        false
+    }
+}
+
+/// Clear yield pending flag
+pub fn clear_yield_pending(hart_id: usize) {
+    if hart_id < crate::MAX_HARTS {
+        YIELD_PENDING[hart_id].store(false, core::sync::atomic::Ordering::Release);
+    }
+}

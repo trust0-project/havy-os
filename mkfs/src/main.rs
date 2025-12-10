@@ -40,10 +40,15 @@ struct Args {
 
 #[repr(C, packed)]
 struct DirEntry {
-    name: [u8; 24],
+    name: [u8; 64],  // Increased from 24 to support longer paths
     size: u32,
     head: u32,
 }
+
+/// Directory entry size: 64 (name) + 4 (size) + 4 (head) = 72 bytes
+const DIR_ENTRY_SIZE: usize = 72;
+/// Entries per sector: 512 / 72 = 7 (must match kernel)
+const ENTRIES_PER_SECTOR: u64 = 7;
 
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
@@ -120,6 +125,21 @@ fn main() -> std::io::Result<()> {
                 &etc_init_dir,
                 dir_idx,
                 "/etc/init.d/",
+            )?;
+        }
+    }
+
+    // 8. Import httpd HTML files from etc/httpd/html/ subdirectory
+    if let Some(ref src_dir) = args.dir {
+        let httpd_dir = src_dir.join("etc").join("httpd").join("html");
+        if httpd_dir.exists() {
+            println!("\n🌐 Importing files from etc/httpd/html/...");
+            dir_idx = import_directory(
+                &mut file,
+                &mut bitmap,
+                &httpd_dir,
+                dir_idx,
+                "/etc/httpd/html/",
             )?;
         }
     }
@@ -202,8 +222,8 @@ fn import_wasm_binaries(
         // Create the filesystem path: /usr/bin/<name>
         let fs_path = format!("/usr/bin/{}", bin_name);
 
-        if fs_path.len() > 23 {
-            println!("  ⚠️  Skipping {}: Path too long (max 23 chars)", fs_path);
+        if fs_path.len() > 63 {
+            println!("  ⚠️  Skipping {}: Path too long (max 63 chars)", fs_path);
             continue;
         }
 
@@ -243,8 +263,8 @@ fn import_directory(
                 format!("{}{}", prefix, base_name)
             };
 
-            if filename.len() > 23 {
-                println!("⚠️  Skipping {}: Name too long (max 23 chars)", filename);
+            if filename.len() > 63 {
+                println!("⚠️  Skipping {}: Name too long (max 63 chars)", filename);
                 continue;
             }
 
@@ -321,10 +341,14 @@ fn write_dir_entry(
     size: u32,
     head: u32,
 ) -> std::io::Result<()> {
-    let offset = (SEC_DIR_START * SECTOR_SIZE) + (idx * 32);
+    // Calculate which sector and offset within that sector
+    // Entries must not cross sector boundaries!
+    let sector = SEC_DIR_START + (idx / ENTRIES_PER_SECTOR);
+    let entry_in_sector = idx % ENTRIES_PER_SECTOR;
+    let offset = (sector * SECTOR_SIZE) + (entry_in_sector * DIR_ENTRY_SIZE as u64);
     file.seek(SeekFrom::Start(offset))?;
 
-    let mut name_bytes = [0u8; 24];
+    let mut name_bytes = [0u8; 64];
     let nb = name.as_bytes();
     name_bytes[..nb.len()].copy_from_slice(nb);
 
