@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.32](https://github.com/trust0-project/havy-os/compare/v0.1.31...v0.1.32) (2025-12-11)
+
+
+### Bug Fixes
+
+* improve OS kernel ([db16815](https://github.com/trust0-project/havy-os/commit/db168156dd55c2a4d519e753301cb193864323df))
+
 ## [0.1.31](https://github.com/trust0-project/havy-os/compare/v0.1.30...v0.1.31) (2025-12-10)
 
 
@@ -147,7 +154,3 @@
 * remove line ([63248c8](https://github.com/elribonazo/havy-os/commit/63248c8))
 * release ([86c920a](https://github.com/elribonazo/havy-os/commit/86c920a))
 * add initial package ([34bead4](https://github.com/elribonazo/havy-os/commit/34bead4))
-
-
-
-
