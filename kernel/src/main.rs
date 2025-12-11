@@ -23,6 +23,9 @@ mod tls12;
 mod uart;
 mod virtio_blk;
 mod virtio_net;
+mod virtio_gpu;
+mod virtio_input;
+mod ui;
 
 // Process management modules
 mod init;
@@ -1359,9 +1362,35 @@ fn main() -> ! {
     print_section("NETWORK SUBSYSTEM");
     init_network();
 
-    // ===================================================================
-    // SMP INITIALIZATION
-    // ===================================================================
+    // --- GPU SUBSYSTEM ---------------------------------------------------────
+    print_section("GPU SUBSYSTEM");
+    print_boot_info("Probing", "VirtIO GPU devices...");
+    
+    // Initialize GPU and UI subsystem
+    match ui::init() {
+        Ok(()) => {
+            print_boot_status("VirtIO GPU initialized", true);
+            print_boot_status("UI Manager initialized", true);
+            
+            // Also initialize VirtIO Input for keyboard
+            match virtio_input::init() {
+                Ok(()) => print_boot_status("VirtIO Input initialized", true),
+                Err(e) => print_boot_info("VirtIO Input", e),
+            }
+            
+            // Setup the boot screen UI elements (will be rendered by gpuid daemon)
+            ui::setup_boot_screen();
+            print_boot_status("Boot screen configured", true);
+            
+            // Note: Interactive UI rendering and input handling is done by gpuid daemon
+            // which will be spawned by the init system.
+        }
+        Err(e) => {
+            print_boot_info("GPU/UI init", e);
+            print_boot_status("VirtIO GPU not available", false);
+        }
+    }
+
 
     print_section("SMP INITIALIZATION");
 

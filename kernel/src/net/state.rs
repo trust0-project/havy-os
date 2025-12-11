@@ -45,6 +45,8 @@ pub struct NetState {
     loopback_replies: VecDeque<LoopbackReply>,
     /// Server socket manager for TCP listen/accept
     server_sockets: TcpServerManager,
+    /// Whether IP has been assigned from relay
+    ip_assigned: bool,
 }
 
 impl NetState {
@@ -56,40 +58,20 @@ impl NetState {
         device.init()?;
 
         // --- IP ADDRESS DISCOVERY ---
-        // Wait for an IP assignment from the host/relay
-        // In WASM, async tasks need the JS event loop to run, so we use many
-        // short iterations to give the browser more chances to process events
+        // Check once for IP, but don't block if not available yet
+        // IP will be checked again in poll() and interface updated when assigned
         let mut my_ip = DEFAULT_IP_ADDR; // Fallback default
         let mut got_ip = false;
 
-        crate::uart::write_str("    \x1b[0;90m+-\x1b[0m Waiting for IP assignment");
-        // 200 iterations with shorter delays = more chances for async tasks in WASM
-        // Total wait time is roughly 2-3 seconds
-        for i in 0..200 {
-            if let Some(ip_bytes) = device.get_config_ip() {
-                my_ip = Ipv4Address::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-                got_ip = true;
-                crate::uart::write_line(" \x1b[1;32m[OK]\x1b[0m");
-                break;
-            }
-            // Print a dot every 10 iterations to show progress
-            if i % 10 == 0 {
-                crate::uart::write_str(".");
-            }
-            // Shorter delay to allow more frequent checks and JS event loop to run in WASM
-            for _ in 0..200_000 {
-                core::hint::spin_loop();
-            }
-        }
-
-        // If we didn't get an IP, network is unavailable - return error
-        if !got_ip {
-            crate::uart::write_line(" \x1b[1;31m[FAILED]\x1b[0m");
-            crate::uart::write_line("    \x1b[1;31m[X]\x1b[0m No IP address assigned by relay");
-            crate::uart::write_line(
-                "    \x1b[0;90m    +- Check relay connection and certificate hash\x1b[0m",
-            );
-            return Err("No IP address assigned - networking disabled");
+        crate::uart::write_str("    \x1b[0;90m+-\x1b[0m Checking for IP assignment...");
+        // Quick initial check (no blocking)
+        if let Some(ip_bytes) = device.get_config_ip() {
+            my_ip = Ipv4Address::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+            got_ip = true;
+            crate::uart::write_line(" \x1b[1;32m[OK]\x1b[0m");
+        } else {
+            crate::uart::write_line(" \x1b[1;33m[PENDING]\x1b[0m");
+            crate::uart::write_line("    \x1b[0;90m    +- Network will initialize in background\x1b[0m");
         }
 
         // Save to global for other modules to use
@@ -183,6 +165,7 @@ impl NetState {
             arp_cache: None,
             loopback_replies: VecDeque::new(),
             server_sockets: TcpServerManager::new(),
+            ip_assigned: got_ip,
         };
 
         state.icmp_handle = state.sockets.add(icmp_socket);
@@ -200,6 +183,29 @@ impl NetState {
     /// Poll the network stack (call frequently)
     pub fn poll(&mut self, timestamp_ms: i64) {
         let timestamp = Instant::from_millis(timestamp_ms);
+
+        // Check for background IP assignment
+        if !self.ip_assigned {
+            if let Some(ip_bytes) = self.device.get_config_ip() {
+                let new_ip = Ipv4Address::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+                
+                // Update interface IP
+                self.iface.update_ip_addrs(|addrs| {
+                    addrs.clear();
+                    addrs.push(IpCidr::new(IpAddress::Ipv4(new_ip), PREFIX_LEN)).ok();
+                });
+                
+                // Update global IP
+                unsafe { MY_IP_ADDR = new_ip; }
+                
+                self.ip_assigned = true;
+                crate::uart::write_str("\x1b[1;32m[NET]\x1b[0m IP assigned: ");
+                let mut ip_buf = [0u8; 16];
+                let len = crate::net::format_ipv4(new_ip, &mut ip_buf);
+                crate::uart::write_bytes(&ip_buf[..len]);
+                crate::uart::write_line("");
+            }
+        }
 
         // Poll the device
         self.device.poll();

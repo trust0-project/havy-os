@@ -214,6 +214,14 @@ fn start_system_services() {
         None,
     );
     
+    register_service_def(
+        "gpuid",
+        "GPU UI daemon - handles keyboard input and display updates",
+        gpuid_service,
+        Priority::Normal,
+        None,
+    );
+    
     // ─── SPAWN DAEMONS ─────────────────────────────────────────────────────────────
     // 
     // With cooperative time-slicing, multiple daemons can run on the same hart.
@@ -286,6 +294,20 @@ fn start_system_services() {
             crate::uart::write_line("[init] httpd: skipped (no network)");
         }
         
+        // Spawn gpuid if GPU is available (unconditional, not dependent on network)
+        if crate::virtio_gpu::is_available() {
+            let gpuid_hart = get_least_loaded_hart();
+            let gpuid_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("gpuid", gpuid_service, Priority::Normal, Some(gpuid_hart));
+            register_service("gpuid", gpuid_pid, Some(gpuid_hart));
+            crate::uart::write_str("[init] gpuid spawned (PID ");
+            crate::uart::write_u64(gpuid_pid as u64);
+            crate::uart::write_str(") on CPU ");
+            crate::uart::write_u64(gpuid_hart as u64);
+            crate::uart::write_line("");
+        } else {
+            crate::uart::write_line("[init] gpuid: skipped (no GPU)");
+        }
+        
     } else {
         // ─── SHELL-LOOP COOPERATIVE MODE ──────────────────────────────────────────
         // Single-hart mode: services are ticked by the shell loop on hart 0
@@ -325,6 +347,15 @@ fn start_system_services() {
                 crate::uart::write_u64(crate::httpd::HTTPD_PORT as u64);
                 crate::uart::write_line("");
             }
+        }
+        
+        // Register gpuid in cooperative mode if GPU is available
+        if crate::virtio_gpu::is_available() {
+            let gpuid_pid = crate::process::allocate_pid();
+            register_service("gpuid", gpuid_pid, Some(0));
+            crate::uart::write_str("[init] gpuid (PID ");
+            crate::uart::write_u64(gpuid_pid as u64);
+            crate::uart::write_line(") cooperative on CPU 0");
         }
     }
 }
@@ -400,6 +431,11 @@ pub fn stop_service(name: &str) -> Result<(), &'static str> {
     let pid = svc.pid;
     drop(state); // Release lock before killing
 
+    // Special cleanup for gpuid: clear the display
+    if name == "gpuid" {
+        crate::virtio_gpu::clear_display();
+    }
+
     // Kill the process
     if pid > 0 {
         crate::sched::kill(pid);
@@ -419,9 +455,18 @@ pub fn stop_service_by_pid(pid: u32) -> bool {
     // Find the running service with this PID
     if let Some(svc) = state.services.iter_mut().find(|s| s.pid == pid && s.status == ServiceStatus::Running) {
         let name = svc.name.clone();
+        let is_gpuid = name == "gpuid";
         svc.status = ServiceStatus::Stopped;
         svc.pid = 0;
         svc.hart = None;
+        
+        // Release lock before cleanup
+        drop(state);
+        
+        // Special cleanup for gpuid: clear the display
+        if is_gpuid {
+            crate::virtio_gpu::clear_display();
+        }
         
         klog_info("init", &format!("Stopped service '{}' (PID {})", name, pid));
         return true;
@@ -966,6 +1011,78 @@ pub fn tcpd_service() {
 pub fn httpd_service() {
     crate::httpd::tick();
     spin_delay_ms(10);
+}
+
+/// Daemon service entry point for gpuid (GPU UI daemon)
+/// Handles keyboard input and GPU display updates.
+/// Runs at ~60 FPS when input is detected, otherwise polls less frequently.
+pub fn gpuid_service() {
+    use crate::{ui, virtio_gpu, virtio_input};
+    
+    // Skip if GPU not available
+    if !virtio_gpu::is_available() {
+        spin_delay_ms(100);
+        return;
+    }
+    
+    // Poll for input events
+    virtio_input::poll();
+    
+    // Process any pending input
+    let mut had_input = false;
+    while let Some(event) = virtio_input::next_event() {
+        had_input = true;
+        ui::with_ui(|ui_mgr| {
+            ui_mgr.handle_input(event);
+        });
+    }
+    
+    // Render if dirty
+    ui::with_ui(|ui_mgr| {
+        if ui_mgr.is_dirty() {
+            ui_mgr.render();
+            ui_mgr.flush();
+        }
+    });
+    
+    // Delay based on activity: faster when there's input, slower otherwise
+    if had_input {
+        spin_delay_ms(16); // ~60 FPS during interaction
+    } else {
+        spin_delay_ms(50); // ~20 FPS when idle
+    }
+}
+
+/// GPU UI tick function for cooperative mode (single-hart operation)
+/// Called periodically from shell_tick to handle input and render updates.
+pub fn gpuid_tick() {
+    use crate::{ui, virtio_gpu, virtio_input};
+    
+    // Skip if GPU not available
+    if !virtio_gpu::is_available() {
+        return;
+    }
+    
+    // Poll for input events
+    virtio_input::poll();
+    
+    // Process any pending input
+    while let Some(event) = virtio_input::next_event() {
+        ui::with_ui(|ui_mgr| {
+            ui_mgr.handle_input(event);
+        });
+    }
+    
+    // Render if dirty
+    ui::with_ui(|ui_mgr| {
+        if ui_mgr.is_dirty() {
+            ui_mgr.render();
+        }
+    });
+    
+    // Always flush to ensure front buffer is up-to-date
+    // This is needed because browser may reset WebGPU context on display mode switch
+    virtio_gpu::flush();
 }
 
 /// WASM worker service entry point

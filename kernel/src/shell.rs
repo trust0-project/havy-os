@@ -151,6 +151,8 @@ fn shell_tick() {
         // Also tick network daemons in single-hart mode
         crate::tcpd::tick();
         crate::httpd::tick();
+        // Tick GPU UI daemon for display updates
+        crate::init::gpuid_tick();
     }
     
     // Poll tail follow mode (always)
