@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.33](https://github.com/trust0-project/havy-os/compare/v0.1.32...v0.1.33) (2025-12-11)
+
+
+### Bug Fixes
+
+* GUI + kernel boot improvements ([290d28d](https://github.com/trust0-project/havy-os/commit/290d28d2feeaa46b0dd4e98ff32271232113ca71))
+
 ## [0.1.32](https://github.com/trust0-project/havy-os/compare/v0.1.31...v0.1.32) (2025-12-11)
 
 
