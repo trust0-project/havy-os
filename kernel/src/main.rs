@@ -25,6 +25,7 @@ mod virtio_blk;
 mod virtio_net;
 mod virtio_gpu;
 mod virtio_input;
+mod boot_console;
 mod ui;
 
 // Process management modules
@@ -1355,40 +1356,59 @@ fn main() -> ! {
     uart::write_line(" KiB\x1b[0m");
     print_boot_status("Heap allocator ready", true);
 
+    // --- EARLY GPU INIT FOR BOOT CONSOLE ---------------------------------────
+    // Try to initialize GPU early so we can show boot messages on screen
+    let gpu_available = if let Ok(()) = virtio_gpu::init() {
+        boot_console::init();
+        boot_console::print_line("HAVY OS Boot Console");
+        boot_console::print_line("====================");
+        boot_console::print_line("");
+        boot_console::print_boot_msg("BOOT", "Early GPU initialized");
+        boot_console::print_boot_msg("HEAP", &format!("{} KiB available", total_heap / 1024));
+        true
+    } else {
+        false
+    };
+
     // --- STORAGE SUBSYSTEM -----------------------------------------------────
     init_storage();
+    if gpu_available {
+        boot_console::print_boot_msg("DISK", "Block device initialized");
+    }
 
     // --- NETWORK SUBSYSTEM -----------------------------------------------────
     print_section("NETWORK SUBSYSTEM");
     init_network();
+    if gpu_available {
+        boot_console::print_boot_msg("NET", "Network subsystem initialized");
+    }
 
     // --- GPU SUBSYSTEM ---------------------------------------------------────
     print_section("GPU SUBSYSTEM");
-    print_boot_info("Probing", "VirtIO GPU devices...");
     
-    // Initialize GPU and UI subsystem
-    match ui::init() {
-        Ok(()) => {
-            print_boot_status("VirtIO GPU initialized", true);
-            print_boot_status("UI Manager initialized", true);
-            
-            // Also initialize VirtIO Input for keyboard
-            match virtio_input::init() {
-                Ok(()) => print_boot_status("VirtIO Input initialized", true),
-                Err(e) => print_boot_info("VirtIO Input", e),
+    if gpu_available {
+        print_boot_status("VirtIO GPU initialized", true);
+        
+        // Initialize UI Manager (will be used after boot completes)
+        unsafe {
+            crate::ui::UI_MANAGER = Some(crate::ui::UiManager::new());
+        }
+        print_boot_status("UI Manager initialized", true);
+        
+        // Also initialize VirtIO Input for keyboard
+        match virtio_input::init() {
+            Ok(()) => {
+                print_boot_status("VirtIO Input initialized", true);
+                boot_console::print_boot_msg("INPUT", "Keyboard initialized");
             }
-            
-            // Setup the boot screen UI elements (will be rendered by gpuid daemon)
-            ui::setup_boot_screen();
-            print_boot_status("Boot screen configured", true);
-            
-            // Note: Interactive UI rendering and input handling is done by gpuid daemon
-            // which will be spawned by the init system.
+            Err(e) => print_boot_info("VirtIO Input", e),
         }
-        Err(e) => {
-            print_boot_info("GPU/UI init", e);
-            print_boot_status("VirtIO GPU not available", false);
-        }
+        
+        boot_console::print_line("");
+        boot_console::print_boot_msg("BOOT", "Preparing system services...");
+    } else {
+        print_boot_info("Probing", "VirtIO GPU devices...");
+        print_boot_status("VirtIO GPU not available", false);
     }
 
 
@@ -1840,32 +1860,6 @@ fn init_network() {
                         *net_guard = Some(state);
                         if let Some(ref mut s) = *net_guard {
                             s.finalize();
-
-                            // Print network configuration
-                            uart::write_line("");
-                            uart::write_str("    \x1b[0m  MAC Address:   \x1b[1;97m");
-                            uart::write_bytes(&s.mac_str());
-                            uart::write_line("\x1b[0m                    \x1b[0m");
-
-                            let mut ip_buf = [0u8; 16];
-                            let my_ip = net::get_my_ip();
-                            let ip_len = net::format_ipv4(my_ip, &mut ip_buf);
-                            uart::write_str("    \x1b[0m  IPv4 Address:  \x1b[1;97m");
-                            uart::write_bytes(&ip_buf[..ip_len]);
-                            uart::write_str("/");
-                            uart::write_u64(net::PREFIX_LEN as u64);
-                            uart::write_line("\x1b[0m                   \x1b[0m");
-
-                            let gw_len = net::format_ipv4(net::GATEWAY, &mut ip_buf);
-                            uart::write_str("    \x1b[0m  Gateway:       \x1b[1;97m");
-                            uart::write_bytes(&ip_buf[..gw_len]);
-                            uart::write_line("\x1b[0m                       \x1b[0m");
-
-                            let dns_len = net::format_ipv4(net::DNS_SERVER, &mut ip_buf);
-                            uart::write_str("    \x1b[0m  DNS Server:    \x1b[1;97m");
-                            uart::write_bytes(&ip_buf[..dns_len]);
-                            uart::write_line("\x1b[0m                       \x1b[0m");
-                            uart::write_line("");
                         }
                     }
                     print_boot_status("Network stack initialized (smoltcp)", true);

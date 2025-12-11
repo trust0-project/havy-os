@@ -199,11 +199,6 @@ impl NetState {
                 unsafe { MY_IP_ADDR = new_ip; }
                 
                 self.ip_assigned = true;
-                crate::uart::write_str("\x1b[1;32m[NET]\x1b[0m IP assigned: ");
-                let mut ip_buf = [0u8; 16];
-                let len = crate::net::format_ipv4(new_ip, &mut ip_buf);
-                crate::uart::write_bytes(&ip_buf[..len]);
-                crate::uart::write_line("");
             }
         }
 

@@ -87,19 +87,12 @@ impl VirtioBlock {
     }
 
     fn init(&mut self) {
-        crate::uart::write_str("[VIRTIO_BLK] init() base=0x");
-        crate::uart::write_u64(self.base as u64);
         
         // Check device magic number (should be 0x74726976 = "virt")
         let magic = self.read32(0x000);
-        crate::uart::write_str(" magic=0x");
-        crate::uart::write_u64(magic as u64);
         
         // Check version
         let version = self.read32(0x004);
-        crate::uart::write_str(" version=");
-        crate::uart::write_u64(version as u64);
-        crate::uart::write_line("");
         
         if magic != 0x74726976 {
             crate::uart::write_line("[VIRTIO_BLK] ERROR: Invalid magic - device not present!");
@@ -135,11 +128,6 @@ impl VirtioBlock {
         
         // Driver OK
         self.write32(0x070, 1 | 2 | 4 | 8);
-        
-        let final_status = self.read32(0x070);
-        crate::uart::write_str("[VIRTIO_BLK] init() complete, status=");
-        crate::uart::write_u64(final_status as u64);
-        crate::uart::write_line("");
     }
 
     fn op_sector(

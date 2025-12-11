@@ -21,11 +21,11 @@ const VIRTIO_GPU_DEVICE_ID: u32 = 16;
 
 /// Fixed framebuffer physical address (FRONT BUFFER)
 /// This is what the host reads for display
-const FRAMEBUFFER_ADDR: usize = 0x8100_0000;
+pub const FRAMEBUFFER_ADDR: usize = 0x8100_0000;
 
 /// Back buffer address for double-buffering
 /// All rendering happens here, then copied to front buffer on flush
-const BACK_BUFFER_ADDR: usize = 0x8120_0000;
+pub const BACK_BUFFER_ADDR: usize = 0x8120_0000;
 
 /// MMIO register offsets
 const MAGIC_VALUE_OFFSET: usize = 0x000;
@@ -167,25 +167,26 @@ impl GpuDriver {
         const VIRTIO_BASE: usize = 0x1000_1000;
         const VIRTIO_STRIDE: usize = 0x1000;
         
+        uart::write_line("[GPU] Probing VirtIO slots for GPU device...");
+        
         for i in 0..8 {
             let base = VIRTIO_BASE + i * VIRTIO_STRIDE;
             unsafe {
                 let magic = core::ptr::read_volatile((base + MAGIC_VALUE_OFFSET) as *const u32);
                 let device_id = core::ptr::read_volatile((base + DEVICE_ID_OFFSET) as *const u32);
                 
-                // Debug: show what we find at each slot
-                uart::write_str("    +- Slot ");
+                uart::write_str("[GPU] Slot ");
                 uart::write_u64(i as u64);
-                uart::write_str(" @ 0x");
-                uart::write_hex(base as u64);
                 uart::write_str(": magic=0x");
                 uart::write_hex(magic as u64);
-                uart::write_str(", device_id=");
+                uart::write_str(" device_id=");
                 uart::write_u64(device_id as u64);
                 uart::write_line("");
                 
                 if magic == 0x7472_6976 && device_id == VIRTIO_GPU_DEVICE_ID {
-                    uart::write_line("    +- Found GPU device!");
+                    uart::write_str("[GPU] Found GPU at slot ");
+                    uart::write_u64(i as u64);
+                    uart::write_line("");
                     return Some(Self {
                         base,
                         width: 0,
@@ -196,6 +197,7 @@ impl GpuDriver {
                 }
             }
         }
+        uart::write_line("[GPU] No GPU device found in any slot");
         None
     }
 

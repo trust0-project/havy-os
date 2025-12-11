@@ -1017,11 +1017,38 @@ pub fn httpd_service() {
 /// Handles keyboard input and GPU display updates.
 /// Runs at ~60 FPS when input is detected, otherwise polls less frequently.
 pub fn gpuid_service() {
-    use crate::{ui, virtio_gpu, virtio_input};
+    use crate::{boot_console, ui, virtio_gpu, virtio_input};
     
     // Skip if GPU not available
     if !virtio_gpu::is_available() {
         spin_delay_ms(100);
+        return;
+    }
+    
+    // Check if we need to transition from boot console to GUI
+    if boot_console::get_phase() == boot_console::BootPhase::Console {
+        // Transition to GUI mode
+        boot_console::print_line("");
+        boot_console::print_boot_msg("BOOT", "System ready, starting GUI...");
+        boot_console::render();
+        
+        // Brief delay to show final message
+        spin_delay_ms(500);
+        
+        // Clear framebuffer and switch to GUI phase
+        virtio_gpu::clear_display();
+        boot_console::set_phase_gui();
+        
+        // Setup the boot screen UI elements
+        ui::setup_boot_screen();
+        
+        // Initial render
+        ui::with_ui(|ui_mgr| {
+            ui_mgr.mark_dirty();
+            ui_mgr.render();
+            ui_mgr.flush();
+        });
+        
         return;
     }
     
@@ -1056,10 +1083,29 @@ pub fn gpuid_service() {
 /// GPU UI tick function for cooperative mode (single-hart operation)
 /// Called periodically from shell_tick to handle input and render updates.
 pub fn gpuid_tick() {
-    use crate::{ui, virtio_gpu, virtio_input};
+    use crate::{boot_console, ui, virtio_gpu, virtio_input};
     
     // Skip if GPU not available
     if !virtio_gpu::is_available() {
+        return;
+    }
+    
+    // Handle boot phase transition
+    if boot_console::get_phase() == boot_console::BootPhase::Console {
+        boot_console::print_line("");
+        boot_console::print_boot_msg("BOOT", "System ready, starting GUI...");
+        boot_console::render();
+        
+        // Clear and switch to GUI
+        virtio_gpu::clear_display();
+        boot_console::set_phase_gui();
+        ui::setup_boot_screen();
+        
+        ui::with_ui(|ui_mgr| {
+            ui_mgr.mark_dirty();
+            ui_mgr.render();
+        });
+        virtio_gpu::flush();
         return;
     }
     
