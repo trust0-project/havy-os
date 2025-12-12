@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.36](https://github.com/trust0-project/havy-os/compare/v0.1.35...v0.1.36) (2025-12-12)
+
+
+### Bug Fixes
+
+* add mouse pointer events and improve drawing ([b0ce5b0](https://github.com/trust0-project/havy-os/commit/b0ce5b0d9ceec12e3177ce68d7afa9ecb0b7759e))
+
 ## [0.1.35](https://github.com/trust0-project/havy-os/compare/v0.1.34...v0.1.35) (2025-12-12)
 
 
