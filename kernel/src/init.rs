@@ -1055,15 +1055,32 @@ pub fn gpuid_service() {
     // Poll for input events
     virtio_input::poll();
     
-    // Process any pending input
+    // Check demo mode once before processing events (optimization)
+    let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+    
+    // COALESCED event processing - drain all events, update state atomically
+    // This prevents lag from intermediate mouse positions
     let mut had_input = false;
+    let mut had_button_action = false;
+    
     while let Some(event) = virtio_input::next_event() {
         had_input = true;
-        // Check if we're in demo mode - use demo input handler
-        let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+        
         if is_demo {
-            // Handle input for demo screen (arrow keys, enter)
-            let _ = ui::handle_demo_input(event);
+            // For mouse movement (EV_ABS), just update position - don't process fully
+            // This allows coalescing of multiple movement events
+            if event.event_type == virtio_input::EV_ABS {
+                match event.code {
+                    virtio_input::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
+                    virtio_input::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
+                    _ => {}
+                }
+            } else {
+                // Handle keyboard and button events immediately
+                if let Some(_button) = ui::handle_demo_input(event) {
+                    had_button_action = true;
+                }
+            }
         } else {
             ui::with_ui(|ui_mgr| {
                 ui_mgr.handle_input(event);
@@ -1071,11 +1088,18 @@ pub fn gpuid_service() {
         }
     }
     
-    // Render if dirty (only applies when not in demo mode)
-    let is_demo_mode = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
-    if is_demo_mode {
-        // Periodically update hardware stats (only redraws the stats section)
-        ui::update_demo_hardware_stats();
+    // Render cursor at FINAL position (after all events processed)
+    if is_demo {
+        // No VM cursor rendering - using browser's native cursor
+        // Position is updated for click hit-testing only
+        
+        // Only flush if there was input (button clicked) or periodically for stats
+        if had_input {
+            virtio_gpu::flush();
+        } else {
+            // Periodically update hardware stats
+            ui::update_demo_hardware_stats();
+        }
     } else {
         ui::with_ui(|ui_mgr| {
             if ui_mgr.is_dirty() {
@@ -1128,13 +1152,24 @@ pub fn gpuid_tick() {
     // Poll for input events
     virtio_input::poll();
     
-    // Process any pending input
+    // Check demo mode once before processing events
+    let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+    
+    // COALESCED event processing (same as gpuid_service)
+    let mut had_input = false;
     while let Some(event) = virtio_input::next_event() {
-        // Check if we're in demo mode - use demo input handler
-        let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+        had_input = true;
         if is_demo {
-            // Handle input for demo screen (arrow keys, enter)
-            let _ = ui::handle_demo_input(event);
+            // For mouse movement, just update position - coalesce multiple events
+            if event.event_type == virtio_input::EV_ABS {
+                match event.code {
+                    virtio_input::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
+                    virtio_input::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
+                    _ => {}
+                }
+            } else {
+                let _ = ui::handle_demo_input(event);
+            }
         } else {
             ui::with_ui(|ui_mgr| {
                 ui_mgr.handle_input(event);
@@ -1142,19 +1177,20 @@ pub fn gpuid_tick() {
         }
     }
     
-    // Render if dirty (only applies when not in demo mode)
-    let is_demo_mode = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
-    if is_demo_mode {
-        // Periodically update hardware stats (only redraws the stats section)
-        ui::update_demo_hardware_stats();
+    // Render (no cursor - using browser's native cursor)
+    if is_demo {
+        // Position is updated for click hit-testing only
+        if had_input {
+            virtio_gpu::flush();
+        } else {
+            ui::update_demo_hardware_stats();
+        }
     } else {
         ui::with_ui(|ui_mgr| {
             if ui_mgr.is_dirty() {
                 ui_mgr.render();
             }
         });
-        // Always flush to ensure front buffer is up-to-date
-        // This is needed because browser may reset WebGPU context on display mode switch
         virtio_gpu::flush();
     }
 }

@@ -26,6 +26,16 @@ const STATUS_FEATURES_OK: u32 = 8;
 // Linux input event types
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
+pub const EV_ABS: u16 = 0x03;
+
+// Absolute position codes (for mouse)
+pub const ABS_X: u16 = 0x00;
+pub const ABS_Y: u16 = 0x01;
+
+// Mouse button codes
+pub const BTN_LEFT: u16 = 0x110;
+pub const BTN_RIGHT: u16 = 0x111;
+pub const BTN_MIDDLE: u16 = 0x112;
 
 // Common key codes (Linux input.h compatible)
 pub const KEY_ESC: u16 = 1;
@@ -311,8 +321,8 @@ impl InputDriver {
                 // (read from DRAM where host wrote, not from Rust array)
                 let event = unsafe { core::ptr::read_volatile(&self.event_buffers[desc_id] as *const InputEvent) };
                 
-                // Only queue key events (filter out SYN etc)
-                if event.event_type == EV_KEY {
+                // Queue key events and mouse events (filter out SYN)
+                if event.event_type == EV_KEY || event.event_type == EV_ABS {
                     self.event_queue.push_back(event);
                 }
                 

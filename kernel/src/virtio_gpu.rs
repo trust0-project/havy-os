@@ -291,14 +291,163 @@ impl GpuDriver {
         }
     }
 
-    /// Clear the back buffer to a solid color
+    /// Clear the back buffer using 64-bit writes for double speed
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
+        let pixel64 = (pixel as u64) | ((pixel as u64) << 32);
         let fb_size = (self.width * self.height) as usize;
         unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *mut u64;
+            // Write pairs of pixels (64-bit) - 2× faster than 32-bit
+            let pairs = fb_size / 2;
+            for i in 0..pairs {
+                core::ptr::write_volatile(fb_ptr.add(i), pixel64);
+            }
+            // Handle odd pixel if needed
+            if fb_size % 2 != 0 {
+                let last_ptr = (BACK_BUFFER_ADDR as *mut u32).add(fb_size - 1);
+                core::ptr::write_volatile(last_ptr, pixel);
+            }
+        }
+    }
+
+    /// Fast horizontal line fill (much faster than pixel-by-pixel for rectangles)
+    #[inline]
+    pub fn fill_hline(&mut self, x: u32, y: u32, width: u32, r: u8, g: u8, b: u8) {
+        if y >= self.height || x >= self.width || width == 0 {
+            return;
+        }
+        let w = width.min(self.width - x) as usize;
+        let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
+        let start_idx = (y * self.width + x) as usize;
+        unsafe {
             let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-            for i in 0..fb_size {
-                core::ptr::write_volatile(fb_ptr.add(i), pixel);
+            // Use 64-bit writes for longer lines
+            if w >= 4 {
+                let pixel64 = (pixel as u64) | ((pixel as u64) << 32);
+                let ptr64 = fb_ptr.add(start_idx) as *mut u64;
+                let pairs = w / 2;
+                for i in 0..pairs {
+                    core::ptr::write_volatile(ptr64.add(i), pixel64);
+                }
+                // Handle remaining pixels
+                for i in (pairs * 2)..w {
+                    core::ptr::write_volatile(fb_ptr.add(start_idx + i), pixel);
+                }
+            } else {
+                for i in 0..w {
+                    core::ptr::write_volatile(fb_ptr.add(start_idx + i), pixel);
+                }
+            }
+        }
+    }
+
+    /// Fast filled rectangle using horizontal line fills
+    #[inline]
+    pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
+        if y >= self.height || x >= self.width || width == 0 || height == 0 {
+            return;
+        }
+        let h = height.min(self.height.saturating_sub(y));
+        for row in 0..h {
+            self.fill_hline(x, y + row, width, r, g, b);
+        }
+    }
+
+    /// Read a pixel from the back buffer (returns RGBA as u32)
+    #[inline]
+    pub fn get_pixel(&self, x: u32, y: u32) -> u32 {
+        if x >= self.width || y >= self.height {
+            return 0;
+        }
+        let idx = (y * self.width + x) as usize;
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *const u32;
+            core::ptr::read_volatile(fb_ptr.add(idx))
+        }
+    }
+
+    /// Set a pixel in the back buffer directly (for cursor restore)
+    #[inline]
+    pub fn put_pixel(&mut self, x: u32, y: u32, pixel: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let idx = (y * self.width + x) as usize;
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
+            core::ptr::write_volatile(fb_ptr.add(idx), pixel);
+        }
+    }
+
+    /// Read a rectangle of pixels into a buffer (for cursor backup)
+    /// Returns number of pixels read
+    #[inline]
+    pub fn read_rect(&self, x: u32, y: u32, w: usize, h: usize, buf: &mut [u32]) -> usize {
+        let mut count = 0;
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *const u32;
+            for row in 0..h {
+                let cy = y + row as u32;
+                if cy >= self.height { break; }
+                let row_start = (cy * self.width) as usize;
+                for col in 0..w {
+                    let cx = x + col as u32;
+                    if cx >= self.width { continue; }
+                    let idx = row * w + col;
+                    if idx < buf.len() {
+                        buf[idx] = core::ptr::read_volatile(fb_ptr.add(row_start + cx as usize));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Write a rectangle of pixels from a buffer (for cursor restore)
+    /// Skips pixels with value 0 (transparent/skip marker)
+    #[inline]
+    pub fn write_rect(&mut self, x: u32, y: u32, w: usize, h: usize, buf: &[u32], mask: &[u8]) {
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
+            for row in 0..h {
+                let cy = y + row as u32;
+                if cy >= self.height { break; }
+                let row_start = (cy * self.width) as usize;
+                for col in 0..w {
+                    let cx = x + col as u32;
+                    if cx >= self.width { continue; }
+                    let idx = row * w + col;
+                    // Only write pixels where mask is non-zero (cursor was drawn there)
+                    if idx < buf.len() && idx < mask.len() && mask[idx] != 0 {
+                        core::ptr::write_volatile(fb_ptr.add(row_start + cx as usize), buf[idx]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw cursor bitmap directly to framebuffer (batched write)
+    #[inline]
+    pub fn draw_cursor_bitmap(&mut self, x: i32, y: i32, w: usize, h: usize, bitmap: &[u8]) {
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
+            for row in 0..h {
+                let cy = y + row as i32;
+                if cy < 0 || cy >= self.height as i32 { continue; }
+                let row_start = (cy as u32 * self.width) as usize;
+                for col in 0..w {
+                    let cx = x + col as i32;
+                    if cx < 0 || cx >= self.width as i32 { continue; }
+                    let pixel_type = bitmap[row * w + col];
+                    let color = match pixel_type {
+                        1 => 0xFF000000u32, // Black border
+                        2 => 0xFFFFFFFFu32, // White fill
+                        _ => continue,       // Transparent
+                    };
+                    core::ptr::write_volatile(fb_ptr.add(row_start + cx as usize), color);
+                }
             }
         }
     }

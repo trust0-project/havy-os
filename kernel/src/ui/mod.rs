@@ -19,7 +19,191 @@ use embedded_graphics::{
 };
 
 use crate::virtio_gpu;
-use crate::virtio_input::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
+use crate::virtio_input::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, 
+    EV_ABS, ABS_X, ABS_Y, BTN_LEFT, BTN_RIGHT, BTN_MIDDLE};
+
+/// Mouse/cursor state
+static mut CURSOR_X: i32 = 400;  // Start at center
+static mut CURSOR_Y: i32 = 300;
+static mut CURSOR_VISIBLE: bool = false;
+static mut MOUSE_BUTTONS: u8 = 0;  // Bitmask: bit 0 = left, bit 1 = right, bit 2 = middle
+
+/// Get current cursor position
+pub fn get_cursor_pos() -> (i32, i32) {
+    unsafe { (CURSOR_X, CURSOR_Y) }
+}
+
+/// Set cursor position (called when EV_ABS events received)
+pub fn set_cursor_pos(x: i32, y: i32) {
+    unsafe {
+        CURSOR_X = x.clamp(0, 799);
+        CURSOR_Y = y.clamp(0, 599);
+        CURSOR_VISIBLE = true;
+    }
+}
+
+/// Set mouse button state
+pub fn set_mouse_button(button: u16, pressed: bool) {
+    unsafe {
+        let bit = match button {
+            BTN_LEFT => 0,
+            BTN_RIGHT => 1,
+            BTN_MIDDLE => 2,
+            _ => return,
+        };
+        if pressed {
+            MOUSE_BUTTONS |= 1 << bit;
+        } else {
+            MOUSE_BUTTONS &= !(1 << bit);
+        }
+    }
+}
+
+/// Get mouse button state
+pub fn get_mouse_buttons() -> u8 {
+    unsafe { MOUSE_BUTTONS }
+}
+
+/// Check if left mouse button is pressed
+pub fn is_left_button_pressed() -> bool {
+    unsafe { (MOUSE_BUTTONS & 1) != 0 }
+}
+
+/// Cursor dimensions
+const CURSOR_W: usize = 12;
+const CURSOR_H: usize = 16;
+
+/// Previous cursor position for restore
+static mut CURSOR_PREV_X: i32 = -100;
+static mut CURSOR_PREV_Y: i32 = -100;
+
+/// Saved pixels under cursor (12x16 = 192 pixels)
+static mut CURSOR_BACKUP: [u32; CURSOR_W * CURSOR_H] = [0; CURSOR_W * CURSOR_H];
+static mut CURSOR_BACKUP_VALID: bool = false;
+
+/// Cursor bitmap (1 = white, 2 = black border, 0 = transparent)
+/// Arrow cursor pointing top-left
+const CURSOR_BITMAP: [u8; CURSOR_W * CURSOR_H] = [
+    1,0,0,0,0,0,0,0,0,0,0,0,
+    1,1,0,0,0,0,0,0,0,0,0,0,
+    1,2,1,0,0,0,0,0,0,0,0,0,
+    1,2,2,1,0,0,0,0,0,0,0,0,
+    1,2,2,2,1,0,0,0,0,0,0,0,
+    1,2,2,2,2,1,0,0,0,0,0,0,
+    1,2,2,2,2,2,1,0,0,0,0,0,
+    1,2,2,2,2,2,2,1,0,0,0,0,
+    1,2,2,2,2,2,2,2,1,0,0,0,
+    1,2,2,2,2,2,2,2,2,1,0,0,
+    1,2,2,2,2,1,1,1,1,1,1,0,
+    1,2,2,1,2,1,0,0,0,0,0,0,
+    1,2,1,0,1,2,1,0,0,0,0,0,
+    1,1,0,0,1,2,1,0,0,0,0,0,
+    1,0,0,0,0,1,2,1,0,0,0,0,
+    0,0,0,0,0,1,1,0,0,0,0,0,
+];
+
+/// Restore pixels under cursor (call before moving cursor)
+fn restore_cursor_backup() {
+    let (px, py) = unsafe { (CURSOR_PREV_X, CURSOR_PREV_Y) };
+    if !unsafe { CURSOR_BACKUP_VALID } || px < 0 || py < 0 {
+        return;
+    }
+    
+    // Use batch write for faster restore
+    virtio_gpu::with_gpu(|gpu| {
+        gpu.write_rect(px as u32, py as u32, CURSOR_W, CURSOR_H, 
+            unsafe { &CURSOR_BACKUP }, &CURSOR_BITMAP);
+    });
+    
+    unsafe { CURSOR_BACKUP_VALID = false; }
+}
+
+/// Save pixels under cursor location
+fn save_cursor_backup(x: i32, y: i32) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    
+    // Use batch read for faster save
+    virtio_gpu::with_gpu(|gpu| {
+        gpu.read_rect(x as u32, y as u32, CURSOR_W, CURSOR_H, 
+            unsafe { &mut CURSOR_BACKUP });
+    });
+    unsafe { CURSOR_BACKUP_VALID = true; }
+}
+
+/// Draw cursor at current position - proper arrow pointer with bitmap
+pub fn draw_cursor() {
+    let (x, y) = unsafe { (CURSOR_X, CURSOR_Y) };
+    let (px, py) = unsafe { (CURSOR_PREV_X, CURSOR_PREV_Y) };
+    
+    if !unsafe { CURSOR_VISIBLE } {
+        return;
+    }
+    
+    // Check if backup was invalidated (UI was redrawn)
+    let needs_refresh = !unsafe { CURSOR_BACKUP_VALID };
+    
+    // Skip if position hasn't changed AND backup is valid
+    if x == px && y == py && !needs_refresh {
+        return;
+    }
+    
+    // Restore previous cursor location (only if backup is valid)
+    if unsafe { CURSOR_BACKUP_VALID } {
+        restore_cursor_backup();
+    }
+    
+    // Save pixels at new location
+    save_cursor_backup(x, y);
+    
+    // Update previous position
+    unsafe {
+        CURSOR_PREV_X = x;
+        CURSOR_PREV_Y = y;
+    }
+    
+    // Draw cursor using batched bitmap write
+    virtio_gpu::with_gpu(|gpu| {
+        gpu.draw_cursor_bitmap(x, y, CURSOR_W, CURSOR_H, &CURSOR_BITMAP);
+    });
+}
+
+/// Hide cursor (restore background and mark invisible)
+pub fn hide_cursor() {
+    restore_cursor_backup();
+    unsafe {
+        CURSOR_VISIBLE = false;
+        CURSOR_PREV_X = -100;
+        CURSOR_PREV_Y = -100;
+    }
+}
+
+/// Invalidate cursor backup (call after UI elements are redrawn to prevent ghost cursor)
+/// This forces the cursor to re-save the background on next draw
+pub fn invalidate_cursor_backup() {
+    unsafe {
+        CURSOR_BACKUP_VALID = false;
+    }
+}
+
+/// Check if a point is inside a demo button, returns button index if hit
+pub fn hit_test_demo_button(x: i32, y: i32) -> Option<usize> {
+    // Button positions (must match draw_demo_screen_content)
+    let buttons = [
+        (40, 340, 90, 32),   // Terminal
+        (150, 340, 90, 32),  // Network
+        (260, 340, 90, 32),  // Files
+        (370, 340, 90, 32),  // Settings
+    ];
+    
+    for (i, (bx, by, bw, bh)) in buttons.iter().enumerate() {
+        if x >= *bx && x < bx + (*bw as i32) && y >= *by && y < by + (*bh as i32) {
+            return Some(i);
+        }
+    }
+    None
+}
 
 /// UI Theme colors
 pub mod colors {
@@ -780,24 +964,19 @@ pub fn update_demo_hardware_stats() {
         let col1_x = 30;
         let text_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(200, 200, 210));
         
-        // Clear just the hardware stats area (lines at y=210, 225, 255, 270)
-        // Each line is approximately 10 pixels high, clear a rectangle covering all
+        // Clear just the dynamic hardware stats (NOT the static Display line at y=240)
+        // Lines to clear: CPU (y=210), Memory (y=225), Disk (y=255), Network (y=270)
+        // FONT_6X10 means text extends ~10px above baseline
         let clear_color = Rgb888::new(28, 28, 38); // Window background color
         
-        // Clear CPU line
-        let _ = Rectangle::new(Point::new(col1_x, 202), Size::new(300, 12))
+        // Clear top section: CPU (y=210) and Memory (y=225) only
+        // Stop at y=228 to avoid Display line (baseline y=240, text starts ~y=230)
+        let _ = Rectangle::new(Point::new(col1_x, 200), Size::new(300, 28))
             .into_styled(PrimitiveStyle::with_fill(clear_color))
             .draw(gpu);
-        // Clear Memory line  
-        let _ = Rectangle::new(Point::new(col1_x, 217), Size::new(300, 12))
-            .into_styled(PrimitiveStyle::with_fill(clear_color))
-            .draw(gpu);
-        // Clear Storage line
-        let _ = Rectangle::new(Point::new(col1_x, 247), Size::new(300, 12))
-            .into_styled(PrimitiveStyle::with_fill(clear_color))
-            .draw(gpu);
-        // Clear Network line
-        let _ = Rectangle::new(Point::new(col1_x, 262), Size::new(300, 12))
+        // Clear bottom section: Disk (y=255) and Network (y=270) only
+        // Start at y=245 to avoid Display line
+        let _ = Rectangle::new(Point::new(col1_x, 245), Size::new(300, 37))
             .into_styled(PrimitiveStyle::with_fill(clear_color))
             .draw(gpu);
         
@@ -825,8 +1004,10 @@ pub fn update_demo_hardware_stats() {
 /// Fast update of just the quick action buttons (for keyboard navigation)
 /// This is MUCH faster than redrawing the entire screen
 pub fn update_demo_buttons(selected_button: usize) {
+    // Hide cursor first (restore pixels) to prevent ghost when redrawing over it
+    restore_cursor_backup();
+    
     virtio_gpu::with_gpu(|gpu| {
-        let text_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(200, 200, 210));
         let clear_color = Rgb888::new(28, 28, 38); // Window background
         
         // Button definitions (must match draw_demo_screen_content)
@@ -881,6 +1062,9 @@ pub fn update_demo_buttons(selected_button: usize) {
             let _ = Text::new(label, Point::new(*x + 15, 360), btn_text_style).draw(gpu);
         }
     });
+    
+    // Invalidate backup and force cursor redraw with fresh background
+    invalidate_cursor_backup();
     
     virtio_gpu::flush();
 }
@@ -1162,6 +1346,46 @@ fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
 /// Handle keyboard input for demo screen navigation
 /// Returns Some(button_index) if Enter was pressed on a button
 pub fn handle_demo_input(event: virtio_input::InputEvent) -> Option<usize> {
+    // Handle mouse position events
+    if event.event_type == EV_ABS {
+        match event.code {
+            ABS_X => {
+                set_cursor_pos(event.value, unsafe { CURSOR_Y });
+            }
+            ABS_Y => {
+                set_cursor_pos(unsafe { CURSOR_X }, event.value);
+            }
+            _ => {}
+        }
+        return None;
+    }
+    
+    // Handle mouse button events
+    if event.event_type == virtio_input::EV_KEY {
+        match event.code {
+            BTN_LEFT | BTN_RIGHT | BTN_MIDDLE => {
+                let pressed = event.value == 1;
+                set_mouse_button(event.code, pressed);
+                
+                // On left mouse button press, check for button clicks
+                if event.code == BTN_LEFT && pressed {
+                    let (x, y) = get_cursor_pos();
+                    if let Some(button_idx) = hit_test_demo_button(x, y) {
+                        // Select the clicked button
+                        unsafe {
+                            DEMO_SELECTED_BUTTON = button_idx;
+                            update_demo_buttons(DEMO_SELECTED_BUTTON);
+                        }
+                        return Some(button_idx);
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    
+    // Handle keyboard events
     if !event.is_key_press() {
         return None;
     }
