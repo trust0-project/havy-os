@@ -22,6 +22,34 @@ use crate::virtio_gpu;
 use crate::virtio_input::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, 
     EV_ABS, ABS_X, ABS_Y, BTN_LEFT, BTN_RIGHT, BTN_MIDDLE};
 
+// Embedded Trust0 logo (64x64 RGBA = 16KB)
+static LOGO_DATA: &[u8] = include_bytes!("logo.raw");
+const LOGO_WIDTH: u32 = 64;
+const LOGO_HEIGHT: u32 = 64;
+
+// Small logo for title bars (24x24 RGBA = 2KB)
+static LOGO_SMALL: &[u8] = include_bytes!("logo_small.raw");
+const LOGO_SMALL_SIZE: u32 = 24;
+
+/// Draw an embedded RGBA image to the framebuffer (fast blit)
+fn draw_image(gpu: &mut virtio_gpu::GpuDriver, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) {
+    for row in 0..height {
+        for col in 0..width {
+            let i = ((row * width + col) * 4) as usize;
+            if i + 3 < pixels.len() {
+                let r = pixels[i];
+                let g = pixels[i + 1];
+                let b = pixels[i + 2];
+                let a = pixels[i + 3];
+                // Only draw non-transparent pixels
+                if a > 128 {
+                    gpu.set_pixel(x + col, y + row, r, g, b);
+                }
+            }
+        }
+    }
+}
+
 /// Mouse/cursor state
 static mut CURSOR_X: i32 = 400;  // Start at center
 static mut CURSOR_Y: i32 = 300;
@@ -190,11 +218,9 @@ pub fn invalidate_cursor_backup() {
 /// Check if a point is inside a demo button, returns button index if hit
 pub fn hit_test_demo_button(x: i32, y: i32) -> Option<usize> {
     // Button positions (must match draw_demo_screen_content)
+    // Only Network button now, aligned left
     let buttons = [
-        (40, 340, 90, 32),   // Terminal
-        (150, 340, 90, 32),  // Network
-        (260, 340, 90, 32),  // Files
-        (370, 340, 90, 32),  // Settings
+        (40, 340, 110, 32),  // Network (left aligned)
     ];
     
     for (i, (bx, by, bw, bh)) in buttons.iter().enumerate() {
@@ -643,6 +669,8 @@ pub struct Window {
     pub width: u32,
     pub height: u32,
     pub focused: bool,
+    /// Whether to show traffic light buttons (close, minimize, maximize)
+    pub show_controls: bool,
 }
 
 impl Window {
@@ -654,7 +682,14 @@ impl Window {
             width,
             height,
             focused: true,
+            show_controls: true, // Show controls by default
         }
+    }
+    
+    /// Builder method to set whether controls are shown
+    pub fn with_controls(mut self, show: bool) -> Self {
+        self.show_controls = show;
+        self
     }
 
     /// Draw the window to a DrawTarget
@@ -755,6 +790,84 @@ impl Window {
             self.height - title_bar_height as u32 - (padding * 2) as u32,
         )
     }
+    
+    /// Draw window with batch rendering (faster, but simpler style without rounded corners)
+    /// Returns the content area for rendering content inside
+    pub fn draw_fast(&self, gpu: &mut crate::virtio_gpu::GpuDriver) -> WindowContentArea {
+        const TITLE_BAR_HEIGHT: u32 = 32;
+        
+        // Window background - use direct fill_rect for batch rendering
+        gpu.fill_rect(
+            self.x as u32, 
+            self.y as u32, 
+            self.width, 
+            self.height, 
+            28, 28, 38  // Window background color
+        );
+        
+        // Window border
+        let _ = Rectangle::new(
+            Point::new(self.x, self.y),
+            Size::new(self.width, self.height),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+        .draw(gpu);
+        
+        // Title bar background - use direct fill_rect
+        gpu.fill_rect(
+            self.x as u32, 
+            self.y as u32, 
+            self.width, 
+            TITLE_BAR_HEIGHT, 
+            40, 40, 55  // Title bar color
+        );
+        
+        // Traffic light buttons (close, minimize, maximize) - only if show_controls is true
+        if self.show_controls {
+            let btn_y = self.y + 10;
+            let btn_start_x = self.x + 12;
+            
+            // Close button (red)
+            let _ = Circle::new(Point::new(btn_start_x, btn_y), 12)
+                .into_styled(PrimitiveStyle::with_fill(Rgb888::new(220, 80, 80)))
+                .draw(gpu);
+            
+            // Minimize button (yellow)
+            let _ = Circle::new(Point::new(btn_start_x + 20, btn_y), 12)
+                .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
+                .draw(gpu);
+            
+            // Maximize button (green)
+            let _ = Circle::new(Point::new(btn_start_x + 40, btn_y), 12)
+                .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
+                .draw(gpu);
+        }
+        
+        // Title text (centered)
+        let title_style = MonoTextStyle::new(&FONT_9X15_BOLD, Rgb888::WHITE);
+        let title_x = self.x + (self.width as i32 / 2) - ((self.title.len() as i32 * 9) / 2);
+        let _ = Text::new(&self.title, Point::new(title_x, self.y + 22), title_style).draw(gpu);
+        
+        // Draw small logo aligned to the right of the header
+        let logo_x = (self.x + self.width as i32 - LOGO_SMALL_SIZE as i32 - 8) as u32;
+        let logo_y = (self.y + 4) as u32;
+        draw_image(gpu, logo_x, logo_y, LOGO_SMALL_SIZE, LOGO_SMALL_SIZE, LOGO_SMALL);
+        
+        WindowContentArea {
+            x: self.x + 1,
+            y: self.y + TITLE_BAR_HEIGHT as i32 + 1,
+            width: self.width - 2,
+            height: self.height - TITLE_BAR_HEIGHT - 2,
+        }
+    }
+}
+
+/// Rectangle representing the content area inside a window
+pub struct WindowContentArea {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// A checkbox widget
@@ -932,6 +1045,17 @@ pub fn get_hardware_info() -> HardwareInfo {
 /// Selected button index for keyboard navigation
 static mut DEMO_SELECTED_BUTTON: usize = 0;
 
+/// Currently open child window (None = main screen, Some(index) = button window open)
+static mut DEMO_OPEN_WINDOW: Option<usize> = None;
+
+/// Get button name for child window title
+fn get_button_name(index: usize) -> &'static str {
+    match index {
+        0 => "Network",
+        _ => "Unknown",
+    }
+}
+
 /// Last time hardware stats were updated (in ms)
 static mut DEMO_LAST_HW_UPDATE: i64 = 0;
 
@@ -941,6 +1065,11 @@ const DEMO_HW_UPDATE_INTERVAL: i64 = 2000; // Update every 2 seconds
 /// Update just the dynamic hardware stats section of the demo screen
 /// This is much more efficient than redrawing the entire screen
 pub fn update_demo_hardware_stats() {
+    // Don't update hardware stats if a child window is open (it would draw over the window)
+    if unsafe { DEMO_OPEN_WINDOW.is_some() } {
+        return;
+    }
+    
     let now = crate::get_time_ms();
     
     // Check if enough time has passed since last update
@@ -1010,18 +1139,13 @@ pub fn update_demo_buttons(selected_button: usize) {
     virtio_gpu::with_gpu(|gpu| {
         let clear_color = Rgb888::new(28, 28, 38); // Window background
         
-        // Button definitions (must match draw_demo_screen_content)
+        // Button definitions - only Network now, left aligned
         let buttons = [
-            ("Terminal", 40),
-            ("Network", 150),
-            ("Files", 260),
-            ("Settings", 370),
+            ("Network", 40),
         ];
         
-        // Clear the entire buttons area with a single rectangle (faster than 4 clears)
-        let _ = Rectangle::new(Point::new(38, 338), Size::new(430, 38))
-            .into_styled(PrimitiveStyle::with_fill(clear_color))
-            .draw(gpu);
+        // Clear the buttons area 
+        gpu.fill_rect(38, 338, 120, 38, 28, 28, 38);
         
         // Redraw all buttons
         for (i, (label, x)) in buttons.iter().enumerate() {
@@ -1037,9 +1161,9 @@ pub fn update_demo_buttons(selected_button: usize) {
                 Rgb888::new(60, 60, 80)
             };
             
-            // Button background
+            // Button background (110 width for Network)
             let _ = RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(*x, 340), Size::new(90, 32)),
+                Rectangle::new(Point::new(*x, 340), Size::new(110, 32)),
                 Size::new(4, 4),
             )
             .into_styled(PrimitiveStyle::with_fill(bg_color))
@@ -1047,7 +1171,7 @@ pub fn update_demo_buttons(selected_button: usize) {
             
             // Button border
             let _ = RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(*x, 340), Size::new(90, 32)),
+                Rectangle::new(Point::new(*x, 340), Size::new(110, 32)),
                 Size::new(4, 4),
             )
             .into_styled(PrimitiveStyle::with_stroke(border_color, if is_selected { 2 } else { 1 }))
@@ -1059,7 +1183,7 @@ pub fn update_demo_buttons(selected_button: usize) {
                 Rgb888::new(200, 200, 210)
             };
             let btn_text_style = MonoTextStyle::new(&FONT_6X10, text_color);
-            let _ = Text::new(label, Point::new(*x + 15, 360), btn_text_style).draw(gpu);
+            let _ = Text::new(label, Point::new(*x + 25, 360), btn_text_style).draw(gpu);
         }
     });
     
@@ -1089,43 +1213,132 @@ pub fn setup_demo_screen() {
     draw_demo_screen_content(&hw, unsafe { DEMO_SELECTED_BUTTON });
 }
 
+/// Draw a child window (opened by clicking a button)
+/// Draws ONLY the child window on top of existing content for maximum speed
+fn draw_child_window(_button_index: usize) {
+    // Pre-compute network info BEFORE entering GPU closure (avoid locks inside)
+    let net_guard = crate::NET_STATE.lock();
+    let is_online = net_guard.is_some();
+    drop(net_guard);
+    
+    let ip = crate::net::get_my_ip();
+    let ip_octets = ip.octets();
+    let gateway = crate::net::GATEWAY.octets();
+    let dns = crate::net::DNS_SERVER.octets();
+    let prefix = crate::net::PREFIX_LEN;
+    
+    // Pre-format strings to avoid allocations in GPU closure
+    let ip_str = alloc::format!("{}.{}.{}.{}/{}", 
+        ip_octets[0], ip_octets[1], ip_octets[2], ip_octets[3], prefix);
+    let gw_str = alloc::format!("{}.{}.{}.{}", 
+        gateway[0], gateway[1], gateway[2], gateway[3]);
+    let dns_str = alloc::format!("{}.{}.{}.{}", 
+        dns[0], dns[1], dns[2], dns[3]);
+    
+    virtio_gpu::with_gpu(|gpu| {
+        // Shadow + window background in one batch
+        gpu.fill_rect(158, 108, 500, 400, 5, 5, 10);  // Shadow
+        gpu.fill_rect(150, 100, 500, 400, 28, 28, 38);  // Window bg
+        gpu.fill_rect(150, 100, 500, 32, 40, 40, 55);  // Title bar
+        
+        // Border (stroke only)
+        let _ = Rectangle::new(Point::new(150, 100), Size::new(500, 400))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        // Traffic light buttons
+        let _ = Circle::new(Point::new(162, 110), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(220, 80, 80)))
+            .draw(gpu);
+        let _ = Circle::new(Point::new(182, 110), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
+            .draw(gpu);
+        let _ = Circle::new(Point::new(202, 110), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
+            .draw(gpu);
+        
+        // Title + logo
+        let title_style = MonoTextStyle::new(&FONT_9X15_BOLD, Rgb888::WHITE);
+        let _ = Text::new("Network Statistics", Point::new(320, 122), title_style).draw(gpu);
+        // Small logo aligned to the right of the header (window is at x=150, width=500)
+        draw_image(gpu, 150 + 500 - LOGO_SMALL_SIZE - 8, 104, LOGO_SMALL_SIZE, LOGO_SMALL_SIZE, LOGO_SMALL);
+        
+        // Content styles
+        let label_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(230, 180, 80));
+        let value_style = MonoTextStyle::new(&FONT_6X10, Rgb888::WHITE);
+        let hint_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(100, 100, 120));
+        
+        let x = 170;
+        let mut y = 160;
+        
+        // Device section - use static strings
+        let _ = Text::new("Device:", Point::new(x, y), label_style).draw(gpu);
+        y += 16;
+        let _ = Text::new("Type:    VirtIO Network Device", Point::new(x + 10, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("Address: 0x10001000", Point::new(x + 10, y), value_style).draw(gpu);
+        y += 14;
+        
+        // Status
+        if is_online {
+            let _ = Text::new("Status:  * ONLINE", Point::new(x + 10, y), 
+                MonoTextStyle::new(&FONT_6X10, Rgb888::new(80, 200, 120))).draw(gpu);
+        } else {
+            let _ = Text::new("Status:  X OFFLINE", Point::new(x + 10, y), 
+                MonoTextStyle::new(&FONT_6X10, Rgb888::new(220, 80, 80))).draw(gpu);
+        }
+        y += 22;
+        
+        // Configuration
+        let _ = Text::new("Configuration:", Point::new(x, y), label_style).draw(gpu);
+        y += 16;
+        
+        // Use pre-formatted strings
+        let _ = Text::new("IP:      ", Point::new(x + 10, y), value_style).draw(gpu);
+        let _ = Text::new(&ip_str, Point::new(x + 64, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("Gateway: ", Point::new(x + 10, y), value_style).draw(gpu);
+        let _ = Text::new(&gw_str, Point::new(x + 64, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("DNS:     ", Point::new(x + 10, y), value_style).draw(gpu);
+        let _ = Text::new(&dns_str, Point::new(x + 64, y), value_style).draw(gpu);
+        y += 22;
+        
+        // Protocol Stack
+        let _ = Text::new("Protocol Stack:", Point::new(x, y), label_style).draw(gpu);
+        y += 16;
+        let _ = Text::new("smoltcp - Lightweight TCP/IP", Point::new(x + 10, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("ICMP, UDP, TCP, ARP", Point::new(x + 10, y), value_style).draw(gpu);
+        
+        // Close hint
+        let _ = Text::new("Press ESC or click red button to close", Point::new(220, 480), hint_style).draw(gpu);
+    });
+    
+    // No flush here - caller will handle it
+}
+
 /// Redraw the demo screen with the given selected button index
+/// Public entry point that calls inner function
 fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
+    draw_demo_screen_content_inner(hw, selected_button);
+}
+
+/// Inner function to draw main demo content (used by both normal draw and child window background)
+fn draw_demo_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
+    // Check if a child window is open - we'll draw it on top after main content
+    let open_window = unsafe { DEMO_OPEN_WINDOW };
+    
     virtio_gpu::with_gpu(|gpu| {
         // Clear to dark background (desktop)
         let _ = gpu.clear(0x15, 0x15, 0x1E);
         
-        // === Fullscreen Window ===
-        // Window background (full width with some margin)
-        let _ = Rectangle::new(Point::new(10, 10), Size::new(780, 550))
-            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(28, 28, 38)))
-            .draw(gpu);
+        // === Draw Window using reusable Window component (no controls) ===
+        let window = Window::new("HAVY OS - System Information", 10, 10, 780, 550)
+            .with_controls(false);  // Hide traffic light buttons on main window
+        let _content = window.draw_fast(gpu);
         
-        // Window border
-        let _ = Rectangle::new(Point::new(10, 10), Size::new(780, 550))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
-            .draw(gpu);
-        
-        // Title bar
-        let _ = Rectangle::new(Point::new(10, 10), Size::new(780, 32))
-            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(40, 40, 55)))
-            .draw(gpu);
-        
-        // Window buttons
-        let _ = Circle::new(Point::new(22, 20), 12)
-            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(220, 80, 80)))
-            .draw(gpu);
-        let _ = Circle::new(Point::new(42, 20), 12)
-            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
-            .draw(gpu);
-        let _ = Circle::new(Point::new(62, 20), 12)
-            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
-            .draw(gpu);
-        
-        // Title
-        let title_style = MonoTextStyle::new(&FONT_9X15_BOLD, Rgb888::WHITE);
-        let _ = Text::new("HAVY OS - System Information", Point::new(320, 30), title_style).draw(gpu);
-        
+        // Content is positioned relative to window content area
         let text_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(200, 200, 210));
         let accent_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(80, 140, 200));
         
@@ -1212,14 +1425,11 @@ fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
         
         // Navigation hint
         let hint_style = MonoTextStyle::new(&FONT_6X10, Rgb888::new(100, 100, 120));
-        let _ = Text::new("Use arrow keys to navigate, Enter to select", Point::new(col1_x, 328), hint_style).draw(gpu);
+        let _ = Text::new("Press Enter to open Network Stats", Point::new(col1_x, 328), hint_style).draw(gpu);
         
-        // Action buttons with selection highlight
+        // Only Network button now, left aligned
         let buttons = [
-            ("Terminal", 40),
-            ("Network", 150),
-            ("Files", 260),
-            ("Settings", 370),
+            ("Network", 40),
         ];
         
         for (i, (label, x)) in buttons.iter().enumerate() {
@@ -1235,9 +1445,9 @@ fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
                 Rgb888::new(60, 60, 80)
             };
             
-            // Button background
+            // Button background (110 width)
             let _ = RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(*x, 340), Size::new(90, 32)),
+                Rectangle::new(Point::new(*x, 340), Size::new(110, 32)),
                 Size::new(4, 4),
             )
             .into_styled(PrimitiveStyle::with_fill(bg_color))
@@ -1245,7 +1455,7 @@ fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
             
             // Button border
             let _ = RoundedRectangle::with_equal_corners(
-                Rectangle::new(Point::new(*x, 340), Size::new(90, 32)),
+                Rectangle::new(Point::new(*x, 340), Size::new(110, 32)),
                 Size::new(4, 4),
             )
             .into_styled(PrimitiveStyle::with_stroke(border_color, if is_selected { 2 } else { 1 }))
@@ -1257,7 +1467,7 @@ fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
                 Rgb888::new(200, 200, 210)
             };
             let btn_text_style = MonoTextStyle::new(&FONT_6X10, text_color);
-            let _ = Text::new(label, Point::new(*x + 15, 360), btn_text_style).draw(gpu);
+            let _ = Text::new(label, Point::new(*x + 25, 360), btn_text_style).draw(gpu);
         }
         
         // === Running Services (positioned to not overlap with buttons) ===
@@ -1340,12 +1550,20 @@ fn draw_demo_screen_content(hw: &HardwareInfo, selected_button: usize) {
         let _ = Text::new("MEM", Point::new(764, 588), text_style).draw(gpu);
     });
     
-    virtio_gpu::flush();
+    // If a child window is open, draw it on top of the main content
+    if let Some(win_idx) = open_window {
+        draw_child_window(win_idx);
+    } else {
+        virtio_gpu::flush();
+    }
 }
 
-/// Handle keyboard input for demo screen navigation
+/// Handle input for demo screen (keyboard navigation and mouse)
 /// Returns Some(button_index) if Enter was pressed on a button
 pub fn handle_demo_input(event: virtio_input::InputEvent) -> Option<usize> {
+    // Check if a child window is open
+    let open_window = unsafe { DEMO_OPEN_WINDOW };
+    
     // Handle mouse position events
     if event.event_type == EV_ABS {
         match event.code {
@@ -1367,16 +1585,40 @@ pub fn handle_demo_input(event: virtio_input::InputEvent) -> Option<usize> {
                 let pressed = event.value == 1;
                 set_mouse_button(event.code, pressed);
                 
-                // On left mouse button press, check for button clicks
+                // On left mouse button press
                 if event.code == BTN_LEFT && pressed {
                     let (x, y) = get_cursor_pos();
-                    if let Some(button_idx) = hit_test_demo_button(x, y) {
-                        // Select the clicked button
-                        unsafe {
-                            DEMO_SELECTED_BUTTON = button_idx;
-                            update_demo_buttons(DEMO_SELECTED_BUTTON);
+                    
+                    // If child window is open, check for close button click
+                    if open_window.is_some() {
+                        // Child window is at (150, 100, 500, 400)
+                        // Close button is at (150 + 12, 100 + 10) with radius 6
+                        let close_btn_x = 150 + 12;
+                        let close_btn_y = 100 + 10;
+                        let dx = x - close_btn_x;
+                        let dy = y - close_btn_y;
+                        // Check if click is within 12px of button center (button is 12px diameter)
+                        if dx * dx + dy * dy < 12 * 12 {
+                            // Close the child window
+                            unsafe { DEMO_OPEN_WINDOW = None; }
+                            // Redraw main screen
+                            let hw = get_hardware_info();
+                            draw_demo_screen_content(&hw, unsafe { DEMO_SELECTED_BUTTON });
+                            virtio_gpu::flush();  // Immediate update
+                            return None;
                         }
-                        return Some(button_idx);
+                    } else {
+                        // Main window - check for button clicks
+                        if let Some(button_idx) = hit_test_demo_button(x, y) {
+                            // Open the child window for this button
+                            unsafe {
+                                DEMO_SELECTED_BUTTON = button_idx;
+                                DEMO_OPEN_WINDOW = Some(button_idx);
+                            }
+                            draw_child_window(button_idx);
+                            virtio_gpu::flush();  // Immediate update
+                            return Some(button_idx);
+                        }
                     }
                 }
                 return None;
@@ -1390,36 +1632,34 @@ pub fn handle_demo_input(event: virtio_input::InputEvent) -> Option<usize> {
         return None;
     }
     
-    let num_buttons = 4;
+    // If child window is open, Escape closes it
+    if open_window.is_some() {
+        use crate::virtio_input::KEY_ESC;
+        if event.code == KEY_ESC {
+            unsafe { DEMO_OPEN_WINDOW = None; }
+            let hw = get_hardware_info();
+            draw_demo_screen_content(&hw, unsafe { DEMO_SELECTED_BUTTON });
+        }
+        return None;
+    }
+    
+    let num_buttons = 1;  // Only Network button now
     
     match event.code {
-        KEY_LEFT => {
-            unsafe {
-                if DEMO_SELECTED_BUTTON > 0 {
-                    DEMO_SELECTED_BUTTON -= 1;
-                } else {
-                    DEMO_SELECTED_BUTTON = num_buttons - 1;
-                }
-                // Use fast button-only update instead of full screen redraw
-                update_demo_buttons(DEMO_SELECTED_BUTTON);
-            }
-            None
-        }
-        KEY_RIGHT => {
-            unsafe {
-                DEMO_SELECTED_BUTTON = (DEMO_SELECTED_BUTTON + 1) % num_buttons;
-                // Use fast button-only update instead of full screen redraw
-                update_demo_buttons(DEMO_SELECTED_BUTTON);
-            }
+        KEY_LEFT | KEY_RIGHT => {
+            // Only one button, no navigation needed
             None
         }
         KEY_UP | KEY_DOWN => {
-            // For a single-row button layout, up/down could also navigate
-            // but for now we just refresh
+            // Only one button, no navigation needed
             None
         }
         KEY_ENTER => {
-            unsafe { Some(DEMO_SELECTED_BUTTON) }
+            // Open child window for selected button
+            let button_idx = unsafe { DEMO_SELECTED_BUTTON };
+            unsafe { DEMO_OPEN_WINDOW = Some(button_idx); }
+            draw_child_window(button_idx);
+            Some(button_idx)
         }
         _ => None,
     }

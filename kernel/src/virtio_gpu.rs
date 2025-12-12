@@ -10,6 +10,7 @@ use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
     pixelcolor::{Rgb888, RgbColor},
+    primitives::Rectangle,
     Pixel,
 };
 
