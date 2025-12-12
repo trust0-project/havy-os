@@ -1040,7 +1040,7 @@ pub fn gpuid_service() {
         boot_console::set_phase_gui();
         
         // Setup the boot screen UI elements
-        ui::setup_boot_screen();
+        ui::setup_demo_screen();
         
         // Initial render
         ui::with_ui(|ui_mgr| {
@@ -1099,7 +1099,7 @@ pub fn gpuid_tick() {
         // Clear and switch to GUI
         virtio_gpu::clear_display();
         boot_console::set_phase_gui();
-        ui::setup_boot_screen();
+        ui::setup_demo_screen();
         
         ui::with_ui(|ui_mgr| {
             ui_mgr.mark_dirty();
