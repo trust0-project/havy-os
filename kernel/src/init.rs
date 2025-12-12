@@ -1033,7 +1033,7 @@ pub fn gpuid_service() {
         boot_console::render();
         
         // Brief delay to show final message
-        spin_delay_ms(500);
+        spin_delay_ms(250);
         
         // Clear framebuffer and switch to GUI phase
         virtio_gpu::clear_display();
@@ -1059,24 +1059,40 @@ pub fn gpuid_service() {
     let mut had_input = false;
     while let Some(event) = virtio_input::next_event() {
         had_input = true;
+        // Check if we're in demo mode - use demo input handler
+        let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+        if is_demo {
+            // Handle input for demo screen (arrow keys, enter)
+            let _ = ui::handle_demo_input(event);
+        } else {
+            ui::with_ui(|ui_mgr| {
+                ui_mgr.handle_input(event);
+            });
+        }
+    }
+    
+    // Render if dirty (only applies when not in demo mode)
+    let is_demo_mode = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+    if is_demo_mode {
+        // Periodically update hardware stats (only redraws the stats section)
+        ui::update_demo_hardware_stats();
+    } else {
         ui::with_ui(|ui_mgr| {
-            ui_mgr.handle_input(event);
+            if ui_mgr.is_dirty() {
+                ui_mgr.render();
+                ui_mgr.flush();
+            }
         });
     }
     
-    // Render if dirty
-    ui::with_ui(|ui_mgr| {
-        if ui_mgr.is_dirty() {
-            ui_mgr.render();
-            ui_mgr.flush();
-        }
-    });
-    
-    // Delay based on activity: faster when there's input, slower otherwise
+    // Delay based on activity: minimal delay when input for instant response
     if had_input {
-        spin_delay_ms(16); // ~60 FPS during interaction
+        // No delay after input - run next iteration immediately for snappy response
+        // The next loop will catch any additional input
+        return;
     } else {
-        spin_delay_ms(50); // ~20 FPS when idle
+        // Short polling interval when idle for responsive input detection
+        spin_delay_ms(2); // 500Hz polling for quick input response
     }
 }
 
@@ -1114,21 +1130,33 @@ pub fn gpuid_tick() {
     
     // Process any pending input
     while let Some(event) = virtio_input::next_event() {
-        ui::with_ui(|ui_mgr| {
-            ui_mgr.handle_input(event);
-        });
+        // Check if we're in demo mode - use demo input handler
+        let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+        if is_demo {
+            // Handle input for demo screen (arrow keys, enter)
+            let _ = ui::handle_demo_input(event);
+        } else {
+            ui::with_ui(|ui_mgr| {
+                ui_mgr.handle_input(event);
+            });
+        }
     }
     
-    // Render if dirty
-    ui::with_ui(|ui_mgr| {
-        if ui_mgr.is_dirty() {
-            ui_mgr.render();
-        }
-    });
-    
-    // Always flush to ensure front buffer is up-to-date
-    // This is needed because browser may reset WebGPU context on display mode switch
-    virtio_gpu::flush();
+    // Render if dirty (only applies when not in demo mode)
+    let is_demo_mode = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+    if is_demo_mode {
+        // Periodically update hardware stats (only redraws the stats section)
+        ui::update_demo_hardware_stats();
+    } else {
+        ui::with_ui(|ui_mgr| {
+            if ui_mgr.is_dirty() {
+                ui_mgr.render();
+            }
+        });
+        // Always flush to ensure front buffer is up-to-date
+        // This is needed because browser may reset WebGPU context on display mode switch
+        virtio_gpu::flush();
+    }
 }
 
 /// WASM worker service entry point
