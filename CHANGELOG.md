@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.44](https://github.com/trust0-project/havy-os/compare/v0.1.43...v0.1.44) (2025-12-16)
+
+
+### Bug Fixes
+
+* refactor havy_os screens ([3aa9344](https://github.com/trust0-project/havy-os/commit/3aa93440a2f0c6ab06d035bd631e88956a4acfc4))
+
 ## [0.1.43](https://github.com/trust0-project/havy-os/compare/v0.1.42...v0.1.43) (2025-12-16)
 
 
