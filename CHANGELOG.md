@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.41](https://github.com/trust0-project/havy-os/compare/v0.1.40...v0.1.41) (2025-12-16)
+
+
+### Bug Fixes
+
+* improve pipeline ([dfd405f](https://github.com/trust0-project/havy-os/commit/dfd405f03e833e73ac30d16ae8ea3bb578aa8098))
+
 ## [0.1.40](https://github.com/trust0-project/havy-os/compare/v0.1.39...v0.1.40) (2025-12-16)
 
 
