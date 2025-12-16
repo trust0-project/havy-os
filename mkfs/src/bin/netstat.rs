@@ -49,14 +49,21 @@ mod wasm {
         console_log("\x1b[1;35m|\x1b[0m\n");
 
         // IP address
-        let ip_len = unsafe { format_ipv4(&info.ip, &mut IP_BUF) };
-        console_log("\x1b[1;35m|\x1b[0m    IP:       \x1b[1;97m");
-        unsafe { print_bytes(&IP_BUF[..ip_len]) };
-        console_log("/");
-        print_u8(info.prefix_len);
-        console_log("\x1b[0m");
-        let ip_full_len = ip_len + 1 + digit_count_u8(info.prefix_len);
-        pad_spaces(45 - ip_full_len.min(45));
+        let is_ip_assigned = info.ip[0] != 0 || info.ip[1] != 0 || info.ip[2] != 0 || info.ip[3] != 0;
+        console_log("\x1b[1;35m|\x1b[0m    IP:       ");
+        if is_ip_assigned {
+            let ip_len = unsafe { format_ipv4(&info.ip, &mut IP_BUF) };
+            console_log("\x1b[1;97m");
+            unsafe { print_bytes(&IP_BUF[..ip_len]) };
+            console_log("/");
+            print_u8(info.prefix_len);
+            console_log("\x1b[0m");
+            let ip_full_len = ip_len + 1 + digit_count_u8(info.prefix_len);
+            pad_spaces(45 - ip_full_len.min(45));
+        } else {
+            console_log("\x1b[1;33mWaiting for IP address...\x1b[0m");
+            pad_spaces(20);
+        }
         console_log("\x1b[1;35m|\x1b[0m\n");
 
         // Gateway

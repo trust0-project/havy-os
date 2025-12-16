@@ -2089,10 +2089,18 @@ fn print_ping_statistics() {
 fn poll_network() {
     let timestamp = get_time_ms();
 
-    // First, poll the network state
+    // First, poll the VirtIO network state
     {
         let mut net_guard = NET_STATE.lock();
         if let Some(ref mut state) = *net_guard {
+            state.poll(timestamp);
+        }
+    }
+    
+    // Also poll D1 EMAC network state (for IP assignment detection)
+    {
+        let mut d1_guard = D1_NET_STATE.lock();
+        if let Some(ref mut state) = *d1_guard {
             state.poll(timestamp);
         }
     }
