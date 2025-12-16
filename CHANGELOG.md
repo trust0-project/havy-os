@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.39](https://github.com/trust0-project/havy-os/compare/v0.1.38...v0.1.39) (2025-12-16)
+
+
+### Bug Fixes
+
+* build image pipeline ([f6277be](https://github.com/trust0-project/havy-os/commit/f6277beb0ee16f74ad20815db6b6358422525f7d))
+
 ## [0.1.38](https://github.com/trust0-project/havy-os/compare/v0.1.37...v0.1.38) (2025-12-16)
 
 
