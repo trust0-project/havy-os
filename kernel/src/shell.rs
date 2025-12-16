@@ -148,12 +148,16 @@ fn shell_tick() {
     if num_harts <= 1 {
         crate::init::klogd_tick();
         crate::init::sysmond_tick();
-        // Also tick network daemons in single-hart mode
+        // Tick network daemons in single-hart mode
+        crate::netd::tick();
         crate::tcpd::tick();
         crate::httpd::tick();
-        // Tick GPU UI daemon for display updates
-        crate::init::gpuid_tick();
     }
+    
+    // ALWAYS tick GPU UI on hart 0 regardless of SMP mode
+    // The d1_touch device is only available on the main thread (hart 0),
+    // so input polling must happen here, not on secondary harts
+    crate::init::gpuid_tick();
     
     // Poll tail follow mode (always)
     crate::poll_tail_follow();

@@ -54,6 +54,10 @@ pub struct VirtioBlock {
     capacity: u64,
 }
 
+/// Type alias for block device abstraction
+/// This allows fs.rs to use a platform-independent BlockDev type
+pub type BlockDev = VirtioBlock;
+
 impl VirtioBlock {
     pub fn probe() -> Option<Self> {
         for i in 0..8 {

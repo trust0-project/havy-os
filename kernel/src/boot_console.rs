@@ -11,9 +11,9 @@ const MAX_LINES: usize = 40;
 /// Maximum characters per line
 const MAX_LINE_LEN: usize = 100;
 
-/// Display dimensions (must match GPU)
-const DISPLAY_WIDTH: u32 = 800;
-const DISPLAY_HEIGHT: u32 = 600;
+/// Display dimensions (1024×768 display)
+const DISPLAY_WIDTH: u32 = 1024;
+const DISPLAY_HEIGHT: u32 = 768;
 
 /// Font dimensions (6x10 pixel font)
 const FONT_WIDTH: u32 = 6;
@@ -182,7 +182,7 @@ pub fn print_boot_msg(prefix: &str, msg: &str) {
 
 /// Clear the screen to background color
 fn clear_screen() {
-    use crate::virtio_gpu::BACK_BUFFER_ADDR;
+    use crate::d1_display::BACK_BUFFER_ADDR;
     
     let fb_size = (DISPLAY_WIDTH * DISPLAY_HEIGHT) as usize;
     unsafe {
@@ -195,7 +195,7 @@ fn clear_screen() {
 
 /// Clear a single line area (for incremental updates)
 fn clear_line_area(y: u32) {
-    use crate::virtio_gpu::BACK_BUFFER_ADDR;
+    use crate::d1_display::BACK_BUFFER_ADDR;
     
     unsafe {
         let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
@@ -246,7 +246,7 @@ pub fn render() {
         
         let line_count = CONSOLE.line_count;
         if line_count == 0 {
-            crate::virtio_gpu::flush();
+            crate::d1_display::flush();
             return;
         }
         
@@ -291,14 +291,16 @@ pub fn render() {
         }
     }
     
+    // Mark screen as dirty (boot_console draws directly to framebuffer without tracking)
+    crate::d1_display::mark_all_dirty();
     // Flush to display
-    crate::virtio_gpu::flush();
+    crate::d1_display::flush();
 }
 
 /// Scroll the framebuffer content up by the specified number of lines
 /// This copies pixels from lower rows to upper rows, preserving content visually
 fn scroll_framebuffer_up(lines: u32) {
-    use crate::virtio_gpu::BACK_BUFFER_ADDR;
+    use crate::d1_display::BACK_BUFFER_ADDR;
     
     let scroll_pixels = lines * FONT_HEIGHT;
     let text_area_height = DISPLAY_HEIGHT - MARGIN_TOP * 2;
@@ -328,7 +330,7 @@ fn scroll_framebuffer_up(lines: u32) {
 /// Draw text at position using simple pixel font
 /// This is a minimal implementation - draws basic ASCII chars
 fn draw_text(text: &str, x: u32, y: u32, color: u32) {
-    use crate::virtio_gpu::BACK_BUFFER_ADDR;
+    use crate::d1_display::BACK_BUFFER_ADDR;
     
     let mut cx = x;
     for ch in text.bytes() {
@@ -346,7 +348,7 @@ fn draw_text(text: &str, x: u32, y: u32, color: u32) {
 
 /// Draw a single character (simple 6x10 bitmap font)
 fn draw_char(ch: u8, x: u32, y: u32, color: u32) {
-    use crate::virtio_gpu::BACK_BUFFER_ADDR;
+    use crate::d1_display::BACK_BUFFER_ADDR;
     
     let glyph = get_glyph(ch);
     

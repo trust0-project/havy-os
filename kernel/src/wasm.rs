@@ -356,17 +356,24 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define klog_get: {:?}", e))?;
 
     // Syscall: net_available() -> i32
+    // Check both VirtIO and D1 EMAC network states
     linker
         .define(
             "env",
             "net_available",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
+                // Check VirtIO first
                 let net_guard = crate::NET_STATE.lock();
                 if net_guard.is_some() {
-                    1
-                } else {
-                    0
+                    return 1;
                 }
+                drop(net_guard);
+                // Fallback to D1 EMAC
+                let d1_guard = crate::D1_NET_STATE.lock();
+                if d1_guard.is_some() {
+                    return 1;
+                }
+                0
             }),
         )
         .map_err(|e| format!("define net_available: {:?}", e))?;
@@ -509,9 +516,11 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
                         let mut host_buf = vec![0u8; host_len as usize];
                         if mem.read(&caller, host_ptr as usize, &mut host_buf).is_ok() {
+                            let dns_server = smoltcp::wire::Ipv4Address::new(8, 8, 8, 8);
+                            
+                            // Try VirtIO NetState first
                             let mut net_guard = crate::NET_STATE.lock();
                             if let Some(ref mut net) = *net_guard {
-                                let dns_server = smoltcp::wire::Ipv4Address::new(8, 8, 8, 8);
                                 if let Some(ip) = crate::dns::resolve(
                                     net,
                                     &host_buf,
@@ -521,6 +530,23 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                                 ) {
                                     if mem.write(&mut caller, ip_buf_ptr as usize, &ip.octets()).is_ok() {
                                         return 4;
+                                    }
+                                }
+                            } else {
+                                // VirtIO not available, try D1 EMAC
+                                drop(net_guard);
+                                let mut d1_guard = crate::D1_NET_STATE.lock();
+                                if let Some(ref mut net) = *d1_guard {
+                                    if let Some(ip) = crate::dns::resolve_d1(
+                                        net,
+                                        &host_buf,
+                                        dns_server,
+                                        5000,
+                                        crate::get_time_ms,
+                                    ) {
+                                        if mem.write(&mut caller, ip_buf_ptr as usize, &ip.octets()).is_ok() {
+                                            return 4;
+                                        }
                                     }
                                 }
                             }
@@ -1190,6 +1216,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
     // Syscall: net_info(out_ptr) -> i32
     // Gets network info. Writes: IP (4) + Gateway (4) + DNS (4) + MAC (6) + prefix_len (1) = 19 bytes
     // Returns 0 on success, -1 if network not available.
+    // Supports both VirtIO and D1 EMAC network backends.
     linker
         .define(
             "env",
@@ -1197,18 +1224,20 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, out_ptr: i32| -> i32 {
+                    // Try VirtIO first
                     let net_guard = crate::NET_STATE.lock();
-                    if net_guard.is_none() {
-                        return -1;
-                    }
-                    
-                    let ip = crate::net::get_my_ip();
-                    let mac = if let Some(ref state) = *net_guard {
-                        state.mac()
+                    let (ip, mac) = if let Some(ref state) = *net_guard {
+                        (crate::net::get_my_ip(), state.mac())
                     } else {
-                        [0u8; 6]
+                        drop(net_guard);
+                        // Fallback to D1 EMAC
+                        let d1_guard = crate::D1_NET_STATE.lock();
+                        if let Some(ref state) = *d1_guard {
+                            (crate::net::get_my_ip(), state.mac())
+                        } else {
+                            return -1;
+                        }
                     };
-                    drop(net_guard);
                     
                     // Pack: IP (4) + Gateway (4) + DNS (4) + MAC (6) + prefix_len (1) = 19 bytes
                     let mut out = [0u8; 19];
@@ -1496,13 +1525,25 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let seq = seq as u16;
                         let timestamp = crate::get_time_ms();
                         
-                        // Send ping
+                        // Track which network backend we're using
+                        let using_d1_emac;
+                        
+                        // Send ping - try VirtIO NET_STATE first, then D1_NET_STATE
                         let send_result = {
                             let mut net_guard = crate::NET_STATE.lock();
                             if let Some(ref mut state) = *net_guard {
+                                using_d1_emac = false;
                                 state.send_ping(target, seq, timestamp)
                             } else {
-                                return -2;
+                                drop(net_guard);
+                                // Try D1 EMAC
+                                let mut d1_guard = crate::D1_NET_STATE.lock();
+                                if let Some(ref mut state) = *d1_guard {
+                                    using_d1_emac = true;
+                                    state.send_ping(target, seq, timestamp)
+                                } else {
+                                    return -2; // No network available
+                                }
                             }
                         };
                         
@@ -1519,11 +1560,18 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             }
                             
                             // Poll network and check for reply
-                            let reply = {
+                            let reply = if using_d1_emac {
+                                let mut d1_guard = crate::D1_NET_STATE.lock();
+                                if let Some(ref mut state) = *d1_guard {
+                                    state.poll(now);
+                                    state.check_ping_reply()
+                                } else {
+                                    None
+                                }
+                            } else {
                                 let mut net_guard = crate::NET_STATE.lock();
                                 if let Some(ref mut state) = *net_guard {
                                     state.poll(now);
-                                    // check_ping_reply returns (from_ip, ident, seq)
                                     state.check_ping_reply()
                                 } else {
                                     None

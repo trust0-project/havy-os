@@ -256,8 +256,26 @@ fn start_system_services() {
         crate::uart::write_line("");
         
         // Initialize and spawn tcpd (TCP daemon on port 30)
-        // Only if networking is available
-        if crate::NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false) {
+        // Only if networking is available (VirtIO or D1 EMAC)
+        let has_virtio_net = crate::NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false);
+        let has_d1_net = crate::D1_NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false);
+        if has_virtio_net || has_d1_net {
+            // Initialize and spawn netd (network daemon for IP assignment)
+            // This should run first to provision IP from relay
+            // D1 EMAC IP is available via shared memory so any hart can run netd
+            if crate::netd::init().is_ok() {
+                let netd_hart = get_least_loaded_hart();
+                let netd_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("netd", netd_service, Priority::High, Some(netd_hart));
+                register_service("netd", netd_pid, Some(netd_hart));
+                crate::uart::write_str("[init] netd spawned (PID ");
+                crate::uart::write_u64(netd_pid as u64);
+                crate::uart::write_str(") on CPU ");
+                crate::uart::write_u64(netd_hart as u64);
+                crate::uart::write_line(" - polling for IP assignment");
+            } else {
+                crate::uart::write_line("[init] netd: failed to initialize");
+            }
+            
             // Initialize tcpd (binds to port 30)
             if crate::tcpd::init().is_ok() {
                 let tcpd_hart = get_least_loaded_hart();
@@ -295,7 +313,7 @@ fn start_system_services() {
         }
         
         // Spawn gpuid if GPU is available (unconditional, not dependent on network)
-        if crate::virtio_gpu::is_available() {
+        if crate::d1_display::is_available() {
             let gpuid_hart = get_least_loaded_hart();
             let gpuid_pid = PROC_SCHEDULER.spawn_daemon_on_cpu("gpuid", gpuid_service, Priority::Normal, Some(gpuid_hart));
             register_service("gpuid", gpuid_pid, Some(gpuid_hart));
@@ -311,6 +329,7 @@ fn start_system_services() {
     } else {
         // ─── SHELL-LOOP COOPERATIVE MODE ──────────────────────────────────────────
         // Single-hart mode: services are ticked by the shell loop on hart 0
+        // All services run cooperatively, ticked from the shell loop
         
         let klogd_pid = crate::process::allocate_pid();
         let sysmond_pid = crate::process::allocate_pid();
@@ -325,8 +344,21 @@ fn start_system_services() {
         crate::uart::write_u64(sysmond_pid as u64);
         crate::uart::write_line(") cooperative on CPU 0");
         
-        // Initialize tcpd in cooperative mode if networking is available
-        if crate::NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false) {
+        // Check for network availability (VirtIO NET or D1 EMAC)
+        let has_virtio_net = crate::NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false);
+        let has_d1_net = crate::D1_NET_STATE.try_lock().map(|g| g.is_some()).unwrap_or(false);
+        
+        if has_virtio_net || has_d1_net {
+            // Initialize and register netd first (handles IP assignment)
+            if crate::netd::init().is_ok() {
+                let netd_pid = crate::process::allocate_pid();
+                register_service("netd", netd_pid, Some(0));
+                crate::uart::write_str("[init] netd (PID ");
+                crate::uart::write_u64(netd_pid as u64);
+                crate::uart::write_line(") cooperative on CPU 0 - polling for IP");
+            }
+            
+            // Initialize tcpd (binds to port 30)
             if crate::tcpd::init().is_ok() {
                 let tcpd_pid = crate::process::allocate_pid();
                 register_service("tcpd", tcpd_pid, Some(0));
@@ -337,7 +369,7 @@ fn start_system_services() {
                 crate::uart::write_line("");
             }
             
-            // Initialize httpd in cooperative mode
+            // Initialize httpd (binds to port 80)
             if crate::httpd::init().is_ok() {
                 let httpd_pid = crate::process::allocate_pid();
                 register_service("httpd", httpd_pid, Some(0));
@@ -347,15 +379,20 @@ fn start_system_services() {
                 crate::uart::write_u64(crate::httpd::HTTPD_PORT as u64);
                 crate::uart::write_line("");
             }
+        } else {
+            crate::uart::write_line("[init] tcpd: skipped (no network)");
+            crate::uart::write_line("[init] httpd: skipped (no network)");
         }
         
         // Register gpuid in cooperative mode if GPU is available
-        if crate::virtio_gpu::is_available() {
+        if crate::d1_display::is_available() {
             let gpuid_pid = crate::process::allocate_pid();
             register_service("gpuid", gpuid_pid, Some(0));
             crate::uart::write_str("[init] gpuid (PID ");
             crate::uart::write_u64(gpuid_pid as u64);
             crate::uart::write_line(") cooperative on CPU 0");
+        } else {
+            crate::uart::write_line("[init] gpuid: skipped (no GPU)");
         }
     }
 }
@@ -433,7 +470,7 @@ pub fn stop_service(name: &str) -> Result<(), &'static str> {
 
     // Special cleanup for gpuid: clear the display
     if name == "gpuid" {
-        crate::virtio_gpu::clear_display();
+        crate::d1_display::clear_display();
     }
 
     // Kill the process
@@ -465,7 +502,7 @@ pub fn stop_service_by_pid(pid: u32) -> bool {
         
         // Special cleanup for gpuid: clear the display
         if is_gpuid {
-            crate::virtio_gpu::clear_display();
+            crate::d1_display::clear_display();
         }
         
         klog_info("init", &format!("Stopped service '{}' (PID {})", name, pid));
@@ -640,18 +677,25 @@ fn write_boot_log() {
 // SYSTEM SERVICES (long-running daemons on secondary harts)
 // ===============================================================================
 
-/// Spin-delay for approximately the given milliseconds
-/// Uses busy-waiting since secondary harts don't have timer interrupts
+/// Sleep for approximately the given milliseconds using WFI.
+/// Uses WFI instruction to actually sleep the hart, saving CPU cycles.
+/// Timer interrupts wake the hart every ~10ms ensuring proper delay.
 #[inline(never)]
-fn spin_delay_ms(ms: u64) {
+fn wfi_delay_ms(ms: u64) {
     let start = crate::get_time_ms() as u64;
     let target = start + ms;
     while (crate::get_time_ms() as u64) < target {
-        // Yield CPU hints to save power
-        for _ in 0..100 {
-            core::hint::spin_loop();
+        // Sleep until timer interrupt wakes us
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
         }
     }
+}
+
+/// Alias for compatibility - redirects to wfi_delay_ms
+#[inline(always)]
+fn spin_delay_ms(ms: u64) {
+    wfi_delay_ms(ms);
 }
 
 // ===============================================================================
@@ -758,12 +802,11 @@ pub fn flush_log_buffer() -> usize {
     let entries = {
         let mut buffer = LOG_BUFFER.lock();
         
-        // Only flush every 5 seconds or if buffer is getting full
-        let now = crate::get_time_ms();
-        if buffer.count < LOG_BUFFER_SIZE / 2 && now - buffer.last_flush_ms < 5000 {
+        // Flush if there are any pending entries
+        // (daemons are already throttled, so we can flush immediately)
+        if buffer.count == 0 {
             return 0;
         }
-        buffer.last_flush_ms = now;
         buffer.drain()
     };
     
@@ -965,14 +1008,14 @@ pub fn klogd_service() {
     let last = KLOGD_LAST_RUN.load(Ordering::Relaxed);
     
     if KLOGD_INITIALIZED.load(Ordering::Relaxed) && (now - last) < 4000 {
-        // Not time yet - yield briefly and return
-        spin_delay_ms(10);
+        // Not time yet - sleep longer to save CPU
+        spin_delay_ms(500);
         return;
     }
     
     // Time to potentially do work
     klogd_tick();
-    spin_delay_ms(10);
+    spin_delay_ms(500);
 }
 
 /// Daemon service entry point for sysmond
@@ -985,14 +1028,14 @@ pub fn sysmond_service() {
     let last = SYSMOND_LAST_RUN.load(Ordering::Relaxed);
     
     if SYSMOND_INITIALIZED.load(Ordering::Relaxed) && (now - last) < 9000 {
-        // Not time yet - yield briefly and return
-        spin_delay_ms(10);
+        // Not time yet - sleep longer to save CPU
+        spin_delay_ms(500);
         return;
     }
     
     // Time to potentially do work
     sysmond_tick();
-    spin_delay_ms(10);
+    spin_delay_ms(500);
 }
 
 /// Daemon service entry point for tcpd
@@ -1001,7 +1044,7 @@ pub fn sysmond_service() {
 /// tcpd_tick handles its own timing (polls every 50ms)
 pub fn tcpd_service() {
     crate::tcpd::tick();
-    spin_delay_ms(10);
+    spin_delay_ms(100); // Slightly longer delay for network polling
 }
 
 /// Daemon service entry point for httpd
@@ -1010,17 +1053,25 @@ pub fn tcpd_service() {
 /// httpd_tick handles its own timing (polls every 10ms)
 pub fn httpd_service() {
     crate::httpd::tick();
-    spin_delay_ms(10);
+    spin_delay_ms(100); // Slightly longer delay for HTTP handling
 }
+
+/// Daemon service entry point for netd (network daemon)
+/// Polls for IP assignment from relay. High priority service.
+pub fn netd_service() {
+    crate::netd::tick();
+    spin_delay_ms(50); // Faster polling for IP assignment
+}
+
 
 /// Daemon service entry point for gpuid (GPU UI daemon)
 /// Handles keyboard input and GPU display updates.
 /// Runs at ~60 FPS when input is detected, otherwise polls less frequently.
 pub fn gpuid_service() {
-    use crate::{boot_console, ui, virtio_gpu, virtio_input};
+    use crate::{boot_console, ui, d1_display, d1_touch};
     
     // Skip if GPU not available
-    if !virtio_gpu::is_available() {
+    if !d1_display::is_available() {
         spin_delay_ms(100);
         return;
     }
@@ -1036,7 +1087,7 @@ pub fn gpuid_service() {
         spin_delay_ms(250);
         
         // Clear framebuffer and switch to GUI phase
-        virtio_gpu::clear_display();
+        d1_display::clear_display();
         boot_console::set_phase_gui();
         
         // Setup the boot screen UI elements
@@ -1053,7 +1104,7 @@ pub fn gpuid_service() {
     }
     
     // Poll for input events
-    virtio_input::poll();
+    d1_touch::poll();
     
     // Check demo mode once before processing events (optimization)
     let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
@@ -1063,16 +1114,16 @@ pub fn gpuid_service() {
     let mut had_input = false;
     let mut had_button_action = false;
     
-    while let Some(event) = virtio_input::next_event() {
+    while let Some(event) = d1_touch::next_event() {
         had_input = true;
         
         if is_demo {
             // For mouse movement (EV_ABS), just update position - don't process fully
             // This allows coalescing of multiple movement events
-            if event.event_type == virtio_input::EV_ABS {
+            if event.event_type == d1_touch::EV_ABS {
                 match event.code {
-                    virtio_input::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
-                    virtio_input::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
+                    d1_touch::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
+                    d1_touch::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
                     _ => {}
                 }
             } else {
@@ -1095,7 +1146,7 @@ pub fn gpuid_service() {
         
         // Only flush if there was input (button clicked) or periodically for stats
         if had_input {
-            virtio_gpu::flush();
+            d1_display::flush();
         } else {
             // Periodically update hardware stats
             ui::update_demo_hardware_stats();
@@ -1123,10 +1174,10 @@ pub fn gpuid_service() {
 /// GPU UI tick function for cooperative mode (single-hart operation)
 /// Called periodically from shell_tick to handle input and render updates.
 pub fn gpuid_tick() {
-    use crate::{boot_console, ui, virtio_gpu, virtio_input};
+    use crate::{boot_console, ui, d1_display, d1_touch};
     
     // Skip if GPU not available
-    if !virtio_gpu::is_available() {
+    if !d1_display::is_available() {
         return;
     }
     
@@ -1137,7 +1188,7 @@ pub fn gpuid_tick() {
         boot_console::render();
         
         // Clear and switch to GUI
-        virtio_gpu::clear_display();
+        d1_display::clear_display();
         boot_console::set_phase_gui();
         ui::setup_demo_screen();
         
@@ -1145,26 +1196,26 @@ pub fn gpuid_tick() {
             ui_mgr.mark_dirty();
             ui_mgr.render();
         });
-        virtio_gpu::flush();
+        d1_display::flush();
         return;
     }
     
     // Poll for input events
-    virtio_input::poll();
+    d1_touch::poll();
     
     // Check demo mode once before processing events
     let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
     
     // COALESCED event processing (same as gpuid_service)
     let mut had_input = false;
-    while let Some(event) = virtio_input::next_event() {
+    while let Some(event) = d1_touch::next_event() {
         had_input = true;
         if is_demo {
             // For mouse movement, just update position - coalesce multiple events
-            if event.event_type == virtio_input::EV_ABS {
+            if event.event_type == d1_touch::EV_ABS {
                 match event.code {
-                    virtio_input::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
-                    virtio_input::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
+                    d1_touch::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
+                    d1_touch::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
                     _ => {}
                 }
             } else {
@@ -1181,7 +1232,7 @@ pub fn gpuid_tick() {
     if is_demo {
         // Position is updated for click hit-testing only
         if had_input {
-            virtio_gpu::flush();
+            d1_display::flush();
         } else {
             ui::update_demo_hardware_stats();
         }
@@ -1191,7 +1242,7 @@ pub fn gpuid_tick() {
                 ui_mgr.render();
             }
         });
-        virtio_gpu::flush();
+        d1_display::flush();
     }
 }
 

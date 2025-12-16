@@ -6,7 +6,12 @@
 //! - Dirty block tracking for efficient sync
 //! - LRU eviction for cache management
 
-use crate::virtio_blk::VirtioBlock;
+// Block device type alias for platform abstraction
+#[cfg(not(feature = "d1"))]
+use crate::virtio_blk::BlockDev as BlockDev;
+#[cfg(feature = "d1")]
+use crate::d1_mmc::D1Mmc as BlockDev;
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -99,7 +104,7 @@ impl BufferCache {
 
     /// Read a block, using cache if available
     #[allow(dead_code)]
-    pub fn read(&mut self, dev: &mut VirtioBlock, sector: u64) -> Result<&[u8; 512], &'static str> {
+    pub fn read(&mut self, dev: &mut BlockDev, sector: u64) -> Result<&[u8; 512], &'static str> {
         // Check cache first
         if self.blocks.contains_key(&sector) {
             self.hits += 1;
@@ -126,7 +131,7 @@ impl BufferCache {
     /// Read a block into a mutable buffer (for modification)
     pub fn read_mut(
         &mut self,
-        dev: &mut VirtioBlock,
+        dev: &mut BlockDev,
         sector: u64,
     ) -> Result<&mut [u8; 512], &'static str> {
         // Ensure block is in cache
@@ -152,7 +157,7 @@ impl BufferCache {
     /// Write a block (cached, not immediately flushed)
     pub fn write(
         &mut self,
-        dev: &mut VirtioBlock,
+        dev: &mut BlockDev,
         sector: u64,
         data: &[u8; 512],
     ) -> Result<(), &'static str> {
@@ -183,7 +188,7 @@ impl BufferCache {
     }
 
     /// Flush all dirty blocks to disk
-    pub fn sync(&mut self, dev: &mut VirtioBlock) -> Result<usize, &'static str> {
+    pub fn sync(&mut self, dev: &mut BlockDev) -> Result<usize, &'static str> {
         let mut count = 0;
         for (&sector, entry) in self.blocks.iter_mut() {
             if entry.dirty {
@@ -198,7 +203,7 @@ impl BufferCache {
 
     /// Flush a specific block to disk
     #[allow(dead_code)]
-    pub fn sync_block(&mut self, dev: &mut VirtioBlock, sector: u64) -> Result<bool, &'static str> {
+    pub fn sync_block(&mut self, dev: &mut BlockDev, sector: u64) -> Result<bool, &'static str> {
         if let Some(entry) = self.blocks.get_mut(&sector) {
             if entry.dirty {
                 dev.write_sector(sector, &entry.data)?;
@@ -211,7 +216,7 @@ impl BufferCache {
     }
 
     /// Evict the least recently used block
-    fn evict_lru(&mut self, dev: &mut VirtioBlock) -> Result<(), &'static str> {
+    fn evict_lru(&mut self, dev: &mut BlockDev) -> Result<(), &'static str> {
         // Find LRU entry
         let lru_sector = self
             .blocks
@@ -241,7 +246,7 @@ impl BufferCache {
 
     /// Clear the entire cache (flushes dirty blocks first)
     #[allow(dead_code)]
-    pub fn clear(&mut self, dev: &mut VirtioBlock) -> Result<(), &'static str> {
+    pub fn clear(&mut self, dev: &mut BlockDev) -> Result<(), &'static str> {
         self.sync(dev)?;
         self.blocks.clear();
         Ok(())
@@ -268,7 +273,7 @@ pub struct FileSystem {
 }
 
 impl FileSystem {
-    pub fn init(dev: &mut VirtioBlock) -> Option<Self> {
+    pub fn init(dev: &mut BlockDev) -> Option<Self> {
         let mut buf = [0u8; 512];
         if dev.read_sector(SEC_SUPER, &mut buf).is_err() {
             return None;
@@ -292,7 +297,7 @@ impl FileSystem {
     }
 
     /// Sync all cached data to disk
-    pub fn sync(&mut self, dev: &mut VirtioBlock) -> Result<usize, &'static str> {
+    pub fn sync(&mut self, dev: &mut BlockDev) -> Result<usize, &'static str> {
         // Sync bitmap if dirty
         if self.bitmap_dirty {
             dev.write_sector(SEC_MAP_START, &self.bitmap_cache)?;
@@ -339,7 +344,7 @@ impl FileSystem {
 
     /// List all files in the root directory
     /// Returns a Vec of FileInfo structs for use by the scripting engine
-    pub fn list_dir(&mut self, dev: &mut VirtioBlock, _path: &str) -> Vec<FileInfo> {
+    pub fn list_dir(&mut self, dev: &mut BlockDev, _path: &str) -> Vec<FileInfo> {
         let mut entries = Vec::new();
         let mut consecutive_empty = 0;
 
@@ -389,7 +394,7 @@ impl FileSystem {
     }
 
     /// Legacy ls function that prints directly to UART
-    pub fn ls(&mut self, dev: &mut VirtioBlock) {
+    pub fn ls(&mut self, dev: &mut BlockDev) {
         crate::uart::write_line("SIZE        NAME");
         crate::uart::write_line("----------  --------------------");
 
@@ -438,7 +443,7 @@ impl FileSystem {
         }
     }
 
-    pub fn read_file(&self, dev: &mut VirtioBlock, filename: &str) -> Option<Vec<u8>> {
+    pub fn read_file(&self, dev: &mut BlockDev, filename: &str) -> Option<Vec<u8>> {
         let entry = match self.find_entry(dev, filename) {
             Some(e) => e,
             None => return None,
@@ -466,7 +471,7 @@ impl FileSystem {
 
     pub fn write_file(
         &mut self,
-        dev: &mut VirtioBlock,
+        dev: &mut BlockDev,
         filename: &str,
         data: &[u8],
     ) -> Result<(), &'static str> {
@@ -543,7 +548,7 @@ impl FileSystem {
     /// Link two blocks using cached writes
     fn link_block_cached(
         &mut self,
-        dev: &mut VirtioBlock,
+        dev: &mut BlockDev,
         prev: u32,
         next: u32,
     ) -> Result<(), &'static str> {
@@ -555,7 +560,7 @@ impl FileSystem {
 
     // --- Helpers ---
 
-    fn find_entry(&self, dev: &mut VirtioBlock, name: &str) -> Option<DirEntry> {
+    fn find_entry(&self, dev: &mut BlockDev, name: &str) -> Option<DirEntry> {
         if let Some((sec, idx)) = self.find_entry_pos(dev, name) {
             let mut buf = [0u8; 512];
             dev.read_sector(sec, &mut buf).ok()?;
@@ -566,7 +571,7 @@ impl FileSystem {
         None
     }
 
-    fn find_entry_pos(&self, dev: &mut VirtioBlock, name: &str) -> Option<(u64, usize)> {
+    fn find_entry_pos(&self, dev: &mut BlockDev, name: &str) -> Option<(u64, usize)> {
         let mut buf = [0u8; 512];
         
         for i in 0..SEC_DIR_COUNT {
@@ -594,7 +599,7 @@ impl FileSystem {
         None
     }
 
-    fn find_free_dir_entry(&self, dev: &mut VirtioBlock) -> Option<(u64, usize)> {
+    fn find_free_dir_entry(&self, dev: &mut BlockDev) -> Option<(u64, usize)> {
         let mut buf = [0u8; 512];
         for i in 0..SEC_DIR_COUNT {
             let sector = SEC_DIR_START + i;
@@ -608,7 +613,7 @@ impl FileSystem {
         None
     }
 
-    fn alloc_block(&mut self, _dev: &mut VirtioBlock) -> Option<u32> {
+    fn alloc_block(&mut self, _dev: &mut BlockDev) -> Option<u32> {
         // Naive: Only searches the cached first sector of bitmap
         for i in 0..self.bitmap_cache.len() {
             if self.bitmap_cache[i] != 0xFF {
@@ -630,7 +635,7 @@ impl FileSystem {
         None
     }
 
-    fn link_block(&self, dev: &mut VirtioBlock, prev: u32, next: u32) -> Result<(), &'static str> {
+    fn link_block(&self, dev: &mut BlockDev, prev: u32, next: u32) -> Result<(), &'static str> {
         let mut buf = [0u8; 512];
         dev.read_sector(prev as u64, &mut buf)?;
         buf[0..4].copy_from_slice(&next.to_le_bytes());
@@ -640,7 +645,7 @@ impl FileSystem {
     /// Create a directory (creates a placeholder file with trailing /)
     /// In SFS, directories are represented by files with names ending in /
     /// and containing references to their children
-    pub fn mkdir(&mut self, dev: &mut VirtioBlock, path: &str) -> Result<(), &'static str> {
+    pub fn mkdir(&mut self, dev: &mut BlockDev, path: &str) -> Result<(), &'static str> {
         // Normalize path - ensure it ends with /
         let dir_path = if path.ends_with('/') {
             String::from(path)
@@ -663,7 +668,7 @@ impl FileSystem {
     }
 
     /// Remove a file or empty directory
-    pub fn remove(&mut self, dev: &mut VirtioBlock, path: &str) -> Result<(), &'static str> {
+    pub fn remove(&mut self, dev: &mut BlockDev, path: &str) -> Result<(), &'static str> {
         let (sector, index) = self.find_entry_pos(dev, path).ok_or("File not found")?;
 
         // Check if it's a directory with children
@@ -691,12 +696,12 @@ impl FileSystem {
     }
 
     /// Check if a path exists
-    pub fn exists(&self, dev: &mut VirtioBlock, path: &str) -> bool {
+    pub fn exists(&self, dev: &mut BlockDev, path: &str) -> bool {
         self.find_entry_pos(dev, path).is_some()
     }
 
     /// Check if a path is a directory
-    pub fn is_dir(&mut self, dev: &mut VirtioBlock, path: &str) -> bool {
+    pub fn is_dir(&mut self, dev: &mut BlockDev, path: &str) -> bool {
         // Check if path ends with / or has children
         if path.ends_with('/') {
             return self.find_entry_pos(dev, path).is_some();

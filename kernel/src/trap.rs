@@ -1,14 +1,14 @@
-//! Trap Handler for RISC-V M-mode
+//! Trap Handler for RISC-V S-mode
 //!
-//! This module handles all machine-mode traps including:
-//! - Timer interrupts (for preemptive scheduling)
+//! This module handles all supervisor-mode traps including:
+//! - Timer interrupts (for preemptive scheduling) via SBI
 //! - Software interrupts (IPIs for cross-hart communication)
 //! - Exceptions (illegal instructions, page faults, etc.)
 //!
 //! ## Trap Flow
 //!
 //! ```text
-//! Process Running
+//! Process Running (S-mode)
 //!       │
 //!       ▼
 //! ┌─────────────┐
@@ -27,19 +27,19 @@
 //!       │
 //!       ▼
 //! ┌─────────────┐
-//! │ trap_exit   │ (assembly: restore registers, mret)
+//! │ trap_exit   │ (assembly: restore registers, sret)
 //! └─────────────┘
 //! ```
 
 use core::arch::asm;
 
-/// Machine cause register values (mcause)
+/// Supervisor cause register values (scause)
 /// Bit 63 (XLEN-1) is the interrupt bit: 1 = interrupt, 0 = exception
 pub mod cause {
-    // Interrupts (bit 63 set)
-    pub const MACHINE_SOFTWARE_INTERRUPT: usize = 0x8000_0000_0000_0003;
-    pub const MACHINE_TIMER_INTERRUPT: usize = 0x8000_0000_0000_0007;
-    pub const MACHINE_EXTERNAL_INTERRUPT: usize = 0x8000_0000_0000_000B;
+    // Interrupts (bit 63 set) - Supervisor mode
+    pub const SUPERVISOR_SOFTWARE_INTERRUPT: usize = 0x8000_0000_0000_0001;
+    pub const SUPERVISOR_TIMER_INTERRUPT: usize = 0x8000_0000_0000_0005;
+    pub const SUPERVISOR_EXTERNAL_INTERRUPT: usize = 0x8000_0000_0000_0009;
 
     // Exceptions (bit 63 clear)
     pub const INSTRUCTION_ADDRESS_MISALIGNED: usize = 0;
@@ -52,67 +52,60 @@ pub mod cause {
     pub const STORE_ACCESS_FAULT: usize = 7;
     pub const ECALL_FROM_U_MODE: usize = 8;
     pub const ECALL_FROM_S_MODE: usize = 9;
-    pub const ECALL_FROM_M_MODE: usize = 11;
     pub const INSTRUCTION_PAGE_FAULT: usize = 12;
     pub const LOAD_PAGE_FAULT: usize = 13;
     pub const STORE_PAGE_FAULT: usize = 15;
 }
 
-/// CLINT timer registers
-const CLINT_MTIMECMP_BASE: usize = 0x0200_4000;
-const CLINT_MTIME: usize = 0x0200_BFF8;
-
 /// Timer interval in cycles (approximately 10ms at 10MHz)
-/// Adjust based on actual clock frequency
 const TIMER_INTERVAL: u64 = 100_000;
 
-/// Read the current machine time
+/// Read the current time via the `time` CSR
 #[inline]
 pub fn read_mtime() -> u64 {
-    unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) }
-}
-
-/// Set the timer compare value for a hart
-#[inline]
-pub fn set_mtimecmp(hart_id: usize, value: u64) {
-    let addr = CLINT_MTIMECMP_BASE + (hart_id * 8);
+    let time: u64;
     unsafe {
-        core::ptr::write_volatile(addr as *mut u64, value);
+        asm!(
+            "rdtime {}",
+            out(reg) time,
+            options(nomem, nostack)
+        );
     }
+    time
 }
 
-/// Schedule the next timer interrupt
-pub fn schedule_timer_interrupt(hart_id: usize) {
+/// Schedule the next timer interrupt using SBI
+pub fn schedule_timer_interrupt(_hart_id: usize) {
     let current = read_mtime();
-    set_mtimecmp(hart_id, current.wrapping_add(TIMER_INTERVAL));
+    crate::sbi::set_timer(current.wrapping_add(TIMER_INTERVAL));
 }
 
-/// Enable machine-mode interrupts
+/// Enable supervisor-mode interrupts
 pub fn enable_interrupts() {
     unsafe {
-        // Enable MIE (Machine Interrupt Enable) in mstatus
+        // Enable SIE (Supervisor Interrupt Enable) in sstatus
         asm!(
-            "csrsi mstatus, 0x8",  // Set MIE bit (bit 3)
+            "csrsi sstatus, 0x2",  // Set SIE bit (bit 1)
             options(nomem, nostack)
         );
         
-        // Enable timer and software interrupts in mie
-        // MTIE = bit 7, MSIE = bit 3
+        // Enable timer, software, and external interrupts in sie
+        // STIE = bit 5, SSIE = bit 1, SEIE = bit 9
         asm!(
-            "li t0, 0x88",
-            "csrs mie, t0",
+            "li t0, 0x222",
+            "csrs sie, t0",
             out("t0") _,
             options(nomem, nostack)
         );
     }
 }
 
-/// Disable machine-mode interrupts
+/// Disable supervisor-mode interrupts
 #[allow(dead_code)]
 pub fn disable_interrupts() {
     unsafe {
         asm!(
-            "csrci mstatus, 0x8",  // Clear MIE bit
+            "csrci sstatus, 0x2",  // Clear SIE bit
             options(nomem, nostack)
         );
     }
@@ -122,99 +115,94 @@ pub fn disable_interrupts() {
 #[inline]
 #[allow(dead_code)]
 pub fn interrupts_enabled() -> bool {
-    let mstatus: usize;
+    let sstatus: usize;
     unsafe {
         asm!(
-            "csrr {}, mstatus",
-            out(reg) mstatus,
+            "csrr {}, sstatus",
+            out(reg) sstatus,
             options(nomem, nostack)
         );
     }
-    (mstatus & 0x8) != 0
+    (sstatus & 0x2) != 0
 }
 
-/// Set the trap handler vector
+/// Set the trap handler vector (stvec)
 pub fn set_trap_vector(handler: usize) {
     unsafe {
         asm!(
-            "csrw mtvec, {}",
+            "csrw stvec, {}",
             in(reg) handler,
             options(nomem, nostack)
         );
     }
 }
 
-/// Read mcause register
+/// Read scause register
 #[inline]
-pub fn read_mcause() -> usize {
-    let mcause: usize;
+pub fn read_scause() -> usize {
+    let scause: usize;
     unsafe {
         asm!(
-            "csrr {}, mcause",
-            out(reg) mcause,
+            "csrr {}, scause",
+            out(reg) scause,
             options(nomem, nostack)
         );
     }
-    mcause
+    scause
 }
 
-/// Read mepc register (exception PC)
+/// Read sepc register (exception PC)
 #[inline]
-pub fn read_mepc() -> usize {
-    let mepc: usize;
+pub fn read_sepc() -> usize {
+    let sepc: usize;
     unsafe {
         asm!(
-            "csrr {}, mepc",
-            out(reg) mepc,
+            "csrr {}, sepc",
+            out(reg) sepc,
             options(nomem, nostack)
         );
     }
-    mepc
+    sepc
 }
 
-/// Read mtval register (trap value - faulting address or instruction)
+/// Read stval register (trap value)
 #[inline]
-pub fn read_mtval() -> usize {
-    let mtval: usize;
+pub fn read_stval() -> usize {
+    let stval: usize;
     unsafe {
         asm!(
-            "csrr {}, mtval",
-            out(reg) mtval,
+            "csrr {}, stval",
+            out(reg) stval,
             options(nomem, nostack)
         );
     }
-    mtval
+    stval
 }
 
 /// The main trap handler called from assembly
-///
-/// This function is called with interrupts disabled.
-/// It dispatches to the appropriate handler based on mcause.
 #[no_mangle]
 pub extern "C" fn trap_handler() {
-    let mcause = read_mcause();
+    let scause = read_scause();
     let hart_id = crate::get_hart_id();
     
-    // Check if this is an interrupt (bit 63 set) or exception
-    let is_interrupt = (mcause as isize) < 0;
-    let cause_code = mcause & 0x7FFF_FFFF_FFFF_FFFF;
+    let is_interrupt = (scause as isize) < 0;
+    let cause_code = scause & 0x7FFF_FFFF_FFFF_FFFF;
     
     if is_interrupt {
-        match mcause {
-            cause::MACHINE_TIMER_INTERRUPT => {
+        match scause {
+            cause::SUPERVISOR_TIMER_INTERRUPT => {
                 handle_timer_interrupt(hart_id);
             }
-            cause::MACHINE_SOFTWARE_INTERRUPT => {
+            cause::SUPERVISOR_SOFTWARE_INTERRUPT => {
                 handle_software_interrupt(hart_id);
             }
-            cause::MACHINE_EXTERNAL_INTERRUPT => {
+            cause::SUPERVISOR_EXTERNAL_INTERRUPT => {
                 handle_external_interrupt(hart_id);
             }
             _ => {
-                // Unknown interrupt - log and continue
                 crate::klog::klog_warning(
                     "trap",
-                    &alloc::format!("Unknown interrupt: cause={:#x} hart={}", mcause, hart_id),
+                    &alloc::format!("Unknown interrupt: cause={:#x} hart={}", scause, hart_id),
                 );
             }
         }
@@ -225,16 +213,17 @@ pub extern "C" fn trap_handler() {
 
 /// Handle timer interrupt - triggers preemptive scheduling
 fn handle_timer_interrupt(hart_id: usize) {
-    // Update CPU stats
     if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
         cpu.enter_interrupt();
     }
     
-    // Schedule next timer interrupt
+    // Schedule next timer interrupt via SBI
     schedule_timer_interrupt(hart_id);
     
-    // Trigger a context switch by calling yield
-    // The scheduler will pick the next process
+    // Set yield pending flag - actual context switch happens in hart_loop
+    // NOTE: We cannot call switch_context() from here because we're inside
+    // a trap handler that already saved registers to the stack. The actual
+    // preemption happens when the trap returns and hart_loop checks the flag.
     crate::sched::yield_from_interrupt();
     
     if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
@@ -242,13 +231,10 @@ fn handle_timer_interrupt(hart_id: usize) {
     }
 }
 
-/// Handle software interrupt (IPI)
+/// Handle software interrupt (IPI) via SBI
 fn handle_software_interrupt(hart_id: usize) {
-    // Clear the software interrupt
-    crate::clear_msip(hart_id);
+    crate::sbi::clear_ipi();
     
-    // Software interrupts are used for cross-hart notifications
-    // The hart loop will check for new work after returning
     if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
         cpu.enter_interrupt();
         cpu.exit_interrupt();
@@ -257,8 +243,6 @@ fn handle_software_interrupt(hart_id: usize) {
 
 /// Handle external interrupt (PLIC)
 fn handle_external_interrupt(hart_id: usize) {
-    // External interrupts come from PLIC (VirtIO, etc.)
-    // For now, just log - actual handling would involve PLIC claim/complete
     crate::klog::klog_trace(
         "trap",
         &alloc::format!("External interrupt on hart {}", hart_id),
@@ -267,61 +251,54 @@ fn handle_external_interrupt(hart_id: usize) {
 
 /// Handle exception (synchronous trap)
 fn handle_exception(hart_id: usize, cause: usize) {
-    let mepc = read_mepc();
-    let mtval = read_mtval();
+    let sepc = read_sepc();
+    let stval = read_stval();
     
     match cause {
-        cause::ECALL_FROM_M_MODE => {
-            // System call from kernel - not typically used in M-mode only kernels
-            // For now, just advance PC past the ecall instruction
+        cause::ECALL_FROM_U_MODE | cause::ECALL_FROM_S_MODE => {
+            // Advance PC past ecall
             unsafe {
                 asm!(
-                    "csrr t0, mepc",
+                    "csrr t0, sepc",
                     "addi t0, t0, 4",
-                    "csrw mepc, t0",
+                    "csrw sepc, t0",
                     out("t0") _,
                     options(nomem, nostack)
                 );
             }
         }
         cause::BREAKPOINT => {
-            // Breakpoint instruction - useful for debugging
             crate::klog::klog_debug(
                 "trap",
-                &alloc::format!("Breakpoint at {:#x} on hart {}", mepc, hart_id),
+                &alloc::format!("Breakpoint at {:#x} on hart {}", sepc, hart_id),
             );
-            // Advance past ebreak (compressed = 2 bytes, regular = 4 bytes)
-            // We assume compressed ebreak for now
             unsafe {
                 asm!(
-                    "csrr t0, mepc",
+                    "csrr t0, sepc",
                     "addi t0, t0, 2",
-                    "csrw mepc, t0",
+                    "csrw sepc, t0",
                     out("t0") _,
                     options(nomem, nostack)
                 );
             }
         }
         _ => {
-            // Fatal exception - panic
             panic!(
-                "EXCEPTION on hart {}: cause={} mepc={:#x} mtval={:#x}",
-                hart_id, cause, mepc, mtval
+                "EXCEPTION on hart {}: cause={} sepc={:#x} stval={:#x}",
+                hart_id, cause, sepc, stval
             );
         }
     }
 }
 
-// Include the trap vector assembly
+// S-mode trap vector assembly
 core::arch::global_asm!(r#"
 .section .text
 .global trap_vector_entry
 .align 4
 trap_vector_entry:
-    # Save all caller-saved registers to stack
     addi sp, sp, -256
     
-    # Save all general purpose registers
     sd ra, 0(sp)
     sd t0, 8(sp)
     sd t1, 16(sp)
@@ -353,10 +330,8 @@ trap_vector_entry:
     sd gp, 224(sp)
     sd tp, 232(sp)
     
-    # Call the Rust trap handler
     call trap_handler
     
-    # Restore all registers
     ld ra, 0(sp)
     ld t0, 8(sp)
     ld t1, 16(sp)
@@ -390,30 +365,23 @@ trap_vector_entry:
     
     addi sp, sp, 256
     
-    # Return from machine-mode trap
-    mret
+    sret
 "#);
 
-// External declaration for the trap vector entry point
 extern "C" {
     fn trap_vector_entry();
 }
 
 /// Initialize trap handling for a hart
 pub fn init(hart_id: usize) {
-    // Set trap vector to direct mode (all traps go to same handler)
-    // The handler address must be 4-byte aligned
     let handler_addr = trap_vector_entry as usize;
     set_trap_vector(handler_addr);
     
-    // Schedule first timer interrupt
     schedule_timer_interrupt(hart_id);
-    
-    // Enable interrupts
     enable_interrupts();
     
     crate::klog::klog_info(
         "trap",
-        &alloc::format!("Trap handler initialized on hart {}", hart_id),
+        &alloc::format!("S-mode trap handler initialized on hart {}", hart_id),
     );
 }

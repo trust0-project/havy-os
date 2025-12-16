@@ -1,7 +1,27 @@
+/* ============================================================================
+ * havy_os Complete Linker Script
+ * Contains MEMORY, REGION_ALIAS, and SECTIONS - fully self-contained
+ * ============================================================================ */
+
+/* Memory layout for havy_os kernel */
+MEMORY
+{
+    /* RAM starts at 0x80000000 (DRAM base for both VM and D1 hardware) */
+    RAM : ORIGIN = 0x80000000, LENGTH = 512M
+}
+
+REGION_ALIAS("REGION_TEXT", RAM);
+REGION_ALIAS("REGION_RODATA", RAM);
+REGION_ALIAS("REGION_DATA", RAM);
+REGION_ALIAS("REGION_BSS", RAM);
+REGION_ALIAS("REGION_HEAP", RAM);
+REGION_ALIAS("REGION_STACK", RAM);
+
+/* Override riscv-rt defaults for havy_os */
 PROVIDE(_stext = ORIGIN(REGION_TEXT));
 PROVIDE(_stack_start = ORIGIN(REGION_STACK) + LENGTH(REGION_STACK));
 /* Use direct assignment to override riscv-rt's default PROVIDE */
-_max_hart_id = 7;              /* Support 8 harts (0-7), value is max ID */
+_max_hart_id = 127;            /* Support 128 harts (0-127), value is max ID */
 _hart_stack_size = 128K;
 _heap_size = 64M;
 

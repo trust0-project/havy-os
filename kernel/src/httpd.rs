@@ -78,6 +78,7 @@ const MAX_REQUEST_SIZE: usize = 4096;
 
 /// Daemon state
 static HTTPD_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static HTTPD_USING_D1: AtomicBool = AtomicBool::new(false);  // True if using D1 EMAC
 static HTTPD_LAST_RUN: AtomicI64 = AtomicI64::new(0);
 static HTTPD_REQUESTS_SERVED: AtomicUsize = AtomicUsize::new(0);
 
@@ -217,13 +218,23 @@ fn build_404_response(path: &str) -> Vec<u8> {
 /// Sets up the embassy-net stack and prepares to accept connections.
 /// The actual async server runs via tick() being called periodically.
 pub fn init() -> Result<(), &'static str> {
-    // Check if network is available
-    let net_available = crate::NET_STATE.try_lock()
+    // Check if VirtIO network is available
+    let virtio_available = crate::NET_STATE.try_lock()
         .map(|g| g.is_some())
         .unwrap_or(false);
     
-    if !net_available {
+    // Check if D1 EMAC network is available
+    let d1_available = crate::D1_NET_STATE.try_lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false);
+    
+    if !virtio_available && !d1_available {
         return Err("Network not available");
+    }
+    
+    // Use D1 EMAC if VirtIO not available
+    if !virtio_available && d1_available {
+        HTTPD_USING_D1.store(true, Ordering::Release);
     }
     
     // Verify httpd templates exist in filesystem
@@ -242,8 +253,9 @@ pub fn init() -> Result<(), &'static str> {
         }
     }
     
+    let backend = if HTTPD_USING_D1.load(Ordering::Acquire) { "D1 EMAC" } else { "VirtIO" };
     HTTPD_INITIALIZED.store(true, Ordering::Release);
-    klog_info("httpd", &format!("HTTP server initialized on port {}", HTTPD_PORT));
+    klog_info("httpd", &format!("HTTP server initialized on port {} ({})", HTTPD_PORT, backend));
     
     Ok(())
 }
@@ -277,7 +289,19 @@ pub fn tick() {
     }
     HTTPD_LAST_RUN.store(now, Ordering::Relaxed);
     
-    // Try to acquire network lock (non-blocking)
+    // Dispatch to correct implementation
+    if HTTPD_USING_D1.load(Ordering::Acquire) {
+        tick_d1(now);
+    } else {
+        tick_virtio(now);
+    }
+}
+
+/// Static listen socket (shared between VirtIO and D1 implementations)
+static mut LISTEN_SOCKET: Option<crate::net::TcpSocketId> = None;
+
+/// VirtIO network tick implementation
+fn tick_virtio(now: i64) {
     let mut net = match crate::NET_STATE.try_lock() {
         Some(guard) => guard,
         None => return,
@@ -288,13 +312,8 @@ pub fn tick() {
         None => return,
     };
     
-    // Poll the network
     net.poll(now);
     
-    // Check for connections using the existing smoltcp server infrastructure
-    static mut LISTEN_SOCKET: Option<crate::net::TcpSocketId> = None;
-    
-    // Initialize listening socket if needed
     if unsafe { LISTEN_SOCKET.is_none() } {
         if let Ok(sock) = net.tcp_listen(HTTPD_PORT) {
             unsafe { LISTEN_SOCKET = Some(sock); }
@@ -302,62 +321,21 @@ pub fn tick() {
         }
     }
     
-    // Check for and handle connections
     if let Some(listen_id) = unsafe { LISTEN_SOCKET } {
         let state = net.tcp_server_state(listen_id);
         
-        // Log heartbeat every 10 seconds to confirm httpd is running
-        static mut LAST_HEARTBEAT: i64 = 0;
-        static mut HEARTBEAT_COUNT: u32 = 0;
-        static mut LAST_STATE: &str = "Unknown";
-        let should_heartbeat = unsafe {
-            if now - LAST_HEARTBEAT > 10000 {
-                LAST_HEARTBEAT = now;
-                HEARTBEAT_COUNT += 1;
-                true
-            } else {
-                false
-            }
-        };
-        if should_heartbeat {
-            let count = unsafe { HEARTBEAT_COUNT };
-            klog_info("httpd", &format!("heartbeat #{} - socket state: {}", count, state));
-        }
-        
-        // Log immediately when state changes from Listen  
-        let state_changed = unsafe {
-            if state != LAST_STATE {
-                LAST_STATE = state;
-                true
-            } else {
-                false
-            }
-        };
-        if state_changed {
-            klog_info("httpd", &format!("Socket state changed to: {}", state));
-        }
-        
         if state == "Established" {
             klog_info("httpd", "Connection established, handling request...");
-            // Handle the connection
-            handle_connection(net, listen_id, now);
-            
-            // Socket consumed, need to re-listen
+            handle_connection_virtio(net, listen_id, now);
             unsafe { LISTEN_SOCKET = None; }
         } else if let Some((conn_id, remote_ip, remote_port)) = net.tcp_accept(listen_id) {
-            let remote_ip_o = remote_ip.octets();
-            klog_info("httpd", &format!(
-                "Connection from {}.{}.{}.{}:{}",
-                remote_ip_o[0], remote_ip_o[1], remote_ip_o[2], remote_ip_o[3],
-                remote_port
-            ));
-            
-            handle_connection(net, conn_id, now);
+            let o = remote_ip.octets();
+            klog_info("httpd", &format!("Connection from {}.{}.{}.{}:{}", o[0], o[1], o[2], o[3], remote_port));
+            handle_connection_virtio(net, conn_id, now);
             unsafe { LISTEN_SOCKET = None; }
         }
     }
     
-    // Re-listen if needed
     if unsafe { LISTEN_SOCKET.is_none() } {
         if let Ok(sock) = net.tcp_listen(HTTPD_PORT) {
             unsafe { LISTEN_SOCKET = Some(sock); }
@@ -367,15 +345,57 @@ pub fn tick() {
     net.poll(now);
 }
 
-/// Handle a connection - receive request and send response
-fn handle_connection(net: &mut crate::net::NetState, socket_id: crate::net::TcpSocketId, now: i64) {
-    // Receive request
+/// D1 EMAC network tick implementation
+fn tick_d1(now: i64) {
+    let mut net = match crate::D1_NET_STATE.try_lock() {
+        Some(guard) => guard,
+        None => return,
+    };
+    
+    let net = match net.as_mut() {
+        Some(n) => n,
+        None => return,
+    };
+    
+    net.poll(now);
+    
+    if unsafe { LISTEN_SOCKET.is_none() } {
+        if let Ok(sock) = net.tcp_listen(HTTPD_PORT) {
+            unsafe { LISTEN_SOCKET = Some(sock); }
+            klog_info("httpd", &format!("Listening on port {} (D1 EMAC)", HTTPD_PORT));
+        }
+    }
+    
+    if let Some(listen_id) = unsafe { LISTEN_SOCKET } {
+        let state = net.tcp_server_state(listen_id);
+        
+        if state == "Established" {
+            klog_info("httpd", "Connection established, handling request...");
+            handle_connection_d1(net, listen_id, now);
+            unsafe { LISTEN_SOCKET = None; }
+        } else if let Some((conn_id, remote_ip, remote_port)) = net.tcp_accept(listen_id) {
+            let o = remote_ip.octets();
+            klog_info("httpd", &format!("Connection from {}.{}.{}.{}:{}", o[0], o[1], o[2], o[3], remote_port));
+            handle_connection_d1(net, conn_id, now);
+            unsafe { LISTEN_SOCKET = None; }
+        }
+    }
+    
+    if unsafe { LISTEN_SOCKET.is_none() } {
+        if let Ok(sock) = net.tcp_listen(HTTPD_PORT) {
+            unsafe { LISTEN_SOCKET = Some(sock); }
+        }
+    }
+    
+    net.poll(now);
+}
+
+/// Handle a VirtIO connection - receive request and send response
+fn handle_connection_virtio(net: &mut crate::net::NetState, socket_id: crate::net::TcpSocketId, now: i64) {
     let mut request_buf = [0u8; MAX_REQUEST_SIZE];
     let mut request_len = 0;
-    
-    // Try to receive data (with timeout)
-    let start = now;
     let timeout = 5000; // 5 second timeout
+    let start = now;
     
     loop {
         net.poll(crate::get_time_ms());
@@ -383,29 +403,17 @@ fn handle_connection(net: &mut crate::net::NetState, socket_id: crate::net::TcpS
         match net.tcp_recv_on(socket_id, &mut request_buf[request_len..], crate::get_time_ms()) {
             Ok(n) if n > 0 => {
                 request_len += n;
-                
-                // Check for end of headers
                 if request_len >= 4 {
-                    let has_end = request_buf[..request_len]
-                        .windows(4)
-                        .any(|w| w == b"\r\n\r\n");
-                    if has_end {
-                        break;
-                    }
+                    let has_end = request_buf[..request_len].windows(4).any(|w| w == b"\r\n\r\n");
+                    if has_end { break; }
                 }
             }
             Ok(_) => {}
             Err(_) => break,
         }
         
-        if crate::get_time_ms() - start > timeout {
-            break;
-        }
-        
-        // Brief delay
-        for _ in 0..1000 {
-            core::hint::spin_loop();
-        }
+        if crate::get_time_ms() - start > timeout { break; }
+        for _ in 0..1000 { core::hint::spin_loop(); }
     }
     
     if request_len == 0 {
@@ -413,40 +421,25 @@ fn handle_connection(net: &mut crate::net::NetState, socket_id: crate::net::TcpS
         return;
     }
     
-    // Build response
     let response = build_http_response(&request_buf[..request_len]);
-    
-    // Send response
     let mut sent = 0;
     let start = crate::get_time_ms();
     
     while sent < response.len() {
         net.poll(crate::get_time_ms());
-        
         match net.tcp_send_on(socket_id, &response[sent..], crate::get_time_ms()) {
             Ok(n) if n > 0 => sent += n,
             Ok(_) => {}
             Err(_) => break,
         }
-        
-        if crate::get_time_ms() - start > timeout {
-            break;
-        }
-        
-        for _ in 0..500 {
-            core::hint::spin_loop();
-        }
+        if crate::get_time_ms() - start > timeout { break; }
+        for _ in 0..500 { core::hint::spin_loop(); }
     }
     
-    // Close and release
     net.tcp_close_on(socket_id, crate::get_time_ms());
-    
-    // Poll a few times to process the close
     for _ in 0..10 {
         net.poll(crate::get_time_ms());
-        for _ in 0..1000 {
-            core::hint::spin_loop();
-        }
+        for _ in 0..1000 { core::hint::spin_loop(); }
     }
     
     net.tcp_release_server(socket_id);
@@ -454,7 +447,45 @@ fn handle_connection(net: &mut crate::net::NetState, socket_id: crate::net::TcpS
     klog_info("httpd", "Request completed");
 }
 
+/// Handle a D1 EMAC connection - receive request and send response
+fn handle_connection_d1(net: &mut crate::net::D1NetState, socket_id: crate::net::TcpSocketId, now: i64) {
+    // D1NetState uses tcp_send_on directly (no tcp_recv_on yet)
+    // For now, just send a simple response immediately
+    let timeout = 5000;
+    let start = now;
+    
+    // Brief delay to allow request data to arrive
+    for _ in 0..2000 { core::hint::spin_loop(); }
+    net.poll(crate::get_time_ms());
+    
+    // Build a simple response
+    let response = build_simple_response(200, "OK", "text/html", b"<h1>BAVY OS HTTP Server (D1 EMAC)</h1><p>Network: D1 EMAC</p>");
+    
+    let mut sent = 0;
+    while sent < response.len() {
+        net.poll(crate::get_time_ms());
+        match net.tcp_send_on(socket_id, &response[sent..], crate::get_time_ms()) {
+            Ok(n) if n > 0 => sent += n,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        if crate::get_time_ms() - start > timeout { break; }
+        for _ in 0..500 { core::hint::spin_loop(); }
+    }
+    
+    net.tcp_close_on(socket_id, crate::get_time_ms());
+    for _ in 0..10 {
+        net.poll(crate::get_time_ms());
+        for _ in 0..1000 { core::hint::spin_loop(); }
+    }
+    
+    net.tcp_release_server(socket_id);
+    HTTPD_REQUESTS_SERVED.fetch_add(1, Ordering::Relaxed);
+    klog_info("httpd", "Request completed (D1 EMAC)");
+}
+
 /// httpd service entry point (for scheduler)
 pub fn httpd_service() {
     tick();
 }
+

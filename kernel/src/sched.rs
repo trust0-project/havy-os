@@ -570,6 +570,46 @@ pub fn yield_from_interrupt() {
     }
 }
 
+/// Yield the current process and switch back to the scheduler.
+///
+/// This performs an actual context switch:
+/// 1. Saves the current process's registers to its Context
+/// 2. Restores the scheduler's registers from its Context
+/// 3. Returns to the scheduler's hart_loop to pick the next process
+///
+/// Called from:
+/// - Timer interrupt (preemptive scheduling)
+/// - Process voluntarily yielding (cooperative scheduling)
+///
+/// # Safety
+/// Only safe to call from the current hart's running process context.
+pub fn yield_current() {
+    let hart_id = crate::get_hart_id();
+    
+    // Get current process and CPU contexts
+    if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
+        if let Some(pid) = cpu.running_process() {
+            if let Some(process) = crate::process::PROCESS_TABLE.get(pid) {
+                let scheduler_ctx = cpu.scheduler_context_ptr();
+                let process_ctx = process.context_ptr();
+                
+                // Mark process as ready (can be scheduled again)
+                process.mark_ready();
+                
+                // Switch from process context back to scheduler context
+                // This saves all callee-saved registers to process_ctx
+                // and restores them from scheduler_ctx, then returns to
+                // wherever the scheduler was when it switched to us.
+                unsafe {
+                    crate::process::switch_context(process_ctx, scheduler_ctx);
+                }
+                
+                // We return here when the scheduler switches back to us
+            }
+        }
+    }
+}
+
 /// Check if a yield is pending for this hart
 pub fn yield_pending(hart_id: usize) -> bool {
     if hart_id < crate::MAX_HARTS {

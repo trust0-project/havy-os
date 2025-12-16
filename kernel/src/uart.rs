@@ -1,6 +1,35 @@
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const UART_BASE: usize = 0x1000_0000;
+
+// ============================================================================
+// UART SPINLOCK - Prevents interleaved output from multiple harts
+// ============================================================================
+
+const UART_UNLOCKED: u32 = 0;
+const UART_LOCKED: u32 = 1;
+
+/// Global lock for UART output serialization across harts.
+/// Uses a simple atomic spinlock to prevent interleaved log messages.
+static UART_LOCK: AtomicU32 = AtomicU32::new(UART_UNLOCKED);
+
+/// Acquire the UART lock (blocking).
+#[inline]
+fn uart_lock_acquire() {
+    loop {
+        if UART_LOCK.swap(UART_LOCKED, Ordering::Acquire) == UART_UNLOCKED {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Release the UART lock.
+#[inline]
+fn uart_lock_release() {
+    UART_LOCK.swap(UART_UNLOCKED, Ordering::Release);
+}
 
 // NS16550A UART register offsets
 const RBR: usize = 0x00; // Receiver Buffer Register (read)
@@ -115,15 +144,22 @@ impl Write for Console {
 }
 
 /// Write a raw string to the UART without using `core::fmt`.
+/// Protected by UART_LOCK to prevent interleaved output from multiple harts.
 pub fn write_str(s: &str) {
+    uart_lock_acquire();
     let mut console = Console::new();
     let _ = console.write_str(s);
+    uart_lock_release();
 }
 
 /// Write a raw string followed by `\n`.
+/// Protected by UART_LOCK.
 pub fn write_line(s: &str) {
-    write_str(s);
-    write_str("\n");
+    uart_lock_acquire();
+    let mut console = Console::new();
+    let _ = console.write_str(s);
+    let _ = console.write_str("\n");
+    uart_lock_release();
 }
 
 /// Write a raw byte slice to the UART.
@@ -213,9 +249,12 @@ pub fn read_char_nonblocking() -> Option<u8> {
 }
 
 /// Format and print to UART using core::fmt::Arguments
+/// Protected by UART_LOCK to prevent interleaved output from multiple harts.
 pub fn print_fmt(args: fmt::Arguments) {
+    uart_lock_acquire();
     let mut console = Console::new();
     let _ = core::fmt::write(&mut console, args);
+    uart_lock_release();
 }
 
 #[macro_export]

@@ -226,11 +226,12 @@ impl<T> Spinlock<T> {
     }
 }
 
-/// Get current hart ID.
+/// Get current hart ID from tp register.
+/// The hart ID is stored in tp by the _mp_hook function at boot.
 fn get_hart_id() -> usize {
     let id: usize;
     unsafe {
-        core::arch::asm!("csrr {}, mhartid", out(reg) id, options(nomem, nostack));
+        core::arch::asm!("mv {}, tp", out(reg) id, options(nomem, nostack));
     }
     id
 }

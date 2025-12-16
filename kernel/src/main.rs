@@ -1,14 +1,28 @@
 #![no_std]
 #![no_main]
 
-// Override riscv-rt's _max_hart_id to allow multiple harts to boot
-// This MUST be defined before riscv-rt's startup code runs
-// Set to 127 to support up to 128 harts (matching MAX_HARTS)
-core::arch::global_asm!(".global _max_hart_id", "_max_hart_id = 127");
+// Override riscv-rt's symbols to allow multiple harts to boot
+// These MUST be defined before riscv-rt's startup code runs
+//
+// _max_hart_id: Maximum hart ID allowed (127 = 128 harts: 0-127)
+// _hart_stack_size: Stack size per hart (64KB each for secondary hart stacks)
+//
+// riscv-rt calculates secondary hart stack pointers as:
+//   sp = _stack_start - hart_id * _hart_stack_size
+// Without _hart_stack_size, secondary harts share corrupted stacks!
+core::arch::global_asm!(
+    ".global _max_hart_id",
+    "_max_hart_id = 127",
+    ".global _hart_stack_size",
+    "_hart_stack_size = 0x10000"  // 64KB per hart
+);
 
 mod allocator;
+mod device;         // Device abstraction layer (Block, Network, Display traits)
+use device::NetworkDevice;  // Import trait so mac_address() is in scope
 mod dns;
 mod lock;
+mod platform;       // Platform abstraction (virt/d1)
 mod wasm;
 mod wasm_service;
 
@@ -20,11 +34,17 @@ mod net;
 mod scripting;
 mod tls;
 mod tls12;
-mod uart;
+mod uart;           // NS16550A UART for virt/emulator
+#[cfg(feature = "d1")]
+mod uart_dw;        // DesignWare UART for D1
+#[cfg(feature = "d1")]
+mod d1_mmc;         // D1 MMC/SD card driver
+mod d1_emac;        // D1 EMAC Ethernet driver (for D1 hardware and VM D1 emulation)
+mod d1_display;     // D1 Display Engine driver (for D1 hardware and VM D1 emulation)
 mod virtio_blk;
 mod virtio_net;
-mod virtio_gpu;
 mod virtio_input;
+mod d1_touch;        // D1 GT911 touchscreen driver
 mod boot_console;
 mod ui;
 
@@ -42,7 +62,10 @@ mod sched;
 mod shell;
 mod tcpd;
 mod httpd;
+mod netd;
 mod trap;
+mod sbi;
+mod dtb;
 mod waitqueue;
 
 pub use scheduler::SCHEDULER;
@@ -97,6 +120,9 @@ static HARTS_ONLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// CLINT MSIP register base address.
 const CLINT_MSIP_BASE: usize = 0x0200_0000;
+
+/// DTB address captured from a1 at boot (for OpenSBI compliance)
+static DTB_ADDR: AtomicUsize = AtomicUsize::new(0);
 
 /// CLINT hart count register (set by emulator, read by kernel)
 const CLINT_HART_COUNT: usize = 0x0200_0F00;
@@ -305,26 +331,38 @@ fn count_primes_in_range(start: u64, end: u64) -> u64 {
 /// # Safety
 /// This is called very early in boot, before Rust runtime is fully initialized.
 /// Only use assembly and no allocations.
+///
+/// # S-mode Note
+/// In S-mode (riscv-rt s-mode feature), we cannot read mhartid CSR.
+/// riscv-rt passes hart ID as function parameter. We store it in tp 
+/// (thread pointer) for later access via get_hart_id().
 #[export_name = "_mp_hook"]
 #[inline(never)]
-pub unsafe extern "C" fn mp_hook() -> bool {
-    let hart_id: usize;
+pub unsafe extern "C" fn mp_hook(hart_id: usize, dtb_addr: usize) -> bool {
+    // Capture DTB address from a1 (OpenSBI passes DTB pointer here)
+    // Must be done early before a1 is clobbered by Rust code
+    if hart_id == 0 && dtb_addr != 0 {
+        DTB_ADDR.store(dtb_addr, Ordering::Release);
+    }
+    
+    // Store hart_id in tp for later access via get_hart_id()
     asm!(
-        "csrr {}, mhartid",
-        out(reg) hart_id,
+        "mv tp, {0}",
+        in(reg) hart_id,
         options(nomem, nostack, preserves_flags)
     );
-
+    
     if hart_id == 0 {
         // Primary hart: continue to main()
         true
     } else {
-        // Secondary harts: park and wait for IPI
+        // Secondary hart: park and wait for IPI
         secondary_hart_park(hart_id);
-        // Never returns, but we need to satisfy the return type
-        // This is unreachable
     }
 }
+
+
+
 
 /// Secondary hart parking loop.
 ///
@@ -339,7 +377,8 @@ unsafe fn secondary_hart_park(hart_id: usize) -> ! {
         asm!("wfi", options(nomem, nostack));
 
         // Check if this was our wake-up call
-        if is_msip_pending(hart_id) {
+        let msip = is_msip_pending(hart_id);
+        if msip {
             // Clear the interrupt
             clear_msip(hart_id);
             break;
@@ -351,12 +390,15 @@ unsafe fn secondary_hart_park(hart_id: usize) -> ! {
     secondary_hart_entry(hart_id);
 }
 
-/// Get the current hart ID from mhartid CSR.
+/// Get the current hart ID from tp register.
+///
+/// The hart ID is stored in the tp (thread pointer) register during boot
+/// by the _mp_hook function. This works in both M-mode and S-mode.
 #[inline]
 pub fn get_hart_id() -> usize {
     let id: usize;
     unsafe {
-        asm!("csrr {}, mhartid", out(reg) id, options(nomem, nostack));
+        asm!("mv {}, tp", out(reg) id, options(nomem, nostack));
     }
     id
 }
@@ -419,9 +461,6 @@ fn secondary_hart_entry(hart_id: usize) -> ! {
 /// 2. Return (yielding to the scheduler)
 /// The scheduler will call them again on the next round.
 fn hart_loop(hart_id: usize) -> ! {
-    // Track when we last did work (to avoid busy spinning)
-    let mut last_work_time = get_time_ms();
-    
     loop {
         let mut did_work = false;
         
@@ -475,8 +514,6 @@ fn hart_loop(hart_id: usize) -> ! {
                 } else {
                     sched::SCHEDULER.exit(process.pid, 0);
                 }
-                
-                last_work_time = get_time_ms();
             }
         }
 
@@ -485,19 +522,19 @@ fn hart_loop(hart_id: usize) -> ! {
             run_hart0_tasks();
         }
 
-        // If we haven't done any work recently, sleep briefly to save power
-        // Check for IPI wakeup periodically
+        // If no work was done, sleep immediately via WFI
+        // This saves host CPU cycles - the hart will wake on:
+        // - Timer interrupt (every ~10ms via SBI)
+        // - IPI (when new work is queued for this hart)
+        // - External interrupt
         if !did_work {
-            let now = get_time_ms();
-            if now - last_work_time > 100 {
-                // Sleep until IPI wakes us
-                if is_my_msip_pending() {
-                    clear_my_msip();
-                    last_work_time = now;
-                } else {
-                    // Brief wait - don't use WFI as it may block indefinitely
-                    // Just yield the CPU briefly
-                    core::hint::spin_loop();
+            // Check for pending IPI first
+            if is_my_msip_pending() {
+                clear_my_msip();
+            } else {
+                // Sleep until interrupt - saves CPU power
+                unsafe {
+                    core::arch::asm!("wfi", options(nomem, nostack));
                 }
             }
         }
@@ -506,30 +543,21 @@ fn hart_loop(hart_id: usize) -> ! {
 
 /// Send an Inter-Processor Interrupt to the specified hart.
 ///
-/// This triggers a `MachineSoftwareInterrupt` on the target hart,
+/// This triggers a `SupervisorSoftwareInterrupt` on the target hart,
 /// waking it from WFI if sleeping.
 ///
 /// # Arguments
-/// * `hart_id` - The target hart ID (0-7)
+/// * `hart_id` - The target hart ID (0-127)
 ///
-/// # Safety
-/// This function writes to MMIO registers but is safe to call
-/// from any context.
+/// Uses SBI to send the IPI (required for S-mode operation).
 #[inline]
 pub fn send_ipi(hart_id: usize) {
     if hart_id >= MAX_HARTS {
         return; // Invalid hart ID, silently ignore
     }
 
-    let msip_addr = CLINT_MSIP_BASE + (hart_id * 4);
-
-    // Write 1 to MSIP[hart_id] to trigger software interrupt
-    unsafe {
-        core::ptr::write_volatile(msip_addr as *mut u32, 1);
-    }
-
-    // Memory fence to ensure write is visible
-    fence(Ordering::SeqCst);
+    // Use SBI to send IPI - hart_mask has bit N set for the target hart
+    sbi::send_ipi(1u64 << hart_id, 0);
 }
 
 /// Send IPI to all harts except the caller.
@@ -549,24 +577,21 @@ pub fn send_ipi_all_others() {
 /// Clear the software interrupt for a hart.
 ///
 /// Must be called by the target hart to acknowledge the IPI.
-/// Typically called in the software interrupt handler.
+/// Uses SBI for S-mode operation.
 #[inline]
-pub fn clear_msip(hart_id: usize) {
-    if hart_id >= MAX_HARTS {
-        return;
-    }
-    let msip_addr = CLINT_MSIP_BASE + (hart_id * 4);
-    unsafe {
-        core::ptr::write_volatile(msip_addr as *mut u32, 0);
-    }
+pub fn clear_msip(_hart_id: usize) {
+    sbi::clear_ipi();
 }
 
-/// Clear the software interrupt for the current hart.
+/// Clear the software interrupt for the current hart via SBI.
 #[inline]
 #[allow(dead_code)]
 pub fn clear_my_msip() {
-    clear_msip(get_hart_id());
+    sbi::clear_ipi();
 }
+
+
+
 
 /// Check if software interrupt is pending for a hart.
 #[inline]
@@ -576,7 +601,10 @@ pub fn is_msip_pending(hart_id: usize) -> bool {
         return false;
     }
     let msip_addr = CLINT_MSIP_BASE + (hart_id * 4);
-    unsafe { core::ptr::read_volatile(msip_addr as *const u32) & 1 != 0 }
+    unsafe {
+        let val = core::ptr::read_volatile(msip_addr as *const u32);
+        val & 1 != 0
+    }
 }
 
 /// Check if software interrupt is pending for current hart.
@@ -646,13 +674,19 @@ fn update_sysinfo() {
 /// Network state, protected by spinlock.
 static NET_STATE: Spinlock<Option<net::NetState>> = Spinlock::new(None);
 
+/// D1 EMAC network state (for D1 hardware and VM D1 emulation)
+static D1_NET_STATE: Spinlock<Option<net::D1NetState>> = Spinlock::new(None);
+
 /// Filesystem state, protected by RwLock for concurrent read access.
 /// Multiple readers (shell commands) can access simultaneously.
 /// Writers (daemon logging) get exclusive access.
 static FS_STATE: RwLock<Option<fs::FileSystem>> = RwLock::new(None);
 
 /// Block device, protected by RwLock for concurrent read access.
+#[cfg(not(feature = "d1"))]
 static BLK_DEV: RwLock<Option<virtio_blk::VirtioBlock>> = RwLock::new(None);
+#[cfg(feature = "d1")]
+static BLK_DEV: RwLock<Option<d1_mmc::D1Mmc>> = RwLock::new(None);
 
 /// State for continuous ping (like Linux ping command)
 struct PingState {
@@ -1320,6 +1354,8 @@ fn main() -> ! {
     // VERIFY WE'RE THE PRIMARY HART
     // ═══════════════════════════════════════════════════════════════════
 
+    // Use get_hart_id() which reads from tp (set by _mp_hook)
+    // This works in both M-mode and S-mode (unlike mhartid CSR which traps in S-mode)
     let hart_id = get_hart_id();
     if hart_id != 0 {
         // Should never happen if _mp_hook works correctly
@@ -1340,7 +1376,7 @@ fn main() -> ! {
     print_section("CPU & ARCHITECTURE");
     print_boot_info("Primary Hart", "0");
     print_boot_info("Architecture", "RISC-V 64-bit (RV64GC)");
-    print_boot_info("Mode", "Machine Mode (M-Mode)");
+    print_boot_info("Mode", "Supervisor Mode (S-Mode via SBI)");
     print_boot_info("Timer Source", "CLINT @ 0x02000000");
     print_boot_status("CPU initialized", true);
 
@@ -1356,14 +1392,23 @@ fn main() -> ! {
     uart::write_line(" KiB\x1b[0m");
     print_boot_status("Heap allocator ready", true);
 
+    // --- DEVICE TREE BLOB (DTB) ------------------------------------------────
+    // Initialize DTB parser with address from OpenSBI (passed in a1)
+    let dtb_addr = DTB_ADDR.load(Ordering::Acquire);
+    if dtb_addr != 0 {
+        print_section("DEVICE TREE");
+        dtb::init(dtb_addr);
+        print_boot_status("DTB parsed", true);
+    }
+
     // --- EARLY GPU INIT FOR BOOT CONSOLE ---------------------------------────
     // Try to initialize GPU early so we can show boot messages on screen
-    let gpu_available = if let Ok(()) = virtio_gpu::init() {
+    let gpu_available = if let Ok(()) = d1_display::init() {
         boot_console::init();
         boot_console::print_line("HAVY OS Boot Console");
         boot_console::print_line("====================");
         boot_console::print_line("");
-        boot_console::print_boot_msg("BOOT", "Early GPU initialized");
+        boot_console::print_boot_msg("BOOT", "D1 Display initialized");
         boot_console::print_boot_msg("HEAP", &format!("{} KiB available", total_heap / 1024));
         true
     } else {
@@ -1387,7 +1432,7 @@ fn main() -> ! {
     print_section("GPU SUBSYSTEM");
     
     if gpu_available {
-        print_boot_status("VirtIO GPU initialized", true);
+        print_boot_status("D1 Display initialized", true);
         
         // Initialize UI Manager (will be used after boot completes)
         unsafe {
@@ -1395,20 +1440,20 @@ fn main() -> ! {
         }
         print_boot_status("UI Manager initialized", true);
         
-        // Also initialize VirtIO Input for keyboard
-        match virtio_input::init() {
+        // Also initialize D1 Touch (GT911) for input
+        match d1_touch::init() {
             Ok(()) => {
-                print_boot_status("VirtIO Input initialized", true);
-                boot_console::print_boot_msg("INPUT", "Keyboard initialized");
+                print_boot_status("D1 Touch (GT911) initialized", true);
+                boot_console::print_boot_msg("INPUT", "Touchscreen initialized");
             }
-            Err(e) => print_boot_info("VirtIO Input", e),
+            Err(e) => print_boot_info("D1 Touch", e),
         }
         
         boot_console::print_line("");
         boot_console::print_boot_msg("BOOT", "Preparing system services...");
     } else {
-        print_boot_info("Probing", "VirtIO GPU devices...");
-        print_boot_status("VirtIO GPU not available", false);
+        print_boot_info("Probing", "D1 Display Engine...");
+        print_boot_status("D1 Display not available", false);
     }
 
 
@@ -1428,12 +1473,37 @@ fn main() -> ! {
     HARTS_ONLINE.fetch_add(1, Ordering::SeqCst);
     print_boot_info("Primary hart", "online");
 
-    // Wake secondary harts via IPI
-    for hart in 1..expected_harts {
-        uart::write_str("    Sending IPI to hart ");
-        uart::write_u64(hart as u64);
+    // Wake secondary harts via IPI with retry mechanism.
+    // This is critical for 9+ harts: secondary harts may not be in their WFI
+    // parking loop yet when we first send IPIs. We retry until all harts respond.
+    const MAX_IPI_RETRIES: usize = 50;
+    const RETRY_DELAY_LOOPS: usize = 100_000;
+    
+    let mut retry = 0;
+    while HARTS_ONLINE.load(Ordering::Acquire) < expected_harts && retry < MAX_IPI_RETRIES {
+        // Send IPI to all secondary harts that aren't online yet
+        for hart in 1..expected_harts {
+            send_ipi(hart);
+        }
+        
+        if retry == 0 {
+            uart::write_str("    Sending IPIs to ");
+            uart::write_u64((expected_harts - 1) as u64);
+            uart::write_line(" secondary harts");
+        }
+        
+        // Wait briefly between retries to let harts process IPIs
+        for _ in 0..RETRY_DELAY_LOOPS {
+            core::hint::spin_loop();
+        }
+        
+        retry += 1;
+    }
+    
+    if retry > 1 {
+        uart::write_str("    IPI retries: ");
+        uart::write_u64(retry as u64);
         uart::write_line("");
-        send_ipi(hart);
     }
 
     // Wait for all harts to come online (with timeout)
@@ -1804,14 +1874,32 @@ fn find_common_prefix(strings: &[alloc::string::String]) -> alloc::string::Strin
 
 fn init_storage() {
     print_section("STORAGE SUBSYSTEM");
-    if let Some(blk) = virtio_blk::VirtioBlock::probe() {
-        uart::write_str("    \x1b[0;90m+-\x1b[0m Block Device: \x1b[1;97m");
-        uart::write_u64(blk.capacity() * 512 / 1024 / 1024);
-        uart::write_line(" MiB\x1b[0m");
-        *BLK_DEV.write() = Some(blk);
-        print_boot_status("VirtIO-Block driver loaded", true);
-    } else {
-        print_boot_status("No storage device found", false);
+    
+    #[cfg(not(feature = "d1"))]
+    {
+        if let Some(blk) = virtio_blk::VirtioBlock::probe() {
+            uart::write_str("    \x1b[0;90m+-\x1b[0m Block Device: \x1b[1;97m");
+            uart::write_u64(blk.capacity() * 512 / 1024 / 1024);
+            uart::write_line(" MiB\x1b[0m");
+            *BLK_DEV.write() = Some(blk);
+            print_boot_status("VirtIO-Block driver loaded", true);
+        } else {
+            print_boot_status("No storage device found", false);
+        }
+    }
+    
+    #[cfg(feature = "d1")]
+    {
+        let mut blk = d1_mmc::D1Mmc::new();
+        if blk.init().is_ok() {
+            uart::write_str("    \x1b[0;90m+-\x1b[0m Block Device: \x1b[1;97m");
+            uart::write_u64(blk.capacity() * 512 / 1024 / 1024);
+            uart::write_line(" MiB\x1b[0m");
+            *BLK_DEV.write() = Some(blk);
+            print_boot_status("D1 MMC driver loaded", true);
+        } else {
+            print_boot_status("No storage device found", false);
+        }
     }
 
     let mut blk_guard = BLK_DEV.write();
@@ -1823,9 +1911,27 @@ fn init_storage() {
     }
 }
 
+#[cfg(not(feature = "d1"))]
 fn init_fs() {
     if let Some(blk) = virtio_blk::VirtioBlock::probe() {
         uart::write_line("    \x1b[1;32m[OK]\x1b[0m VirtIO Block found");
+        *BLK_DEV.write() = Some(blk);
+
+        let mut blk_guard = BLK_DEV.write();
+        if let Some(ref mut dev) = *blk_guard {
+            if let Some(fs) = fs::FileSystem::init(dev) {
+                *FS_STATE.write() = Some(fs);
+                uart::write_line("    \x1b[1;32m[OK]\x1b[0m FileSystem Mounted");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "d1")]
+fn init_fs() {
+    let mut blk = d1_mmc::D1Mmc::new();
+    if blk.init().is_ok() {
+        uart::write_line("    \x1b[1;32m[OK]\x1b[0m D1 MMC found");
         *BLK_DEV.write() = Some(blk);
 
         let mut blk_guard = BLK_DEV.write();
@@ -1875,8 +1981,43 @@ fn init_network() {
             }
         }
         None => {
-            uart::write_line("    \x1b[1;33m[!]\x1b[0m No VirtIO network device detected");
-            uart::write_line("    \x1b[0;90m    +- Network features will be unavailable\x1b[0m");
+            // Fallback: Try D1 EMAC for real hardware or D1-emulated VM
+            uart::write_line("    \x1b[0;90m+-\x1b[0m Probing for D1 EMAC...");
+            if d1_emac::probe() {
+                uart::write_line("    \x1b[0;90m+-\x1b[0m D1 EMAC PHY detected at: \x1b[1;97m0x0450_0000\x1b[0m");
+                
+                // Create D1 EMAC device
+                match d1_emac::create_device() {
+                    Ok(device) => {
+                        uart::write_str("    \x1b[0;90m+-\x1b[0m D1 EMAC MAC: \x1b[1;97m");
+                        let mac = device.mac_address();
+                        for (i, b) in mac.iter().enumerate() {
+                            if i > 0 { uart::write_str(":"); }
+                            uart::write_hex(*b as u64);
+                        }
+                        uart::write_line("\x1b[0m");
+                        
+                        // Create D1NetState
+                        match net::D1NetState::new(device) {
+                            Ok(state) => {
+                                let mut d1_guard = D1_NET_STATE.lock();
+                                *d1_guard = Some(state);
+                                print_boot_status("D1 EMAC network initialized (smoltcp)", true);
+                            }
+                            Err(e) => {
+                                uart::write_str("    \x1b[1;31m[!]\x1b[0m D1 network init failed: ");
+                                uart::write_line(e);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        uart::write_line("    \x1b[1;31m[!]\x1b[0m D1 EMAC device creation failed");
+                    }
+                }
+            } else {
+                uart::write_line("    \x1b[0;90m    +- No D1 EMAC detected\x1b[0m");
+                uart::write_line("    \x1b[0;90m    +- Network features will be unavailable\x1b[0m");
+            }
         }
     }
 }

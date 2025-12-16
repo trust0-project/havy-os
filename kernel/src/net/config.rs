@@ -3,18 +3,29 @@
 use smoltcp::wire::Ipv4Address;
 
 /// Network configuration
-/// Default IP address (used as fallback if no IP is assigned by relay)
-pub const DEFAULT_IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
+/// Default IP address: 0.0.0.0 (unassigned, will be set by netd from relay)
+pub const DEFAULT_IP_ADDR: Ipv4Address = Ipv4Address::new(0, 0, 0, 0);
 pub const GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
 pub const PREFIX_LEN: u8 = 24;
 
 /// Dynamic IP address assigned by the relay/network controller
-/// This is set during network initialization
-pub static mut MY_IP_ADDR: Ipv4Address = Ipv4Address::new(10, 0, 2, 15);
+/// This is set by netd when the relay assigns an IP
+pub static mut MY_IP_ADDR: Ipv4Address = Ipv4Address::new(0, 0, 0, 0);
 
 /// Get the current IP address (safe wrapper)
 pub fn get_my_ip() -> Ipv4Address {
     unsafe { MY_IP_ADDR }
+}
+
+/// Set the IP address (called by netd when relay assigns IP)
+pub fn set_my_ip(ip: Ipv4Address) {
+    unsafe { MY_IP_ADDR = ip; }
+}
+
+/// Check if an IP has been assigned (not 0.0.0.0)
+pub fn is_ip_assigned() -> bool {
+    let ip = unsafe { MY_IP_ADDR };
+    ip.octets() != [0, 0, 0, 0]
 }
 
 /// DNS server (Google Public DNS)
@@ -30,3 +41,4 @@ pub const ICMP_IDENT: u16 = 0x1234;
 
 /// Local port for DNS queries
 pub const DNS_LOCAL_PORT: u16 = 10053;
+

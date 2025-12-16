@@ -1,7 +1,16 @@
-//! VirtIO GPU Driver for Guest Kernel
+//! Unified Display Driver for HAVY OS
 //!
-//! This driver interfaces with the VirtIO GPU device (Device ID 16) in the host
-//! to provide framebuffer rendering capabilities. Uses embedded-graphics for drawing.
+//! This driver provides framebuffer rendering for both:
+//! - D1 SoC Display Engine (DE2 + TCON + MIPI DSI)
+//! - Emulator mode (direct framebuffer access)
+//!
+//! # Display Pipeline (D1 Hardware)
+//! ```text
+//! Framebuffer → DE2 Mixer → TCON LCD → MIPI DSI → Panel
+//! ```
+//!
+//! # Display Resolution
+//! 1024x768 pixels, XRGB8888 format (32-bit BGRA)
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::vec::Vec;
@@ -14,253 +23,133 @@ use embedded_graphics::{
     Pixel,
 };
 
-/// VirtIO GPU MMIO base address (assigned by bus enumeration)
-const VIRTIO_GPU_BASE: usize = 0x1000_5000; // Placeholder - will be discovered
+// =============================================================================
+// Constants
+// =============================================================================
 
-/// VirtIO GPU Device ID
-const VIRTIO_GPU_DEVICE_ID: u32 = 16;
+/// Display dimensions (1024x768)
+pub const DISPLAY_WIDTH: u32 = 1024;
+pub const DISPLAY_HEIGHT: u32 = 768;
+const FRAMEBUFFER_SIZE: usize = (DISPLAY_WIDTH * DISPLAY_HEIGHT * 4) as usize;
 
 /// Fixed framebuffer physical address (FRONT BUFFER)
-/// This is what the host reads for display
+/// This is what the emulator reads for display
 pub const FRAMEBUFFER_ADDR: usize = 0x8100_0000;
 
 /// Back buffer address for double-buffering
 /// All rendering happens here, then copied to front buffer on flush
-pub const BACK_BUFFER_ADDR: usize = 0x8120_0000;
+/// NOTE: Front buffer (1024*768*4 = 3.1MB) ends at 0x8130_0000
+///       So back buffer must be at or after 0x8130_0000
+pub const BACK_BUFFER_ADDR: usize = 0x8140_0000;
 
-/// MMIO register offsets
-const MAGIC_VALUE_OFFSET: usize = 0x000;
-const VERSION_OFFSET: usize = 0x004;
-const DEVICE_ID_OFFSET: usize = 0x008;
-const VENDOR_ID_OFFSET: usize = 0x00c;
-const DEVICE_FEATURES_OFFSET: usize = 0x010;
-const DEVICE_FEATURES_SEL_OFFSET: usize = 0x014;
-const DRIVER_FEATURES_OFFSET: usize = 0x020;
-const DRIVER_FEATURES_SEL_OFFSET: usize = 0x024;
-const QUEUE_SEL_OFFSET: usize = 0x030;
-const QUEUE_NUM_MAX_OFFSET: usize = 0x034;
-const QUEUE_NUM_OFFSET: usize = 0x038;
-const QUEUE_READY_OFFSET: usize = 0x044;
-const QUEUE_NOTIFY_OFFSET: usize = 0x050;
-const INTERRUPT_STATUS_OFFSET: usize = 0x060;
-const INTERRUPT_ACK_OFFSET: usize = 0x064;
-const STATUS_OFFSET: usize = 0x070;
-const QUEUE_DESC_LOW_OFFSET: usize = 0x080;
-const QUEUE_DESC_HIGH_OFFSET: usize = 0x084;
-const QUEUE_DRIVER_LOW_OFFSET: usize = 0x090;
-const QUEUE_DRIVER_HIGH_OFFSET: usize = 0x094;
-const QUEUE_DEVICE_LOW_OFFSET: usize = 0x0a0;
-const QUEUE_DEVICE_HIGH_OFFSET: usize = 0x0a4;
+/// Frame version address - VM reads this u32 to detect new frames
+/// Located just before framebuffer for easy access
+pub const FRAME_VERSION_ADDR: usize = 0x80FF_FFFC;
 
-// Config space
-const CONFIG_EVENTS_READ: usize = 0x100;
-const CONFIG_NUM_SCANOUTS: usize = 0x108;
+/// Global flag to track if display was initialized
+static D1_DISPLAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-// VirtIO GPU Command Types
-const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
-const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
-const VIRTIO_GPU_CMD_RESOURCE_UNREF: u32 = 0x0102;
-const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
-const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
-const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
-const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+// =============================================================================
+// Dirty Rectangle Tracking
+// =============================================================================
 
-// VirtIO GPU Formats
-const VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM: u32 = 67;
+/// Dirty rectangle bounds for partial flush optimization
+/// Only the dirty region is copied from back buffer to front buffer
+static mut DIRTY_MIN_X: u32 = DISPLAY_WIDTH;
+static mut DIRTY_MIN_Y: u32 = DISPLAY_HEIGHT;
+static mut DIRTY_MAX_X: u32 = 0;
+static mut DIRTY_MAX_Y: u32 = 0;
+static mut FRAME_DIRTY: bool = false;
 
-// Device status flags
-const STATUS_ACKNOWLEDGE: u32 = 1;
-const STATUS_DRIVER: u32 = 2;
-const STATUS_DRIVER_OK: u32 = 4;
-const STATUS_FEATURES_OK: u32 = 8;
+/// Frame version counter - increments each time flush() actually copies data
+/// Browser can compare this to skip fetching unchanged frames
+static mut FRAME_VERSION: u32 = 0;
 
-/// Control header for GPU commands (24 bytes)
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VirtioGpuCtrlHdr {
-    cmd_type: u32,
-    flags: u32,
-    fence_id: u64,
-    ctx_id: u32,
-    padding: u32,
+/// Mark a rectangular region as dirty
+#[inline(always)]
+pub fn mark_dirty(x: u32, y: u32, width: u32, height: u32) {
+    unsafe {
+        DIRTY_MIN_X = DIRTY_MIN_X.min(x);
+        DIRTY_MIN_Y = DIRTY_MIN_Y.min(y);
+        DIRTY_MAX_X = DIRTY_MAX_X.max((x + width).min(DISPLAY_WIDTH));
+        DIRTY_MAX_Y = DIRTY_MAX_Y.max((y + height).min(DISPLAY_HEIGHT));
+        FRAME_DIRTY = true;
+    }
 }
 
-/// Resource create 2D command
-#[repr(C)]
-struct VirtioGpuResourceCreate2d {
-    hdr: VirtioGpuCtrlHdr,
-    resource_id: u32,
-    format: u32,
-    width: u32,
-    height: u32,
+/// Mark entire screen as dirty (for clear operations or external draws)
+#[inline(always)]
+pub fn mark_all_dirty() {
+    unsafe {
+        DIRTY_MIN_X = 0;
+        DIRTY_MIN_Y = 0;
+        DIRTY_MAX_X = DISPLAY_WIDTH;
+        DIRTY_MAX_Y = DISPLAY_HEIGHT;
+        FRAME_DIRTY = true;
+    }
 }
 
-/// Memory entry for attach backing
-#[repr(C)]
-struct VirtioGpuMemEntry {
-    addr: u64,
-    length: u32,
-    padding: u32,
+/// Reset dirty tracking after flush
+#[inline(always)]
+fn reset_dirty() {
+    unsafe {
+        DIRTY_MIN_X = DISPLAY_WIDTH;
+        DIRTY_MIN_Y = DISPLAY_HEIGHT;
+        DIRTY_MAX_X = 0;
+        DIRTY_MAX_Y = 0;
+        FRAME_DIRTY = false;
+    }
 }
 
-/// Attach backing command
-#[repr(C)]
-struct VirtioGpuResourceAttachBacking {
-    hdr: VirtioGpuCtrlHdr,
-    resource_id: u32,
-    nr_entries: u32,
-    // followed by VirtioGpuMemEntry array
+/// Check if frame has any dirty pixels
+#[inline(always)]
+pub fn is_frame_dirty() -> bool {
+    unsafe { FRAME_DIRTY }
 }
 
-/// Set scanout command
-#[repr(C)]
-struct VirtioGpuSetScanout {
-    hdr: VirtioGpuCtrlHdr,
-    r_x: u32,
-    r_y: u32,
-    r_width: u32,
-    r_height: u32,
-    scanout_id: u32,
-    resource_id: u32,
+/// Get the current frame version (increments each flush that copies data)
+/// Browser uses this to skip fetching unchanged frames
+#[inline(always)]
+pub fn get_frame_version() -> u32 {
+    unsafe { FRAME_VERSION }
 }
 
-/// Transfer to host 2D command
-#[repr(C)]
-struct VirtioGpuTransferToHost2d {
-    hdr: VirtioGpuCtrlHdr,
-    r_x: u32,
-    r_y: u32,
-    r_width: u32,
-    r_height: u32,
-    offset: u64,
-    resource_id: u32,
-    padding: u32,
-}
+// =============================================================================
+// GpuDriver - Main rendering interface
+// =============================================================================
 
-/// Resource flush command
-#[repr(C)]
-struct VirtioGpuResourceFlush {
-    hdr: VirtioGpuCtrlHdr,
-    r_x: u32,
-    r_y: u32,
-    r_width: u32,
-    r_height: u32,
-    resource_id: u32,
-    padding: u32,
-}
-
-/// VirtIO GPU driver state
+/// GPU Driver for framebuffer rendering
+/// Provides pixel operations, drawing primitives, and embedded-graphics support
 pub struct GpuDriver {
-    base: usize,
     width: u32,
     height: u32,
-    resource_id: u32,
     initialized: AtomicBool,
 }
 
 impl GpuDriver {
-    /// Probe for VirtIO GPU device at potential base addresses
-    pub fn probe() -> Option<Self> {
-        use crate::uart;
-        
-        // Try all VirtIO device addresses (0x1000_1000 + n*0x1000 for n=0..7)
-        // The GPU device is added dynamically, so scan all slots
-        const VIRTIO_BASE: usize = 0x1000_1000;
-        const VIRTIO_STRIDE: usize = 0x1000;
-        
-        uart::write_line("[GPU] Probing VirtIO slots for GPU device...");
-        
-        for i in 0..8 {
-            let base = VIRTIO_BASE + i * VIRTIO_STRIDE;
-            unsafe {
-                let magic = core::ptr::read_volatile((base + MAGIC_VALUE_OFFSET) as *const u32);
-                let device_id = core::ptr::read_volatile((base + DEVICE_ID_OFFSET) as *const u32);
-                
-                uart::write_str("[GPU] Slot ");
-                uart::write_u64(i as u64);
-                uart::write_str(": magic=0x");
-                uart::write_hex(magic as u64);
-                uart::write_str(" device_id=");
-                uart::write_u64(device_id as u64);
-                uart::write_line("");
-                
-                if magic == 0x7472_6976 && device_id == VIRTIO_GPU_DEVICE_ID {
-                    uart::write_str("[GPU] Found GPU at slot ");
-                    uart::write_u64(i as u64);
-                    uart::write_line("");
-                    return Some(Self {
-                        base,
-                        width: 0,
-                        height: 0,
-                        resource_id: 1,
-                        initialized: AtomicBool::new(false),
-                    });
-                }
-            }
+    /// Create a new GPU driver
+    pub const fn new() -> Self {
+        Self {
+            width: DISPLAY_WIDTH,
+            height: DISPLAY_HEIGHT,
+            initialized: AtomicBool::new(false),
         }
-        uart::write_line("[GPU] No GPU device found in any slot");
-        None
     }
 
-    /// Initialize the GPU device
+    /// Initialize the GPU driver
     pub fn init(&mut self) -> Result<(), &'static str> {
+        // Clear both framebuffers to black
+        let fb_size = (self.width * self.height) as usize;
         unsafe {
-            // Reset device
-            core::ptr::write_volatile((self.base + STATUS_OFFSET) as *mut u32, 0);
-            
-            // Acknowledge
-            core::ptr::write_volatile(
-                (self.base + STATUS_OFFSET) as *mut u32,
-                STATUS_ACKNOWLEDGE
-            );
-            
-            // Driver
-            core::ptr::write_volatile(
-                (self.base + STATUS_OFFSET) as *mut u32,
-                STATUS_ACKNOWLEDGE | STATUS_DRIVER
-            );
-            
-            // Feature negotiation (no special features needed)
-            core::ptr::write_volatile((self.base + DEVICE_FEATURES_SEL_OFFSET) as *mut u32, 0);
-            let _features = core::ptr::read_volatile((self.base + DEVICE_FEATURES_OFFSET) as *const u32);
-            core::ptr::write_volatile((self.base + DRIVER_FEATURES_SEL_OFFSET) as *mut u32, 0);
-            core::ptr::write_volatile((self.base + DRIVER_FEATURES_OFFSET) as *mut u32, 0);
-            
-            // Features OK
-            core::ptr::write_volatile(
-                (self.base + STATUS_OFFSET) as *mut u32,
-                STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK
-            );
-            
-            // Verify features OK
-            let status = core::ptr::read_volatile((self.base + STATUS_OFFSET) as *const u32);
-            if (status & STATUS_FEATURES_OK) == 0 {
-                return Err("Features not accepted");
-            }
-            
-            // Get display info to learn dimensions
-            // For now, use default dimensions
-            self.width = 800;
-            self.height = 600;
-            
-            // Clear both framebuffers to black (front and back for double-buffering)
-            let fb_size = (self.width * self.height) as usize;
             let front_ptr = FRAMEBUFFER_ADDR as *mut u32;
             let back_ptr = BACK_BUFFER_ADDR as *mut u32;
             for i in 0..fb_size {
                 core::ptr::write_volatile(front_ptr.add(i), 0xFF000000); // Opaque black
                 core::ptr::write_volatile(back_ptr.add(i), 0xFF000000);
             }
-            
-            // Driver OK
-            core::ptr::write_volatile(
-                (self.base + STATUS_OFFSET) as *mut u32,
-                STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK
-            );
-            
-            self.initialized.store(true, Ordering::Release);
         }
-        
+
+        self.initialized.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -283,12 +172,13 @@ impl GpuDriver {
     pub fn set_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) {
         if x < self.width && y < self.height {
             let idx = (y * self.width + x) as usize;
-            // RGBA format: 0xAABBGGRR (little-endian) - but Canvas expects RGBA so reorder
+            // BGRA format: 0xAABBGGRR (little-endian)
             let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
             unsafe {
                 let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
                 core::ptr::write_volatile(fb_ptr.add(idx), pixel);
             }
+            mark_dirty(x, y, 1, 1);
         }
     }
 
@@ -310,6 +200,7 @@ impl GpuDriver {
                 core::ptr::write_volatile(last_ptr, pixel);
             }
         }
+        mark_all_dirty();
     }
 
     /// Fast horizontal line fill (much faster than pixel-by-pixel for rectangles)
@@ -341,6 +232,7 @@ impl GpuDriver {
                 }
             }
         }
+        mark_dirty(x, y, w as u32, 1);
     }
 
     /// Fast filled rectangle using horizontal line fills
@@ -379,6 +271,7 @@ impl GpuDriver {
             let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
             core::ptr::write_volatile(fb_ptr.add(idx), pixel);
         }
+        mark_dirty(x, y, 1, 1);
     }
 
     /// Read a rectangle of pixels into a buffer (for cursor backup)
@@ -406,8 +299,48 @@ impl GpuDriver {
         count
     }
 
-    /// Write a rectangle of pixels from a buffer (for cursor restore)
-    /// Skips pixels with value 0 (transparent/skip marker)
+    /// Fast read a rectangle of pixels into a buffer - copies entire rows at once
+    /// This is much faster than read_rect for large regions
+    #[inline]
+    pub fn read_rect_fast(&self, x: u32, y: u32, w: usize, h: usize, buf: &mut [u32]) -> usize {
+        if w == 0 || h == 0 || buf.len() < w * h {
+            return 0;
+        }
+        let mut count = 0;
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *const u32;
+            let screen_width = self.width as usize;
+            
+            for row in 0..h {
+                let cy = y + row as u32;
+                if cy >= self.height { break; }
+                
+                // Calculate actual width to copy (clip to screen edge)
+                let actual_w = if x + w as u32 > self.width {
+                    (self.width - x) as usize
+                } else {
+                    w
+                };
+                
+                if actual_w > 0 && x < self.width {
+                    let fb_offset = (cy as usize * screen_width) + x as usize;
+                    let buf_offset = row * w;
+                    
+                    // Copy entire row at once - FAST
+                    core::ptr::copy_nonoverlapping(
+                        fb_ptr.add(fb_offset),
+                        buf.as_mut_ptr().add(buf_offset),
+                        actual_w
+                    );
+                    count += actual_w;
+                }
+            }
+        }
+        count
+    }
+
+    /// Write a rectangle of pixels to the back buffer (for cursor restore)
+    /// Skips pixels with mask value 0
     #[inline]
     pub fn write_rect(&mut self, x: u32, y: u32, w: usize, h: usize, buf: &[u32], mask: &[u8]) {
         unsafe {
@@ -427,6 +360,46 @@ impl GpuDriver {
                 }
             }
         }
+        // Mark the entire rect as dirty (mask means we touched this area)
+        mark_dirty(x, y, w as u32, h as u32);
+    }
+
+    /// Fast blit a rectangle to the back buffer - copies entire rows at once
+    /// This is much faster than write_rect for large regions (no mask checking)
+    #[inline]
+    pub fn blit_rect(&mut self, x: u32, y: u32, w: usize, h: usize, buf: &[u32]) {
+        if w == 0 || h == 0 || buf.len() < w * h {
+            return;
+        }
+        unsafe {
+            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
+            let screen_width = self.width as usize;
+            
+            for row in 0..h {
+                let cy = y + row as u32;
+                if cy >= self.height { break; }
+                
+                // Calculate actual width to copy (clip to screen edge)
+                let actual_w = if x + w as u32 > self.width {
+                    (self.width - x) as usize
+                } else {
+                    w
+                };
+                
+                if actual_w > 0 && x < self.width {
+                    let fb_offset = (cy as usize * screen_width) + x as usize;
+                    let buf_offset = row * w;
+                    
+                    // Copy entire row at once - FAST
+                    core::ptr::copy_nonoverlapping(
+                        buf.as_ptr().add(buf_offset),
+                        fb_ptr.add(fb_offset),
+                        actual_w
+                    );
+                }
+            }
+        }
+        mark_dirty(x, y, w as u32, h as u32);
     }
 
     /// Draw cursor bitmap directly to framebuffer (batched write)
@@ -451,27 +424,20 @@ impl GpuDriver {
                 }
             }
         }
+        // Mark cursor area as dirty
+        let clip_x = x.max(0) as u32;
+        let clip_y = y.max(0) as u32;
+        mark_dirty(clip_x, clip_y, w as u32, h as u32);
     }
 
-    /// Copy back buffer to front buffer and flush to display
-    /// This ensures tear-free rendering by updating front buffer atomically
+    /// Copy dirty region of back buffer to front buffer and flush to display
+    /// Uses the optimized dirty rect tracking for minimal memory transfers
     pub fn flush(&self) {
         if !self.is_initialized() {
             return;
         }
-        
-        unsafe {
-            // Copy back buffer to front buffer using fast bulk copy
-            let fb_size_bytes = (self.width * self.height * 4) as usize;
-            let src_ptr = BACK_BUFFER_ADDR as *const u8;
-            let dst_ptr = FRAMEBUFFER_ADDR as *mut u8;
-            
-            // Use fast memcpy-style copy (non-overlapping)
-            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, fb_size_bytes);
-            
-            // Notify queue 0 (control queue) for host to read
-            core::ptr::write_volatile((self.base + QUEUE_NOTIFY_OFFSET) as *mut u32, 0);
-        }
+        // Delegate to the module-level optimized flush
+        crate::d1_display::flush();
     }
 
     /// Get raw framebuffer pointer (for direct memory access)
@@ -488,7 +454,10 @@ impl GpuDriver {
     }
 }
 
-// Implement embedded-graphics DrawTarget trait
+// =============================================================================
+// embedded-graphics DrawTarget implementation
+// =============================================================================
+
 impl OriginDimensions for GpuDriver {
     fn size(&self) -> Size {
         Size::new(self.width, self.height)
@@ -516,25 +485,33 @@ impl DrawTarget for GpuDriver {
     }
 
     fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
-        self.clear(color.r(), color.g(), color.b());
+        GpuDriver::clear(self, color.r(), color.g(), color.b());
         Ok(())
     }
 }
+
+// =============================================================================
+// Global GPU driver instance and module-level functions
+// =============================================================================
 
 /// Global GPU driver instance
 static mut GPU_DRIVER: Option<GpuDriver> = None;
 
 /// Initialize the global GPU driver
+/// This should be called early in boot to enable framebuffer rendering
 pub fn init() -> Result<(), &'static str> {
-    if let Some(mut gpu) = GpuDriver::probe() {
-        gpu.init()?;
-        unsafe {
-            GPU_DRIVER = Some(gpu);
-        }
-        Ok(())
-    } else {
-        Err("VirtIO GPU device not found")
+    let mut gpu = GpuDriver::new();
+    gpu.init()?;
+    unsafe {
+        GPU_DRIVER = Some(gpu);
     }
+    D1_DISPLAY_AVAILABLE.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Check if display is available
+pub fn is_available() -> bool {
+    D1_DISPLAY_AVAILABLE.load(Ordering::Relaxed)
 }
 
 /// Get access to the global GPU driver
@@ -547,43 +524,70 @@ where
     }
 }
 
-/// Check if GPU is available
-pub fn is_available() -> bool {
-    unsafe { GPU_DRIVER.is_some() }
-}
-
 /// Flush the display (transfer and present)
+/// Only copies the dirty rectangle region from back buffer to front buffer.
+/// Skips copy entirely if nothing has changed since last flush.
 pub fn flush() {
     unsafe {
-        if let Some(ref gpu) = GPU_DRIVER {
-            gpu.flush();
+        // Skip if nothing changed
+        if !FRAME_DIRTY {
+            return;
         }
+        
+        // Get dirty bounds
+        let min_x = DIRTY_MIN_X;
+        let min_y = DIRTY_MIN_Y;
+        let max_x = DIRTY_MAX_X;
+        let max_y = DIRTY_MAX_Y;
+        
+        // Check for valid dirty rect
+        if min_x >= max_x || min_y >= max_y {
+            reset_dirty();
+            return;
+        }
+        
+        // Copy only the dirty rectangle row by row
+        let dirty_width = (max_x - min_x) as usize;
+        
+        let src_base = BACK_BUFFER_ADDR as *const u8;
+        let dst_base = FRAMEBUFFER_ADDR as *mut u8;
+        
+        for y in min_y..max_y {
+            let row_offset = (y * DISPLAY_WIDTH + min_x) as usize * 4;
+            let src_row = src_base.add(row_offset);
+            let dst_row = dst_base.add(row_offset);
+            core::ptr::copy_nonoverlapping(src_row, dst_row, dirty_width * 4);
+        }
+        
+        // Increment frame version so browser knows to fetch new frame
+        FRAME_VERSION = FRAME_VERSION.wrapping_add(1);
+        
+        // Write version to memory so VM can read it
+        let version_ptr = FRAME_VERSION_ADDR as *mut u32;
+        core::ptr::write_volatile(version_ptr, FRAME_VERSION);
+        
+        // Reset dirty tracking for next frame
+        reset_dirty();
     }
 }
 
 /// Clear the display to black and flush
 /// Used when gpuid service is stopped to clear the framebuffer
-/// NOTE: This writes directly to the FRONT buffer (FRAMEBUFFER_ADDR) for immediate effect,
-/// since get_gpu_frame() in the VM reads from the front buffer, not the back buffer.
+/// NOTE: This writes directly to both buffers for immediate effect
 pub fn clear_display() {
-    // Clear front buffer directly (bypassing double-buffering)
-    // This is necessary because:
-    // 1. The VM's get_gpu_frame() reads from FRAMEBUFFER_ADDR (front buffer)
-    // 2. clear() writes to BACK_BUFFER_ADDR, which wouldn't be visible immediately
-    const FB_WIDTH: u32 = 800;
-    const FB_HEIGHT: u32 = 600;
+    const FB_WIDTH: u32 = DISPLAY_WIDTH;
+    const FB_HEIGHT: u32 = DISPLAY_HEIGHT;
     let fb_size = (FB_WIDTH * FB_HEIGHT) as usize;
-    let black_pixel: u32 = 0xFF000000; // Opaque black (RGBA)
-    
+    let black_pixel: u32 = 0xFF000000; // Opaque black (BGRA)
+
     unsafe {
+        // Clear front buffer
         let front_ptr = FRAMEBUFFER_ADDR as *mut u32;
         for i in 0..fb_size {
             core::ptr::write_volatile(front_ptr.add(i), black_pixel);
         }
-    }
-    
-    // Also clear back buffer so next render starts clean
-    unsafe {
+
+        // Clear back buffer
         let back_ptr = BACK_BUFFER_ADDR as *mut u32;
         for i in 0..fb_size {
             core::ptr::write_volatile(back_ptr.add(i), black_pixel);
