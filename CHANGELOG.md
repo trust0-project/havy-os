@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.42](https://github.com/trust0-project/havy-os/compare/v0.1.41...v0.1.42) (2025-12-16)
+
+
+### Bug Fixes
+
+* improve build sh ([8041188](https://github.com/trust0-project/havy-os/commit/804118887987df2e314f23876cb28e8ba99f88ab))
+
 ## [0.1.41](https://github.com/trust0-project/havy-os/compare/v0.1.40...v0.1.41) (2025-12-16)
 
 
