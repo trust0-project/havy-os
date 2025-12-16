@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.40](https://github.com/trust0-project/havy-os/compare/v0.1.39...v0.1.40) (2025-12-16)
+
+
+### Bug Fixes
+
+* install missing libraries ([70796b1](https://github.com/trust0-project/havy-os/commit/70796b1f1a1c343a3257dc7c457b19a231fc05a0))
+
 ## [0.1.39](https://github.com/trust0-project/havy-os/compare/v0.1.38...v0.1.39) (2025-12-16)
 
 
