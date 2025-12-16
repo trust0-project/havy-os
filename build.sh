@@ -75,8 +75,8 @@ echo -e "${YELLOW}[4/5] Creating filesystem image...${NC}"
 cargo run -p mkfs --release -- \
     --output "$OUTPUT_DIR/fs.img" \
     --dir mkfs/root \
-    --size 16
-echo "  ✓ Created: fs.img (16MB)"
+    --size 2
+echo "  ✓ Created: fs.img (2MB)"
 
 # =============================================================================
 # Step 5: Create SD card image (if requested)
@@ -85,8 +85,8 @@ if [ "$1" = "sdcard" ]; then
     echo -e "${YELLOW}[5/5] Creating SD card image...${NC}"
     
     SDIMG="$OUTPUT_DIR/sdcard.img"
-    BOOT_SIZE_MB=32
-    FS_SIZE_MB=64
+    BOOT_SIZE_MB=2
+    FS_SIZE_MB=2
     TOTAL_SIZE_MB=$((BOOT_SIZE_MB + FS_SIZE_MB + 1))
     
     # Create empty image
