@@ -1091,7 +1091,7 @@ pub fn gpuid_service() {
         boot_console::set_phase_gui();
         
         // Setup the boot screen UI elements
-        ui::setup_demo_screen();
+        ui::setup_main_screen();
         
         // Initial render
         ui::with_ui(|ui_mgr| {
@@ -1106,8 +1106,8 @@ pub fn gpuid_service() {
     // Poll for input events
     d1_touch::poll();
     
-    // Check demo mode once before processing events (optimization)
-    let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+    // Check main screen mode once before processing events (optimization)
+    let is_main_screen = ui::with_ui(|ui_mgr| ui_mgr.is_main_screen_mode()).unwrap_or(false);
     
     // COALESCED event processing - drain all events, update state atomically
     // This prevents lag from intermediate mouse positions
@@ -1117,7 +1117,7 @@ pub fn gpuid_service() {
     while let Some(event) = d1_touch::next_event() {
         had_input = true;
         
-        if is_demo {
+        if is_main_screen {
             // For mouse movement (EV_ABS), just update position - don't process fully
             // This allows coalescing of multiple movement events
             if event.event_type == d1_touch::EV_ABS {
@@ -1128,7 +1128,7 @@ pub fn gpuid_service() {
                 }
             } else {
                 // Handle keyboard and button events immediately
-                if let Some(_button) = ui::handle_demo_input(event) {
+                if let Some(_button) = ui::handle_main_screen_input(event) {
                     had_button_action = true;
                 }
             }
@@ -1140,7 +1140,7 @@ pub fn gpuid_service() {
     }
     
     // Render cursor at FINAL position (after all events processed)
-    if is_demo {
+    if is_main_screen {
         // No VM cursor rendering - using browser's native cursor
         // Position is updated for click hit-testing only
         
@@ -1149,7 +1149,7 @@ pub fn gpuid_service() {
             d1_display::flush();
         } else {
             // Periodically update hardware stats
-            ui::update_demo_hardware_stats();
+            ui::update_main_screen_hardware_stats();
         }
     } else {
         ui::with_ui(|ui_mgr| {
@@ -1190,7 +1190,7 @@ pub fn gpuid_tick() {
         // Clear and switch to GUI
         d1_display::clear_display();
         boot_console::set_phase_gui();
-        ui::setup_demo_screen();
+        ui::setup_main_screen();
         
         ui::with_ui(|ui_mgr| {
             ui_mgr.mark_dirty();
@@ -1203,14 +1203,14 @@ pub fn gpuid_tick() {
     // Poll for input events
     d1_touch::poll();
     
-    // Check demo mode once before processing events
-    let is_demo = ui::with_ui(|ui_mgr| ui_mgr.is_demo_mode()).unwrap_or(false);
+    // Check main screen mode once before processing events
+    let is_main_screen = ui::with_ui(|ui_mgr| ui_mgr.is_main_screen_mode()).unwrap_or(false);
     
     // COALESCED event processing (same as gpuid_service)
     let mut had_input = false;
     while let Some(event) = d1_touch::next_event() {
         had_input = true;
-        if is_demo {
+        if is_main_screen {
             // For mouse movement, just update position - coalesce multiple events
             if event.event_type == d1_touch::EV_ABS {
                 match event.code {
@@ -1219,7 +1219,7 @@ pub fn gpuid_tick() {
                     _ => {}
                 }
             } else {
-                let _ = ui::handle_demo_input(event);
+                let _ = ui::handle_main_screen_input(event);
             }
         } else {
             ui::with_ui(|ui_mgr| {
@@ -1229,12 +1229,12 @@ pub fn gpuid_tick() {
     }
     
     // Render (no cursor - using browser's native cursor)
-    if is_demo {
+    if is_main_screen {
         // Position is updated for click hit-testing only
         if had_input {
             d1_display::flush();
         } else {
-            ui::update_demo_hardware_stats();
+            ui::update_main_screen_hardware_stats();
         }
     } else {
         ui::with_ui(|ui_mgr| {

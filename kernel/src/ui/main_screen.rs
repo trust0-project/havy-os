@@ -1,0 +1,931 @@
+//! MainScreen Screen
+//!
+//! Interactive main_screen screen showing system information,
+//! hardware stats, and quick action buttons.
+
+use alloc::format;
+use core::fmt::Write;
+
+use embedded_graphics::{
+    mono_font::{ascii::{FONT_7X13, FONT_7X14, FONT_7X14_BOLD, FONT_9X15_BOLD}, MonoTextStyle},
+    pixelcolor::Rgb888,
+    prelude::*,
+    primitives::{Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle},
+    text::Text,
+};
+
+use crate::d1_display;
+use crate::d1_touch::{self, InputEvent, ABS_X, ABS_Y, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_TOUCH,
+    EV_ABS, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
+
+use super::cursor::{
+    get_cursor_pos, invalidate_cursor_backup, restore_cursor_backup, set_cursor_pos, set_mouse_button,
+};
+use super::manager::with_ui;
+use super::widgets::Window;
+use super::{draw_image, LOGO_SMALL, LOGO_SMALL_SIZE};
+
+// Re-export cursor state for internal use
+use super::cursor::CURSOR_X;
+use super::cursor::CURSOR_Y;
+
+/// Version extracted from Cargo.toml at compile time
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Hardware info for main_screen screen (fetched at runtime)
+pub struct HardwareInfo {
+    pub cpu_count: usize,
+    pub memory_used_kb: usize,
+    pub memory_total_kb: usize,
+    pub disk_used_kb: usize,
+    pub disk_total_kb: usize,
+    pub network_available: bool,
+    pub ip_addr: [u8; 4], // IP address as 4 octets
+}
+
+/// Get current hardware information from the system
+pub fn get_hardware_info() -> HardwareInfo {
+    use core::sync::atomic::Ordering;
+    
+    // Get CPU count from HARTS_ONLINE
+    let cpu_count = crate::HARTS_ONLINE.load(Ordering::Relaxed);
+    
+    // Get memory from allocator
+    let (heap_used, _heap_free) = crate::allocator::heap_stats();
+    let heap_total = crate::allocator::heap_size();
+    let memory_used_kb = heap_used / 1024;
+    let memory_total_kb = heap_total / 1024;
+    
+    // Get disk usage from filesystem
+    let (disk_used_kb, disk_total_kb) = {
+        let fs_guard = crate::FS_STATE.read();
+        if let Some(ref fs) = *fs_guard {
+            let (used, total) = fs.disk_usage_bytes();
+            ((used / 1024) as usize, (total / 1024) as usize)
+        } else {
+            (0, 0)
+        }
+    };
+    
+    // Check if network is available and get IP
+    // Use is_ip_assigned() which checks if we have a valid IP (not 0.0.0.0)
+    // This is more reliable than lock-based checks which may fail due to contention
+    let (network_available, ip_addr) = {
+        let ip = crate::net::get_my_ip();
+        let octets = ip.octets();
+        let has_ip = crate::net::is_ip_assigned();
+        (has_ip, [octets[0], octets[1], octets[2], octets[3]])
+    };
+    
+    HardwareInfo {
+        cpu_count,
+        memory_used_kb,
+        memory_total_kb,
+        disk_used_kb,
+        disk_total_kb,
+        network_available,
+        ip_addr,
+    }
+}
+
+/// Selected button index for keyboard navigation
+static mut MAIN_SCREEN_SELECTED_BUTTON: usize = 0;
+
+/// Flag to track if static content has been drawn (labels, lines, etc.)
+/// When true, only dynamic content (buttons, stats) needs updating
+static mut MAIN_SCREEN_STATIC_DRAWN: bool = false;
+
+/// Last selected button - used to only redraw changed buttons
+static mut MAIN_SCREEN_LAST_SELECTED: Option<usize> = None;
+
+/// Currently open child window (None = main screen, Some(index) = button window open)
+static mut MAIN_SCREEN_OPEN_WINDOW: Option<usize> = None;
+
+// Window backing store - saves region behind child window for instant restore on close
+// Child window: 500x400 at (260, 180), shadow: +8 pixels, total ~508x408
+const WINDOW_BACKING_W: usize = 510;
+const WINDOW_BACKING_H: usize = 410;
+const WINDOW_BACKING_X: u32 = 258;
+const WINDOW_BACKING_Y: u32 = 178;
+static mut WINDOW_BACKING_STORE: [u32; WINDOW_BACKING_W * WINDOW_BACKING_H] = [0; WINDOW_BACKING_W * WINDOW_BACKING_H];
+static mut WINDOW_BACKING_VALID: bool = false;
+
+/// Last time hardware stats were updated (in ms)
+static mut MAIN_SCREEN_LAST_HW_UPDATE: i64 = 0;
+
+/// Hardware stats update interval in ms
+const MAIN_SCREEN_HW_UPDATE_INTERVAL: i64 = 2000; // Update every 2 seconds
+
+/// Check if a point is inside a main_screen button, returns button index if hit
+pub fn hit_test_main_screen_button(x: i32, y: i32) -> Option<usize> {
+    // Button positions (must match draw_main_screen_content)
+    // Only Network button now, aligned left (adjusted for 1024x768)
+    let buttons = [
+        (30, 500, 110, 32),  // Network (aligned with left column)
+    ];
+    
+    for (i, (bx, by, bw, bh)) in buttons.iter().enumerate() {
+        if x >= *bx && x < bx + (*bw as i32) && y >= *by && y < by + (*bh as i32) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Save the region behind the child window before opening it
+fn save_window_backing() {
+    d1_display::with_gpu(|gpu| {
+        unsafe {
+            // FAST: Use read_rect_fast to copy entire rows at once (410 copies vs 210K reads)
+            gpu.read_rect_fast(
+                WINDOW_BACKING_X, WINDOW_BACKING_Y,
+                WINDOW_BACKING_W, WINDOW_BACKING_H,
+                &mut WINDOW_BACKING_STORE
+            );
+            WINDOW_BACKING_VALID = true;
+        }
+    });
+}
+
+/// Restore the region behind the child window (for instant close)
+fn restore_window_backing() {
+    if !unsafe { WINDOW_BACKING_VALID } {
+        return;
+    }
+    d1_display::with_gpu(|gpu| {
+        unsafe {
+            // FAST: Use blit_rect to copy entire rows at once (410 copies vs 210K pixels)
+            gpu.blit_rect(
+                WINDOW_BACKING_X, WINDOW_BACKING_Y,
+                WINDOW_BACKING_W, WINDOW_BACKING_H,
+                &WINDOW_BACKING_STORE
+            );
+            WINDOW_BACKING_VALID = false;
+        }
+    });
+}
+
+/// Get button name for child window title
+fn get_button_name(index: usize) -> &'static str {
+    match index {
+        0 => "Network",
+        _ => "Unknown",
+    }
+}
+
+/// Update just the dynamic hardware stats section of the main_screen screen
+/// This is much more efficient than redrawing the entire screen
+pub fn update_main_screen_hardware_stats() {
+    // Don't update hardware stats if a child window is open (it would draw over the window)
+    if unsafe { MAIN_SCREEN_OPEN_WINDOW.is_some() } {
+        return;
+    }
+    
+    let now = crate::get_time_ms();
+    
+    // Check if enough time has passed since last update
+    let should_update = unsafe {
+        if now - MAIN_SCREEN_LAST_HW_UPDATE < MAIN_SCREEN_HW_UPDATE_INTERVAL {
+            return;
+        }
+        MAIN_SCREEN_LAST_HW_UPDATE = now;
+        true
+    };
+    
+    if !should_update {
+        return;
+    }
+    
+    // Get fresh hardware info
+    let hw = get_hardware_info();
+    
+    // Only redraw the hardware stats area
+    d1_display::with_gpu(|gpu| {
+        let col1_x = 30;
+        let text_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(200, 200, 210));
+        
+        // Clear just the dynamic hardware stats (NOT the static Display line at y=240)
+        // Lines to clear: CPU (y=210), Memory (y=225), Disk (y=255), Network (y=270)
+        // FONT_7X14 means text extends ~10px above baseline
+        let clear_color = Rgb888::new(28, 28, 38); // Window background color
+        
+        // Clear top section: CPU (y=210) and Memory (y=225) only
+        // Stop at y=228 to avoid Display line (baseline y=240, text starts ~y=230)
+        let _ = Rectangle::new(Point::new(col1_x, 200), Size::new(300, 28))
+            .into_styled(PrimitiveStyle::with_fill(clear_color))
+            .draw(gpu);
+        // Clear bottom section: Disk (y=255) and Network (y=270) only
+        // Start at y=245 to avoid Display line
+        let _ = Rectangle::new(Point::new(col1_x, 245), Size::new(300, 37))
+            .into_styled(PrimitiveStyle::with_fill(clear_color))
+            .draw(gpu);
+        
+        // Redraw dynamic values
+        let mut cpu_buf = [0u8; 32];
+        let cpu_str = format_cpu_str(hw.cpu_count, &mut cpu_buf);
+        let _ = Text::new(cpu_str, Point::new(col1_x, 210), text_style).draw(gpu);
+        
+        let mut mem_buf = [0u8; 48];
+        let mem_str = format_memory_str(hw.memory_used_kb, hw.memory_total_kb, &mut mem_buf);
+        let _ = Text::new(mem_str, Point::new(col1_x, 225), text_style).draw(gpu);
+        
+        let mut disk_buf = [0u8; 48];
+        let disk_str = format_disk_str(hw.disk_used_kb, hw.disk_total_kb, &mut disk_buf);
+        let _ = Text::new(disk_str, Point::new(col1_x, 255), text_style).draw(gpu);
+        
+        let mut net_buf = [0u8; 48];
+        let net_str = format_network_str(hw.network_available, &hw.ip_addr, &mut net_buf);
+        let _ = Text::new(net_str, Point::new(col1_x, 270), text_style).draw(gpu);
+        
+        // Update date/time or uptime in status bar
+        let status_bar_bg = Rgb888::new(25, 25, 35);
+        // Clear the time display area
+        let _ = Rectangle::new(Point::new(450, 742), Size::new(150, 26))
+            .into_styled(PrimitiveStyle::with_fill(status_bar_bg))
+            .draw(gpu);
+        
+        // Try to get host date/time from RTC, fall back to uptime
+        let time_str = if let Some(dt) = crate::rtc::get_datetime() {
+            // Display as: "Dec 16 15:30"
+            let month_name = match dt.month {
+                1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+                5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+                9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+                _ => "???"
+            };
+            format!("{} {:02} {:02}:{:02}", month_name, dt.day, dt.hour, dt.minute)
+        } else {
+            // Fall back to uptime if RTC not available
+            let uptime_ms = crate::get_time_ms() as u64;
+            let uptime_secs = uptime_ms / 1000;
+            let hours = uptime_secs / 3600;
+            let minutes = (uptime_secs % 3600) / 60;
+            let seconds = uptime_secs % 60;
+            format!("Up: {:02}:{:02}:{:02}", hours, minutes, seconds)
+        };
+        let _ = Text::new(&time_str, Point::new(460, 756), text_style).draw(gpu);
+    });
+    
+    d1_display::flush();
+}
+
+/// Fast update of just the quick action buttons (for keyboard navigation)
+/// This is MUCH faster than redrawing the entire screen
+pub fn update_main_screen_buttons(selected_button: usize) {
+    // Hide cursor first (restore pixels) to prevent ghost when redrawing over it
+    restore_cursor_backup();
+    
+    d1_display::with_gpu(|gpu| {
+        let clear_color = Rgb888::new(28, 28, 38); // Window background
+        
+        // Button definitions - only Network now, left aligned (adjusted for 1024x768)
+        let buttons = [
+            ("Network", 30),
+        ];
+        
+        // Clear the buttons area 
+        // Clear the buttons area (adjusted for 1024x768)
+        gpu.fill_rect(28, 498, 120, 38, 28, 28, 38);
+        
+        // Redraw all buttons
+        for (i, (label, x)) in buttons.iter().enumerate() {
+            let is_selected = i == selected_button;
+            let bg_color = if is_selected {
+                Rgb888::new(80, 140, 200)
+            } else {
+                Rgb888::new(50, 50, 70)
+            };
+            let border_color = if is_selected {
+                Rgb888::new(120, 180, 240)
+            } else {
+                Rgb888::new(60, 60, 80)
+            };
+            
+            // Button background (110 width for Network)
+            let _ = RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(*x, 500), Size::new(110, 32)),
+                Size::new(4, 4),
+            )
+            .into_styled(PrimitiveStyle::with_fill(bg_color))
+            .draw(gpu);
+            
+            // Button border
+            let _ = RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(*x, 500), Size::new(110, 32)),
+                Size::new(4, 4),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(border_color, if is_selected { 2 } else { 1 }))
+            .draw(gpu);
+            
+            let text_color = if is_selected {
+                Rgb888::WHITE
+            } else {
+                Rgb888::new(200, 200, 210)
+            };
+            let btn_text_style = MonoTextStyle::new(&FONT_7X14, text_color);
+            let _ = Text::new(label, Point::new(*x + 8, 520), btn_text_style).draw(gpu);
+        }
+    });
+    
+    // Invalidate backup and force cursor redraw with fresh background
+    invalidate_cursor_backup();
+    
+    d1_display::flush();
+}
+
+/// Setup a main_screen screen showing embedded_graphics capabilities with dynamic hardware info
+pub fn setup_main_screen() {
+    // Get hardware info
+    let hw = get_hardware_info();
+    
+    // Reset selected button and update time
+    unsafe { 
+        MAIN_SCREEN_SELECTED_BUTTON = 0;
+        MAIN_SCREEN_STATIC_DRAWN = false;  // Force full redraw on setup
+        MAIN_SCREEN_LAST_SELECTED = None;
+        MAIN_SCREEN_LAST_HW_UPDATE = crate::get_time_ms();
+    }
+    
+    // Enable main_screen mode to prevent UI manager from overwriting our direct GPU draws
+    with_ui(|ui_mgr| {
+        ui_mgr.clear();
+        ui_mgr.set_main_screen_mode(true);
+    });
+    
+    draw_main_screen_content(&hw, unsafe { MAIN_SCREEN_SELECTED_BUTTON });
+}
+
+/// Draw a child window (opened by clicking a button)
+/// Draws ONLY the child window on top of existing content for maximum speed
+fn draw_child_window(_button_index: usize) {
+    // PERFORMANCE: Save region behind window for instant restore on close
+    save_window_backing();
+    
+    // Pre-compute network info BEFORE entering GPU closure (avoid locks inside)
+    // Use is_ip_assigned() which checks for valid IP without needing locks
+    let is_online = crate::net::is_ip_assigned();
+    
+    let ip = crate::net::get_my_ip();
+    let ip_octets = ip.octets();
+    let gateway = crate::net::GATEWAY.octets();
+    let dns = crate::net::DNS_SERVER.octets();
+    let prefix = crate::net::PREFIX_LEN;
+    
+    // Pre-format strings to avoid allocations in GPU closure
+    let ip_str = format!("{}.{}.{}.{}/{}", 
+        ip_octets[0], ip_octets[1], ip_octets[2], ip_octets[3], prefix);
+    let gw_str = format!("{}.{}.{}.{}", 
+        gateway[0], gateway[1], gateway[2], gateway[3]);
+    let dns_str = format!("{}.{}.{}.{}", 
+        dns[0], dns[1], dns[2], dns[3]);
+    
+    d1_display::with_gpu(|gpu| {
+        // Shadow + window background in one batch (centered for 1024x768)
+        gpu.fill_rect(268, 188, 500, 400, 5, 5, 10);  // Shadow
+        gpu.fill_rect(260, 180, 500, 400, 28, 28, 38);  // Window bg
+        gpu.fill_rect(260, 180, 500, 32, 40, 40, 55);  // Title bar
+        
+        // Border (stroke only)
+        let _ = Rectangle::new(Point::new(260, 180), Size::new(500, 400))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        // Traffic light buttons
+        let _ = Circle::new(Point::new(272, 190), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(220, 80, 80)))
+            .draw(gpu);
+        let _ = Circle::new(Point::new(292, 190), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
+            .draw(gpu);
+        let _ = Circle::new(Point::new(312, 190), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
+            .draw(gpu);
+        
+        // Title + logo
+        let title_style = MonoTextStyle::new(&FONT_9X15_BOLD, Rgb888::WHITE);
+        let _ = Text::new("Network Statistics", Point::new(430, 202), title_style).draw(gpu);
+        // Small logo aligned to the right of the header (window is at x=260, width=500)
+        draw_image(gpu, 260 + 500 - LOGO_SMALL_SIZE - 8, 184, LOGO_SMALL_SIZE, LOGO_SMALL_SIZE, LOGO_SMALL);
+        
+        // Content styles
+        let label_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(230, 180, 80));
+        let value_style = MonoTextStyle::new(&FONT_7X14, Rgb888::WHITE);
+        let hint_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(100, 100, 120));
+        
+        let x = 280;
+        let mut y = 240;
+        
+        // Device section - use static strings
+        let _ = Text::new("Device:", Point::new(x, y), label_style).draw(gpu);
+        y += 16;
+        let _ = Text::new("Type:    VirtIO Network Device", Point::new(x + 10, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("Address: 0x10001000", Point::new(x + 10, y), value_style).draw(gpu);
+        y += 14;
+        
+        // Status
+        if is_online {
+            let _ = Text::new("Status:  * ONLINE", Point::new(x + 10, y), 
+                MonoTextStyle::new(&FONT_7X14, Rgb888::new(80, 200, 120))).draw(gpu);
+        } else {
+            let _ = Text::new("Status:  X OFFLINE", Point::new(x + 10, y), 
+                MonoTextStyle::new(&FONT_7X14, Rgb888::new(220, 80, 80))).draw(gpu);
+        }
+        y += 22;
+        
+        // Configuration
+        let _ = Text::new("Configuration:", Point::new(x, y), label_style).draw(gpu);
+        y += 16;
+        
+        // Use pre-formatted strings
+        let _ = Text::new("IP:      ", Point::new(x + 10, y), value_style).draw(gpu);
+        let _ = Text::new(&ip_str, Point::new(x + 64, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("Gateway: ", Point::new(x + 10, y), value_style).draw(gpu);
+        let _ = Text::new(&gw_str, Point::new(x + 64, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("DNS:     ", Point::new(x + 10, y), value_style).draw(gpu);
+        let _ = Text::new(&dns_str, Point::new(x + 64, y), value_style).draw(gpu);
+        y += 22;
+        
+        // Protocol Stack
+        let _ = Text::new("Protocol Stack:", Point::new(x, y), label_style).draw(gpu);
+        y += 16;
+        let _ = Text::new("smoltcp - Lightweight TCP/IP", Point::new(x + 10, y), value_style).draw(gpu);
+        y += 14;
+        let _ = Text::new("ICMP, UDP, TCP, ARP", Point::new(x + 10, y), value_style).draw(gpu);
+        
+        // Close hint
+        let _ = Text::new("Press ESC or click red button to close", Point::new(330, 560), hint_style).draw(gpu);
+    });
+    
+    // No flush here - caller will handle it
+}
+
+/// Redraw the main_screen screen with the given selected button index
+/// Public entry point that calls inner function
+fn draw_main_screen_content(hw: &HardwareInfo, selected_button: usize) {
+    draw_main_screen_content_inner(hw, selected_button);
+}
+
+/// Inner function to draw main main_screen content (used by both normal draw and child window background)
+fn draw_main_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
+    // Check if a child window is open - we'll draw it on top after main content
+    let open_window = unsafe { MAIN_SCREEN_OPEN_WINDOW };
+    
+    // Check if static content is already drawn - skip expensive operations if so
+    let static_drawn = unsafe { MAIN_SCREEN_STATIC_DRAWN };
+    
+    d1_display::with_gpu(|gpu| {
+        // Only clear and draw static content if not already cached
+        if !static_drawn {
+            // Clear to dark background (desktop) - EXPENSIVE, skip if already drawn
+            let _ = gpu.clear(0x15, 0x15, 0x1E);
+        }
+        
+        // === Draw Window using reusable Window component (no controls) ===
+        let window = Window::new("HAVY OS - System Information", 10, 10, 1004, 710)
+            .with_controls(false);  // Hide traffic light buttons on main window
+        let _content = window.draw_fast(gpu);
+        
+        // Content is positioned relative to window content area
+        let text_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(200, 200, 210));
+        let accent_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(80, 140, 200));
+        
+        // === Left Column: About ===
+        let col1_x = 30;
+        let _ = Text::new("About This System", Point::new(col1_x, 70), accent_style).draw(gpu);
+        let _ = Line::new(Point::new(col1_x, 75), Point::new(col1_x + 150, 75))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        let _ = Text::new("OS Name:      HAVY OS", Point::new(col1_x, 95), text_style).draw(gpu);
+        // Use version from Cargo.toml
+        let version_str = format!("Version:      {}", VERSION);
+        let _ = Text::new(&version_str, Point::new(col1_x, 110), text_style).draw(gpu);
+        let _ = Text::new("Architecture: RISC-V RV64GC", Point::new(col1_x, 140), text_style).draw(gpu);
+        let _ = Text::new("Platform:     Virtual Machine", Point::new(col1_x, 155), text_style).draw(gpu);
+        
+        // Hardware info section with dynamic values
+        let _ = Text::new("Hardware", Point::new(col1_x, 185), accent_style).draw(gpu);
+        let _ = Line::new(Point::new(col1_x, 190), Point::new(col1_x + 100, 190))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        // Dynamic CPU count
+        let mut cpu_buf = [0u8; 32];
+        let cpu_str = format_cpu_str(hw.cpu_count, &mut cpu_buf);
+        let _ = Text::new(cpu_str, Point::new(col1_x, 210), text_style).draw(gpu);
+        
+        // Dynamic memory (used / total)
+        let mut mem_buf = [0u8; 48];
+        let mem_str = format_memory_str(hw.memory_used_kb, hw.memory_total_kb, &mut mem_buf);
+        let _ = Text::new(mem_str, Point::new(col1_x, 225), text_style).draw(gpu);
+        
+        let _ = Text::new("Display:      1024x768 VirtIO GPU", Point::new(col1_x, 240), text_style).draw(gpu);
+        
+        // Dynamic disk (used / total)
+        let mut disk_buf = [0u8; 48];
+        let disk_str = format_disk_str(hw.disk_used_kb, hw.disk_total_kb, &mut disk_buf);
+        let _ = Text::new(disk_str, Point::new(col1_x, 255), text_style).draw(gpu);
+        
+        // Dynamic network with IP address
+        let mut net_buf = [0u8; 48];
+        let net_str = format_network_str(hw.network_available, &hw.ip_addr, &mut net_buf);
+        let _ = Text::new(net_str, Point::new(col1_x, 270), text_style).draw(gpu);
+        
+        // === Right Column: Features ===
+        let col2_x = 550;
+        let _ = Text::new("Features", Point::new(col2_x, 70), accent_style).draw(gpu);
+        let _ = Line::new(Point::new(col2_x, 75), Point::new(col2_x + 100, 75))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        // Feature checkmarks
+        let features = [
+            "Multi-core SMP support",
+            "Preemptive scheduler",
+            "VirtIO device drivers",
+            "TCP/IP networking (smoltcp)",
+            "Simple File System",
+            "WASM application runtime",
+            "GPU-accelerated display",
+            "Interactive shell",
+        ];
+        
+        for (i, feature) in features.iter().enumerate() {
+            let y = 95 + (i as i32 * 20);
+            // Checkmark
+            let _ = Rectangle::new(Point::new(col2_x, y - 10), Size::new(12, 12))
+                .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
+                .draw(gpu);
+            let _ = Line::new(Point::new(col2_x + 2, y - 4), Point::new(col2_x + 5, y - 1))
+                .into_styled(PrimitiveStyle::with_stroke(Rgb888::WHITE, 2))
+                .draw(gpu);
+            let _ = Line::new(Point::new(col2_x + 5, y - 1), Point::new(col2_x + 10, y - 8))
+                .into_styled(PrimitiveStyle::with_stroke(Rgb888::WHITE, 2))
+                .draw(gpu);
+            let _ = Text::new(feature, Point::new(col2_x + 20, y), text_style).draw(gpu);
+        }
+        
+        // === Quick Actions with keyboard selection (adjusted for 1024x768) ===
+        let _ = Text::new("Quick Actions", Point::new(col1_x, 470), accent_style).draw(gpu);
+        let _ = Line::new(Point::new(col1_x, 475), Point::new(col1_x + 120, 475))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        // Navigation hint
+        let hint_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(100, 100, 120));
+        let _ = Text::new("Press Enter to open Network Stats", Point::new(col1_x, 488), hint_style).draw(gpu);
+        
+        // Mark static content as drawn so next time we skip the expensive clear
+        unsafe { MAIN_SCREEN_STATIC_DRAWN = true; }
+        
+        // Only Network button now, left aligned (adjusted for 1024x768)
+        let buttons = [
+            ("Network", 30),
+        ];
+        
+        for (i, (label, x)) in buttons.iter().enumerate() {
+            let is_selected = i == selected_button;
+            let bg_color = if is_selected {
+                Rgb888::new(80, 140, 200) // Highlight selected
+            } else {
+                Rgb888::new(50, 50, 70)
+            };
+            let border_color = if is_selected {
+                Rgb888::new(120, 180, 240)
+            } else {
+                Rgb888::new(60, 60, 80)
+            };
+            
+            // Button background (110 width)
+            let _ = RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(*x, 500), Size::new(110, 32)),
+                Size::new(4, 4),
+            )
+            .into_styled(PrimitiveStyle::with_fill(bg_color))
+            .draw(gpu);
+            
+            // Button border
+            let _ = RoundedRectangle::with_equal_corners(
+                Rectangle::new(Point::new(*x, 500), Size::new(110, 32)),
+                Size::new(4, 4),
+            )
+            .into_styled(PrimitiveStyle::with_stroke(border_color, if is_selected { 2 } else { 1 }))
+            .draw(gpu);
+            
+            let text_color = if is_selected {
+                Rgb888::WHITE
+            } else {
+                Rgb888::new(200, 200, 210)
+            };
+            let btn_text_style = MonoTextStyle::new(&FONT_7X14, text_color);
+            let _ = Text::new(label, Point::new(*x + 8, 520), btn_text_style).draw(gpu);
+        }
+        
+        // === Running Services (positioned to not overlap with buttons) ===
+        let services_x = 700;
+        let _ = Text::new("Running Services", Point::new(services_x, 310), accent_style).draw(gpu);
+        let _ = Line::new(Point::new(services_x, 315), Point::new(services_x + 140, 315))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        let services = [
+            ("shell", true),
+            ("httpd", true),
+            ("tcpd", true),
+            ("sysmond", true),
+        ];
+        
+        // Services in a vertical list for cleaner layout
+        for (i, (name, running)) in services.iter().enumerate() {
+            let x = services_x;
+            let y = 335 + (i as i32 * 18);
+            let color = if *running { Rgb888::new(80, 200, 120) } else { Rgb888::new(150, 150, 160) };
+            let _ = Circle::new(Point::new(x, y), 8)
+                .into_styled(PrimitiveStyle::with_fill(color))
+                .draw(gpu);
+            let _ = Text::new(name, Point::new(x + 14, y + 6), text_style).draw(gpu);
+        }
+        
+        // === Welcome Message (adjusted for 1024x768) ===
+        let welcome_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(160, 160, 175));
+        let _ = Text::new("HAVY OS is a lightweight operating system written in Rust, running on a", Point::new(col1_x, 560), welcome_style).draw(gpu);
+        let _ = Text::new("RISC-V virtual machine in your browser.", Point::new(col1_x, 575), welcome_style).draw(gpu);
+        
+        // === Footer info ===
+        let _ = Line::new(Point::new(30, 610), Point::new(994, 610))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        let footer_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(120, 120, 140));
+        let _ = Text::new("Built with: Rust, embedded-graphics, smoltcp, wasmi", Point::new(30, 630), footer_style).draw(gpu);
+        let _ = Text::new("License: MIT | github.com/elribonazo/riscv-vm", Point::new(30, 645), footer_style).draw(gpu);
+        
+        // Version badge - use version from Cargo.toml
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(870, 620), Size::new(120, 24)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 140, 200)))
+        .draw(gpu);
+        let badge_version = format!("v{}", VERSION);
+        let _ = Text::new(&badge_version, Point::new(890, 636), text_style).draw(gpu);
+
+        // === Status Bar (at 1024x768 screen bottom) ===
+        let _ = Rectangle::new(Point::new(0, 738), Size::new(1024, 30))
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(25, 25, 35)))
+            .draw(gpu);
+        
+        let _ = Text::new("HAVY OS | GPU Active", Point::new(10, 756), text_style).draw(gpu);
+        
+        // Display date/time from RTC, or uptime as fallback
+        let time_str = if let Some(dt) = crate::rtc::get_datetime() {
+            let month_name = match dt.month {
+                1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+                5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+                9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+                _ => "???"
+            };
+            format!("{} {:02} {:02}:{:02}", month_name, dt.day, dt.hour, dt.minute)
+        } else {
+            let uptime_ms = crate::get_time_ms() as u64;
+            let uptime_secs = uptime_ms / 1000;
+            let hours = uptime_secs / 3600;
+            let minutes = (uptime_secs % 3600) / 60;
+            let seconds = uptime_secs % 60;
+            format!("Up: {:02}:{:02}:{:02}", hours, minutes, seconds)
+        };
+        let _ = Text::new(&time_str, Point::new(460, 756), text_style).draw(gpu);
+        
+        // Status indicators
+        let net_color = if hw.network_available {
+            Rgb888::new(80, 200, 120)
+        } else {
+            Rgb888::new(150, 150, 160)
+        };
+        let _ = Circle::new(Point::new(870, 745), 10)
+            .into_styled(PrimitiveStyle::with_fill(net_color))
+            .draw(gpu);
+        let _ = Text::new("NET", Point::new(884, 756), text_style).draw(gpu);
+        
+        let _ = Circle::new(Point::new(920, 745), 10)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
+            .draw(gpu);
+        let _ = Text::new("CPU", Point::new(934, 756), text_style).draw(gpu);
+        
+        let _ = Circle::new(Point::new(970, 745), 10)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
+            .draw(gpu);
+        let _ = Text::new("MEM", Point::new(984, 756), text_style).draw(gpu);
+    });
+    
+    // If a child window is open, draw it on top of the main content
+    if let Some(win_idx) = open_window {
+        draw_child_window(win_idx);
+    } else {
+        d1_display::flush();
+    }
+}
+
+/// Handle input for main_screen screen (keyboard navigation and mouse)
+/// Returns Some(button_index) if Enter was pressed on a button
+pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
+    // Check if a child window is open
+    let open_window = unsafe { MAIN_SCREEN_OPEN_WINDOW };
+    
+    // Handle mouse position events
+    if event.event_type == EV_ABS {
+        match event.code {
+            ABS_X => {
+                set_cursor_pos(event.value, unsafe { CURSOR_Y });
+            }
+            ABS_Y => {
+                set_cursor_pos(unsafe { CURSOR_X }, event.value);
+            }
+            _ => {}
+        }
+        return None;
+    }
+    
+    // Handle mouse button events and touch events
+    if event.event_type == d1_touch::EV_KEY {
+        match event.code {
+            BTN_LEFT | BTN_RIGHT | BTN_MIDDLE | BTN_TOUCH => {
+                let pressed = event.value == 1;
+                set_mouse_button(event.code, pressed);
+                
+                // On left mouse button or touch press
+                if (event.code == BTN_LEFT || event.code == BTN_TOUCH) && pressed {
+                    let (x, y) = get_cursor_pos();
+                    
+                    // If child window is open, check for close button click
+                    if open_window.is_some() {
+                        // Child window is at (260, 180, 500, 400) - centered for 1024x768
+                        // Close button is at (260 + 12, 180 + 10) with radius 6
+                        let close_btn_x = 260 + 12;
+                        let close_btn_y = 180 + 10;
+                        let dx = x - close_btn_x;
+                        let dy = y - close_btn_y;
+                        // Check if click is within 12px of button center (button is 12px diameter)
+                        if dx * dx + dy * dy < 12 * 12 {
+                            // Close the child window - use backing store for instant restore
+                            unsafe { MAIN_SCREEN_OPEN_WINDOW = None; }
+                            restore_window_backing();
+                            d1_display::flush();  // Immediate update
+                            return None;
+                        }
+                    } else {
+                        // Main window - check for button clicks
+                        if let Some(button_idx) = hit_test_main_screen_button(x, y) {
+                            // Open the child window for this button
+                            unsafe {
+                                MAIN_SCREEN_SELECTED_BUTTON = button_idx;
+                                MAIN_SCREEN_OPEN_WINDOW = Some(button_idx);
+                            }
+                            draw_child_window(button_idx);
+                            d1_display::flush();  // Immediate update
+                            return Some(button_idx);
+                        }
+                    }
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    
+    // Handle keyboard events
+    if !event.is_key_press() {
+        return None;
+    }
+    
+    // If child window is open, Escape closes it
+    if open_window.is_some() {
+        use crate::d1_touch::KEY_ESC;
+        if event.code == KEY_ESC {
+            unsafe { MAIN_SCREEN_OPEN_WINDOW = None; }
+            restore_window_backing();
+            d1_display::flush();
+        }
+        return None;
+    }
+    
+    let num_buttons = 1;  // Only Network button now
+    
+    match event.code {
+        KEY_LEFT | KEY_RIGHT => {
+            // Only one button, no navigation needed
+            None
+        }
+        KEY_UP | KEY_DOWN => {
+            // Only one button, no navigation needed
+            None
+        }
+        KEY_ENTER => {
+            // Open child window for selected button
+            let button_idx = unsafe { MAIN_SCREEN_SELECTED_BUTTON };
+            unsafe { MAIN_SCREEN_OPEN_WINDOW = Some(button_idx); }
+            draw_child_window(button_idx);
+            Some(button_idx)
+        }
+        _ => None,
+    }
+}
+
+// Helper function to format CPU string
+fn format_cpu_str(count: usize, buf: &mut [u8; 32]) -> &str {
+    struct BufWriter<'a> {
+        buf: &'a mut [u8],
+        pos: usize,
+    }
+    impl<'a> Write for BufWriter<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let bytes = s.as_bytes();
+            let remaining = self.buf.len() - self.pos;
+            let to_copy = bytes.len().min(remaining);
+            self.buf[self.pos..self.pos + to_copy].copy_from_slice(&bytes[..to_copy]);
+            self.pos += to_copy;
+            Ok(())
+        }
+    }
+    
+    let mut writer = BufWriter { buf: buf, pos: 0 };
+    let _ = write!(writer, "CPU:          {} Core{} @ RISC-V", count, if count == 1 { "" } else { "s" });
+    let len = writer.pos;
+    core::str::from_utf8(&buf[..len]).unwrap_or("CPU: Unknown")
+}
+
+// Helper function to format memory string (used / total KB)
+fn format_memory_str(used_kb: usize, total_kb: usize, buf: &mut [u8; 48]) -> &str {
+    struct BufWriter<'a> {
+        buf: &'a mut [u8],
+        pos: usize,
+    }
+    impl<'a> Write for BufWriter<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let bytes = s.as_bytes();
+            let remaining = self.buf.len() - self.pos;
+            let to_copy = bytes.len().min(remaining);
+            self.buf[self.pos..self.pos + to_copy].copy_from_slice(&bytes[..to_copy]);
+            self.pos += to_copy;
+            Ok(())
+        }
+    }
+    
+    let mut writer = BufWriter { buf: buf, pos: 0 };
+    let _ = write!(writer, "Memory:       {}/{} KB", used_kb, total_kb);
+    let len = writer.pos;
+    core::str::from_utf8(&buf[..len]).unwrap_or("Memory: Unknown")
+}
+
+// Helper function to format disk string (used / total KB)
+fn format_disk_str(used_kb: usize, total_kb: usize, buf: &mut [u8; 48]) -> &str {
+    struct BufWriter<'a> {
+        buf: &'a mut [u8],
+        pos: usize,
+    }
+    impl<'a> Write for BufWriter<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let bytes = s.as_bytes();
+            let remaining = self.buf.len() - self.pos;
+            let to_copy = bytes.len().min(remaining);
+            self.buf[self.pos..self.pos + to_copy].copy_from_slice(&bytes[..to_copy]);
+            self.pos += to_copy;
+            Ok(())
+        }
+    }
+    
+    let mut writer = BufWriter { buf: buf, pos: 0 };
+    let _ = write!(writer, "Storage:      {}/{} KB", used_kb, total_kb);
+    let len = writer.pos;
+    core::str::from_utf8(&buf[..len]).unwrap_or("Storage: Unknown")
+}
+
+// Helper function to format network string with IP
+fn format_network_str<'a>(available: bool, ip: &[u8; 4], buf: &'a mut [u8; 48]) -> &'a str {
+    struct BufWriter<'a> {
+        buf: &'a mut [u8],
+        pos: usize,
+    }
+    impl<'a> Write for BufWriter<'a> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let bytes = s.as_bytes();
+            let remaining = self.buf.len() - self.pos;
+            let to_copy = bytes.len().min(remaining);
+            self.buf[self.pos..self.pos + to_copy].copy_from_slice(&bytes[..to_copy]);
+            self.pos += to_copy;
+            Ok(())
+        }
+    }
+    
+    let mut writer = BufWriter { buf: buf, pos: 0 };
+    if available {
+        let _ = write!(writer, "Network:      {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+    } else {
+        let _ = write!(writer, "Network:      Not connected");
+    }
+    let len = writer.pos;
+    core::str::from_utf8(&buf[..len]).unwrap_or("Network: Unknown")
+}

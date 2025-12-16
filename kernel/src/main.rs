@@ -46,6 +46,7 @@ mod virtio_net;
 mod virtio_input;
 mod d1_touch;        // D1 GT911 touchscreen driver
 mod boot_console;
+mod rtc;
 mod ui;
 
 // Process management modules
