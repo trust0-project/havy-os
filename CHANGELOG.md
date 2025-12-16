@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.43](https://github.com/trust0-project/havy-os/compare/v0.1.42...v0.1.43) (2025-12-16)
+
+
+### Bug Fixes
+
+* kernel fix ([5636505](https://github.com/trust0-project/havy-os/commit/56365055e4508d6a3ff9e13333fc0fd784a237ef))
+
 ## [0.1.42](https://github.com/trust0-project/havy-os/compare/v0.1.41...v0.1.42) (2025-12-16)
 
 
