@@ -48,31 +48,14 @@ jobs:
           sudo cp binaryen-version_116/bin/wasm-opt /usr/local/bin/
           wasm-opt --version
       
-      - name: Build Kernel
-        run: cargo build -p kernel --target riscv64gc-unknown-none-elf --release
-      
-      - name: Build WASM Binaries
-        run: |
-          RUSTFLAGS="-C link-arg=--initial-memory=2097152" \
-            cargo build -p mkfs --release --target wasm32-unknown-unknown --no-default-features
-      
-      - name: Optimize WASM
-        run: |
-          for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-            if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
-              wasm-opt -O3 --enable-bulk-memory "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
-            fi
-          done
-      
       - name: Build Filesystem Image
-        run: cargo run -p mkfs -- --output target/riscv64gc-unknown-none-elf/release/fs.img --dir mkfs/root --size 2
+        run: sh build.sh
       
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.release-please.outputs.tag-name }}
           files: |
-            target/riscv64gc-unknown-none-elf/release/kernel
-            target/riscv64gc-unknown-none-elf/release/fs.img
+            target/riscv64gc-unknown-none-elf/release/sdcard.img
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
