@@ -54,7 +54,7 @@ jobs:
           wasm-opt --version
       
       - name: Build Filesystem Image
-        run: sh build.sh
+        run: bash build.sh sdcard
       
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v1
