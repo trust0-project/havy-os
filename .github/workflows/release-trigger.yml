@@ -41,6 +41,11 @@ jobs:
           toolchain: "1.86.0"
           targets: riscv64gc-unknown-none-elf,wasm32-unknown-unknown
       
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm mtools
+      
       - name: Install wasm-opt
         run: |
           wget https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
