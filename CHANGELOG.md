@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.45](https://github.com/trust0-project/havy-os/compare/v0.1.44...v0.1.45) (2025-12-18)
+
+
+### Features
+
+* moving from VirtIO to device drivers and optimize code, screen and performance ([af51789](https://github.com/trust0-project/havy-os/commit/af517890ddea8492a03f44dca49a77cd7ffd8fca))
+
+
+### Bug Fixes
+
+* Merge pull request [#33](https://github.com/trust0-project/havy-os/issues/33) from trust0-project/release-please--branches--main--components--havy-os ([7982919](https://github.com/trust0-project/havy-os/commit/7982919a4fed855061d9367e4854d8ca2eb508da))
+
 ## [0.1.44](https://github.com/trust0-project/havy-os/compare/v0.1.43...v0.1.44) (2025-12-18)
 
 
