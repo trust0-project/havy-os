@@ -1,8 +1,46 @@
 use alloc::{format, string::String, vec, vec::Vec};
+use alloc::collections::BTreeMap;
 use wasmi::{Caller, Config, Engine, Func, Linker, Module, Store};
 use core::ptr;
 
-use crate::{SHELL_CMD_STATE, ShellCmdState, clint::get_time_ms, commands::http, constants::TEST_FINISHER, cpu, lock::{self, utils::BLK_DEV}, services::klogd::{KLOG, klog_info}, uart};
+use crate::{SHELL_CMD_STATE, ShellCmdState, clint::get_time_ms, commands::http, constants::TEST_FINISHER, cpu, lock::{self, utils::BLK_DEV}, services::klogd::{KLOG, klog_info}, uart, Spinlock};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WASM Module Cache - Avoids re-parsing WASM binaries
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Cached WASM module with its associated engine
+struct CachedModule {
+    engine: Engine,
+    module: Module,
+}
+
+/// Hash WASM bytes for cache lookup (fast hash of length + samples)
+fn hash_wasm(bytes: &[u8]) -> u64 {
+    let mut h: u64 = bytes.len() as u64;
+    // Sample first 32 bytes
+    for &b in bytes.iter().take(32) {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    // Sample last 16 bytes
+    for &b in bytes.iter().rev().take(16) {
+        h = h.wrapping_mul(37).wrapping_add(b as u64);
+    }
+    // Sample middle
+    if bytes.len() > 64 {
+        let mid = bytes.len() / 2;
+        for &b in bytes.iter().skip(mid).take(16) {
+            h = h.wrapping_mul(41).wrapping_add(b as u64);
+        }
+    }
+    h
+}
+
+/// Global WASM module cache - stores parsed modules to avoid re-parsing
+static MODULE_CACHE: Spinlock<BTreeMap<u64, CachedModule>> = Spinlock::new(BTreeMap::new());
+
+/// Maximum cache entries to prevent unbounded growth
+const MAX_CACHE_ENTRIES: usize = 16;
 
 /// State to pass to host functions - includes command arguments
 struct WasmContext {
@@ -43,10 +81,41 @@ pub fn get_shell_cmd_info() -> Option<(String, u32, i64, u64, bool)> {
 
 /// Execute a WASM binary with the given arguments
 pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
-    // Configure engine with relaxed limits for scripts
-    let mut config = Config::default();
-    config.consume_fuel(false);  // Don't limit execution
-    let engine = Engine::new(&config);
+    // Check module cache first
+    let hash = hash_wasm(wasm_bytes);
+    
+    // Try to get cached engine+module or create new ones
+    let (engine, module) = {
+        let mut cache = MODULE_CACHE.lock();
+        
+        if let Some(cached) = cache.get(&hash) {
+            // Cache hit - reuse engine and module
+            (cached.engine.clone(), cached.module.clone())
+        } else {
+            // Cache miss - create new engine and parse module
+            let mut config = Config::default();
+            config.consume_fuel(false);
+            let engine = Engine::new(&config);
+            
+            let module = Module::new(&engine, wasm_bytes)
+                .map_err(|e| format!("Invalid WASM: {:?}", e))?;
+            
+            // Evict oldest entry if cache is full
+            if cache.len() >= MAX_CACHE_ENTRIES {
+                if let Some(&oldest_key) = cache.keys().next() {
+                    cache.remove(&oldest_key);
+                }
+            }
+            
+            // Store in cache
+            cache.insert(hash, CachedModule {
+                engine: engine.clone(),
+                module: module.clone(),
+            });
+            
+            (engine, module)
+        }
+    };
     
     let ctx = WasmContext {
         args: args.iter().map(|s| String::from(*s)).collect(),
@@ -1783,7 +1852,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         )
         .map_err(|e| format!("define tcp_status: {:?}", e))?;
 
-    let module = Module::new(&engine, wasm_bytes).map_err(|e| format!("Invalid WASM: {:?}", e))?;
+    // Module already obtained from cache at the start of execute()
 
     let instance = linker
         .instantiate(&mut store, &module)
