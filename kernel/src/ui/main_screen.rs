@@ -7,15 +7,15 @@ use alloc::format;
 use core::fmt::Write;
 
 use embedded_graphics::{
-    mono_font::{ascii::{FONT_7X13, FONT_7X14, FONT_7X14_BOLD, FONT_9X15_BOLD}, MonoTextStyle},
+    mono_font::{ascii::{FONT_7X14, FONT_9X15_BOLD}, MonoTextStyle},
     pixelcolor::Rgb888,
     prelude::*,
     primitives::{Circle, Line, PrimitiveStyle, Rectangle, RoundedRectangle},
     text::Text,
 };
 
-use crate::d1_display;
-use crate::d1_touch::{self, InputEvent, ABS_X, ABS_Y, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_TOUCH,
+use crate::platform::d1_display;
+use crate::platform::d1_touch::{self, ABS_X, ABS_Y, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, BTN_TOUCH,
     EV_ABS, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 
 use super::cursor::{
@@ -140,7 +140,7 @@ fn save_window_backing() {
             gpu.read_rect_fast(
                 WINDOW_BACKING_X, WINDOW_BACKING_Y,
                 WINDOW_BACKING_W, WINDOW_BACKING_H,
-                &mut WINDOW_BACKING_STORE
+                &mut *core::ptr::addr_of_mut!(WINDOW_BACKING_STORE)
             );
             WINDOW_BACKING_VALID = true;
         }
@@ -170,6 +170,20 @@ fn get_button_name(index: usize) -> &'static str {
     match index {
         0 => "Network",
         _ => "Unknown",
+    }
+}
+
+/// Last touch coordinates for debug display
+static mut LAST_TOUCH_X: i32 = 0;
+static mut LAST_TOUCH_Y: i32 = 0;
+static mut LAST_TOUCH_COUNT: u32 = 0;
+
+/// Update debug info for touch events (called when touch is detected)
+pub fn update_touch_debug(x: i32, y: i32) {
+    unsafe {
+        LAST_TOUCH_X = x;
+        LAST_TOUCH_Y = y;
+        LAST_TOUCH_COUNT = LAST_TOUCH_COUNT.wrapping_add(1);
     }
 }
 
@@ -239,13 +253,13 @@ pub fn update_main_screen_hardware_stats() {
         
         // Update date/time or uptime in status bar
         let status_bar_bg = Rgb888::new(25, 25, 35);
-        // Clear the time display area
-        let _ = Rectangle::new(Point::new(450, 742), Size::new(150, 26))
+        // Clear the time display area on the right side
+        let _ = Rectangle::new(Point::new(400, 742), Size::new(150, 26))
             .into_styled(PrimitiveStyle::with_fill(status_bar_bg))
             .draw(gpu);
         
         // Try to get host date/time from RTC, fall back to uptime
-        let time_str = if let Some(dt) = crate::rtc::get_datetime() {
+        let time_str = if let Some(dt) = crate::device::rtc::get_datetime() {
             // Display as: "Dec 16 15:30"
             let month_name = match dt.month {
                 1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
@@ -263,7 +277,7 @@ pub fn update_main_screen_hardware_stats() {
             let seconds = uptime_secs % 60;
             format!("Up: {:02}:{:02}:{:02}", hours, minutes, seconds)
         };
-        let _ = Text::new(&time_str, Point::new(460, 756), text_style).draw(gpu);
+        let _ = Text::new(&time_str, Point::new(410, 756), text_style).draw(gpu);
     });
     
     d1_display::flush();
@@ -276,8 +290,6 @@ pub fn update_main_screen_buttons(selected_button: usize) {
     restore_cursor_backup();
     
     d1_display::with_gpu(|gpu| {
-        let clear_color = Rgb888::new(28, 28, 38); // Window background
-        
         // Button definitions - only Network now, left aligned (adjusted for 1024x768)
         let buttons = [
             ("Network", 30),
@@ -681,7 +693,7 @@ fn draw_main_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
         let _ = Text::new("HAVY OS | GPU Active", Point::new(10, 756), text_style).draw(gpu);
         
         // Display date/time from RTC, or uptime as fallback
-        let time_str = if let Some(dt) = crate::rtc::get_datetime() {
+        let time_str = if let Some(dt) = crate::device::rtc::get_datetime() {
             let month_name = match dt.month {
                 1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
                 5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
@@ -760,6 +772,9 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
                 if (event.code == BTN_LEFT || event.code == BTN_TOUCH) && pressed {
                     let (x, y) = get_cursor_pos();
                     
+                    // Update debug info for touch tracking
+                    update_touch_debug(x, y);
+                    
                     // If child window is open, check for close button click
                     if open_window.is_some() {
                         // Child window is at (260, 180, 500, 400) - centered for 1024x768
@@ -803,7 +818,7 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
     
     // If child window is open, Escape closes it
     if open_window.is_some() {
-        use crate::d1_touch::KEY_ESC;
+        use crate::platform::d1_touch::KEY_ESC;
         if event.code == KEY_ESC {
             unsafe { MAIN_SCREEN_OPEN_WINDOW = None; }
             restore_window_backing();
@@ -811,8 +826,6 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
         }
         return None;
     }
-    
-    let num_buttons = 1;  // Only Network button now
     
     match event.code {
         KEY_LEFT | KEY_RIGHT => {

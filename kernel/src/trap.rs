@@ -33,6 +33,8 @@
 
 use core::arch::asm;
 
+use crate::services::klogd::{klog_debug, klog_info, klog_trace, klog_warning};
+
 /// Supervisor cause register values (scause)
 /// Bit 63 (XLEN-1) is the interrupt bit: 1 = interrupt, 0 = exception
 pub mod cause {
@@ -57,8 +59,8 @@ pub mod cause {
     pub const STORE_PAGE_FAULT: usize = 15;
 }
 
-/// Timer interval in cycles (approximately 10ms at 10MHz)
-const TIMER_INTERVAL: u64 = 100_000;
+/// Timer interval in cycles (approximately 1ms at 10MHz for responsive input)
+const TIMER_INTERVAL: u64 = 10_000;
 
 /// Read the current time via the `time` CSR
 #[inline]
@@ -200,7 +202,7 @@ pub extern "C" fn trap_handler() {
                 handle_external_interrupt(hart_id);
             }
             _ => {
-                crate::klog::klog_warning(
+                klog_warning(
                     "trap",
                     &alloc::format!("Unknown interrupt: cause={:#x} hart={}", scause, hart_id),
                 );
@@ -243,7 +245,7 @@ fn handle_software_interrupt(hart_id: usize) {
 
 /// Handle external interrupt (PLIC)
 fn handle_external_interrupt(hart_id: usize) {
-    crate::klog::klog_trace(
+    klog_trace(
         "trap",
         &alloc::format!("External interrupt on hart {}", hart_id),
     );
@@ -268,7 +270,7 @@ fn handle_exception(hart_id: usize, cause: usize) {
             }
         }
         cause::BREAKPOINT => {
-            crate::klog::klog_debug(
+            klog_debug(
                 "trap",
                 &alloc::format!("Breakpoint at {:#x} on hart {}", sepc, hart_id),
             );
@@ -380,7 +382,7 @@ pub fn init(hart_id: usize) {
     schedule_timer_interrupt(hart_id);
     enable_interrupts();
     
-    crate::klog::klog_info(
+    klog_info(
         "trap",
         &alloc::format!("S-mode trap handler initialized on hart {}", hart_id),
     );

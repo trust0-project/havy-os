@@ -13,6 +13,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{console_log, argc, argv, mkdir, get_cwd, is_dir};
 
     // Static buffers
@@ -37,9 +38,9 @@ mod wasm {
 
         // Parse flags (starting from arg 0)
         for i in 0..arg_count {
-            let len = unsafe { argv(i, &mut ARG_BUF) };
+            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
             if let Some(len) = len {
-                let arg = unsafe { &ARG_BUF[..len] };
+                let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                 if arg.starts_with(b"-") {
                     for &ch in &arg[1..] {
                         match ch {
@@ -61,14 +62,14 @@ mod wasm {
         }
 
         // Get current working directory
-        let cwd_len = unsafe { get_cwd(&mut CWD_BUF).unwrap_or(1) };
-        let cwd = unsafe { &CWD_BUF[..cwd_len] };
+        let cwd_len = unsafe { get_cwd(&mut *addr_of_mut!(CWD_BUF)).unwrap_or(1) };
+        let cwd = unsafe { &(*addr_of!(CWD_BUF))[..cwd_len] };
 
         // Process each directory argument
         for i in dirs_start..arg_count {
-            let len = unsafe { argv(i, &mut ARG_BUF) };
+            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
             if let Some(len) = len {
-                let dir = unsafe { &ARG_BUF[..len] };
+                let dir = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                 
                 // Resolve path
                 let path_len = if dir.starts_with(b"/") {

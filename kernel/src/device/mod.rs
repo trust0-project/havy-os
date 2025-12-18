@@ -29,7 +29,8 @@
 pub mod block;
 pub mod network;
 pub mod display;
+pub mod rtc;
+pub mod uart;
 
 pub use block::{BlockDevice, BlockError};
 pub use network::{NetworkDevice, NetworkError};
-pub use display::{DisplayDevice, PixelFormat};

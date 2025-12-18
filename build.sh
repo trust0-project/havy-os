@@ -23,11 +23,11 @@ echo -e "${GREEN}  Building havy_os for Lichee RV 86 (Allwinner D1)  ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 
 # =============================================================================
-# Step 1: Build kernel with D1 feature
+# Step 1: Build kernel (D1 is now the only target)
 # =============================================================================
 echo -e "\n${YELLOW}[1/5] Building kernel...${NC}"
 cd "$KERNEL_DIR"
-cargo build --release --target $TARGET --features d1 --no-default-features
+cargo build --release --target $TARGET
 cd "$SCRIPT_DIR"
 
 # =============================================================================

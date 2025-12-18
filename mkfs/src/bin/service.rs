@@ -16,6 +16,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{
         console_log, argc, argv, get_service_defs, get_running_services,
         start_service, stop_service, restart_service, get_service_status, print_int,
@@ -39,12 +40,12 @@ mod wasm {
         }
 
         // Get first argument (index 0 since command name not passed)
-        let arg1_len = unsafe { argv(0, &mut ARG_BUF) };
+        let arg1_len = unsafe { argv(0, &mut *addr_of_mut!(ARG_BUF)) };
         let Some(arg1_len) = arg1_len else {
             console_log("Error: Could not read argument\n");
             return;
         };
-        let arg1 = unsafe { &ARG_BUF[..arg1_len] };
+        let arg1 = unsafe { &(*addr_of!(ARG_BUF))[..arg1_len] };
 
         // Check for --list or -l
         if arg1 == b"--list" || arg1 == b"-l" {
@@ -66,12 +67,12 @@ mod wasm {
             return;
         }
 
-        let arg2_len = unsafe { argv(1, &mut ARG2_BUF) };
+        let arg2_len = unsafe { argv(1, &mut *addr_of_mut!(ARG2_BUF)) };
         let Some(arg2_len) = arg2_len else {
             console_log("Error: Could not read command\n");
             return;
         };
-        let arg2 = unsafe { &ARG2_BUF[..arg2_len] };
+        let arg2 = unsafe { &(*addr_of!(ARG2_BUF))[..arg2_len] };
         let name = unsafe { core::str::from_utf8_unchecked(arg1) };
 
         match arg2 {
@@ -119,7 +120,7 @@ mod wasm {
     fn list_service_definitions() {
         console_log("\x1b[1;36mAvailable services:\x1b[0m\n");
         
-        let len = unsafe { get_service_defs(&mut LIST_BUF) };
+        let len = unsafe { get_service_defs(&mut *addr_of_mut!(LIST_BUF)) };
         let Some(len) = len else {
             console_log("  (none)\n");
             return;
@@ -131,7 +132,7 @@ mod wasm {
         }
 
         // Parse and display "name:description\n" format
-        let data = unsafe { &LIST_BUF[..len] };
+        let data = unsafe { &(*addr_of!(LIST_BUF))[..len] };
         let mut start = 0;
         for i in 0..len {
             if data[i] == b'\n' {
@@ -155,7 +156,7 @@ mod wasm {
     fn show_all_status() {
         console_log("\x1b[1;36mService Status:\x1b[0m\n");
         
-        let len = unsafe { get_running_services(&mut LIST_BUF) };
+        let len = unsafe { get_running_services(&mut *addr_of_mut!(LIST_BUF)) };
         let Some(len) = len else {
             console_log("  (no services)\n");
             return;
@@ -167,7 +168,7 @@ mod wasm {
         }
 
         // Parse and display "name:status:pid\n" format
-        let data = unsafe { &LIST_BUF[..len] };
+        let data = unsafe { &(*addr_of!(LIST_BUF))[..len] };
         let mut start = 0;
         for i in 0..len {
             if data[i] == b'\n' {
@@ -207,16 +208,16 @@ mod wasm {
     }
 
     fn show_service_status(name: &str, name_bytes: &[u8]) {
-        let status_len = unsafe { get_service_status(name, &mut STATUS_BUF) };
+        let status_len = unsafe { get_service_status(name, &mut *addr_of_mut!(STATUS_BUF)) };
         
         // Get running services to find PID
-        let list_len = unsafe { get_running_services(&mut LIST_BUF) };
+        let list_len = unsafe { get_running_services(&mut *addr_of_mut!(LIST_BUF)) };
         
         let mut found = false;
         let mut pid: i64 = 0;
         
         if let Some(list_len) = list_len {
-            let data = unsafe { &LIST_BUF[..list_len] };
+            let data = unsafe { &(*addr_of!(LIST_BUF))[..list_len] };
             let mut start = 0;
             for i in 0..list_len {
                 if data[i] == b'\n' {
@@ -252,7 +253,7 @@ mod wasm {
         console_log("\n");
 
         if let Some(status_len) = status_len {
-            let status = unsafe { &STATUS_BUF[..status_len] };
+            let status = unsafe { &(*addr_of!(STATUS_BUF))[..status_len] };
             if status == b"running" {
                 console_log("   \x1b[1;32mActive: running\x1b[0m\n");
                 console_log("   PID: ");

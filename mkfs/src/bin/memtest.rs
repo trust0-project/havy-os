@@ -12,6 +12,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{console_log, get_heap_stats, print_int, argc, argv};
 
     // Static buffer for argument
@@ -24,9 +25,9 @@ mod wasm {
     pub extern "C" fn _start() {
         // Parse iterations from arguments (arg 0 since command name is not passed)
         let iterations: usize = if argc() > 0 {
-            let len = unsafe { argv(0, &mut ARG_BUF) };
+            let len = unsafe { argv(0, &mut *addr_of_mut!(ARG_BUF)) };
             if let Some(len) = len {
-                let arg = unsafe { &ARG_BUF[..len] };
+                let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                 let n = parse_usize(arg);
                 if n > 0 { n } else { 10 }
             } else {
@@ -64,7 +65,7 @@ mod wasm {
 
             // Fill buffer with pattern
             unsafe {
-                for byte in TEST_BUF.iter_mut() {
+                for byte in (*addr_of_mut!(TEST_BUF)).iter_mut() {
                     *byte = pattern;
                 }
             }
@@ -72,7 +73,7 @@ mod wasm {
             // Verify pattern
             let mut ok = true;
             unsafe {
-                for &byte in TEST_BUF.iter() {
+                for &byte in (*addr_of!(TEST_BUF)).iter() {
                     if byte != pattern {
                         ok = false;
                         break;

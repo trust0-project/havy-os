@@ -3,6 +3,7 @@
 //! This driver interfaces with the VirtIO Input device (Device ID 18) to receive
 //! keyboard events from the host.
 
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::collections::VecDeque;
 
@@ -400,7 +401,7 @@ pub fn poll() {
 /// Get the next input event
 pub fn next_event() -> Option<InputEvent> {
     unsafe {
-        INPUT_DRIVER.as_mut().and_then(|i| i.next_event())
+        (*addr_of_mut!(INPUT_DRIVER)).as_mut().and_then(|i| i.next_event())
     }
 }
 

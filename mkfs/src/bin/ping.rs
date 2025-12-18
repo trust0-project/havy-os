@@ -12,6 +12,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{
         console_log, is_net_available, resolve_dns, ping, format_ipv4,
         argc, argv, print_int, PingResult,
@@ -37,7 +38,7 @@ mod wasm {
         }
 
         // Get target argument (arg 0 since command name is not passed)
-        let arg_len = unsafe { argv(0, &mut ARG_BUF) };
+        let arg_len = unsafe { argv(0, &mut *addr_of_mut!(ARG_BUF)) };
         let Some(arg_len) = arg_len else {
             console_log("Error: Could not read argument\n");
             return;
@@ -46,7 +47,7 @@ mod wasm {
         // Trim whitespace
         let mut trimmed_len = arg_len;
         while trimmed_len > 0 {
-            let b = unsafe { ARG_BUF[trimmed_len - 1] };
+            let b = unsafe { (*addr_of!(ARG_BUF))[trimmed_len - 1] };
             if b == b' ' || b == b'\t' {
                 trimmed_len -= 1;
             } else {
@@ -54,7 +55,7 @@ mod wasm {
             }
         }
         
-        let target = unsafe { &ARG_BUF[..trimmed_len] };
+        let target = unsafe { &(*addr_of!(ARG_BUF))[..trimmed_len] };
 
         // Try to parse as IP address first
         let ip = if let Some(parsed) = parse_ipv4(target) {
@@ -74,18 +75,18 @@ mod wasm {
                 return;
             }
 
-            let ip_len = unsafe { format_ipv4(&ip_bytes, &mut IP_BUF) };
+            let ip_len = unsafe { format_ipv4(&ip_bytes, &mut *addr_of_mut!(IP_BUF)) };
             console_log("\x1b[1;32m[DNS]\x1b[0m Resolved to \x1b[1;97m");
-            unsafe { print_bytes(&IP_BUF[..ip_len]) };
+            unsafe { print_bytes(&(*addr_of!(IP_BUF))[..ip_len]) };
             console_log("\x1b[0m\n");
 
             ip_bytes
         };
 
         // Display ping header
-        let ip_len = unsafe { format_ipv4(&ip, &mut IP_BUF) };
+        let ip_len = unsafe { format_ipv4(&ip, &mut *addr_of_mut!(IP_BUF)) };
         console_log("PING ");
-        unsafe { print_bytes(&IP_BUF[..ip_len]) };
+        unsafe { print_bytes(&(*addr_of!(IP_BUF))[..ip_len]) };
         console_log(" 56(84) bytes of data.\n");
 
         // Send pings (4 by default)

@@ -11,7 +11,8 @@
 //! - `main_screen`: Main screen functionality
 //! - `boot`: Boot screen setup
 
-use crate::d1_display;
+use crate::platform::d1_display;
+use crate::uart;
 
 // Module declarations
 pub mod boot;
@@ -22,20 +23,16 @@ pub mod manager;
 pub mod widgets;
 
 // Re-export commonly used items at the module root for backwards compatibility
-pub use colors::*;
 pub use cursor::{
-    draw_cursor, get_cursor_pos, get_mouse_buttons, hide_cursor, invalidate_cursor_backup,
-    is_left_button_pressed, set_cursor_pos, set_mouse_button,
+    get_cursor_pos, set_cursor_pos,
 };
 pub use main_screen::{
-    get_hardware_info, handle_main_screen_input, hit_test_main_screen_button, setup_main_screen,
-    update_main_screen_buttons, update_main_screen_hardware_stats, HardwareInfo,
+    handle_main_screen_input, setup_main_screen,
+    update_main_screen_hardware_stats,
 };
 pub use manager::{
-    init, is_initialized, poll_input, render_and_flush, with_ui, UiManager, UI_MANAGER,
+    with_ui, UiManager, UI_MANAGER,
 };
-pub use widgets::*;
-pub use boot::setup_boot_screen;
 
 // Embedded Trust0 logo (64x64 RGBA = 16KB)
 static LOGO_DATA: &[u8] = include_bytes!("logo.raw");

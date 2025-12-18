@@ -14,6 +14,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{console_log, argc, argv, get_cwd, remove_file, is_dir, list_dir};
 
     // Static buffers
@@ -40,9 +41,9 @@ mod wasm {
 
         // Parse flags (starting from arg 0)
         for i in 0..arg_count {
-            let len = unsafe { argv(i, &mut ARG_BUF) };
+            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
             if let Some(len) = len {
-                let arg = unsafe { &ARG_BUF[..len] };
+                let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                 if arg.starts_with(b"-") {
                     for &ch in &arg[1..] {
                         match ch {
@@ -65,14 +66,14 @@ mod wasm {
         }
 
         // Get current working directory
-        let cwd_len = unsafe { get_cwd(&mut CWD_BUF).unwrap_or(1) };
-        let cwd = unsafe { &CWD_BUF[..cwd_len] };
+        let cwd_len = unsafe { get_cwd(&mut *addr_of_mut!(CWD_BUF)).unwrap_or(1) };
+        let cwd = unsafe { &(*addr_of!(CWD_BUF))[..cwd_len] };
 
         // Process each file argument
         for i in files_start..arg_count {
-            let len = unsafe { argv(i, &mut ARG_BUF) };
+            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
             if let Some(len) = len {
-                let file_arg = unsafe { &ARG_BUF[..len] };
+                let file_arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                 
                 // Resolve path
                 let path_len = if file_arg.starts_with(b"/") {
@@ -149,14 +150,14 @@ mod wasm {
         let path_str = unsafe { core::str::from_utf8_unchecked(path) };
         
         // List all files
-        let list_len = unsafe { list_dir("/", &mut LIST_BUF) };
+        let list_len = unsafe { list_dir("/", &mut *addr_of_mut!(LIST_BUF)) };
         let Some(list_len) = list_len else { return };
         
         // Build prefix for matching
         let prefix_len = path.len() + 1; // path + "/"
         
         // Collect children matching this prefix
-        let list_data = unsafe { &LIST_BUF[..list_len] };
+        let list_data = unsafe { &(*addr_of!(LIST_BUF))[..list_len] };
         let mut children: [([u8; 512], usize); 64] = [([0u8; 512], 0); 64];
         let mut child_count = 0;
         

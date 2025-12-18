@@ -5,6 +5,7 @@
 //! - (Legacy) VirtIO GPU
 
 use alloc::boxed::Box;
+use core::ptr::addr_of_mut;
 
 /// Pixel format for framebuffer
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +102,7 @@ pub unsafe fn init_display_device(device: Box<dyn DisplayDevice>) {
 
 /// Get a mutable reference to the global display device
 pub fn display_device_mut() -> Option<&'static mut dyn DisplayDevice> {
-    unsafe { DISPLAY_DEVICE.as_mut().map(|d| d.as_mut()) }
+    unsafe { (*addr_of_mut!(DISPLAY_DEVICE)).as_mut().map(|d| d.as_mut()) }
 }
 
 /// Get display resolution
