@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.47](https://github.com/trust0-project/havy-os/compare/v0.1.46...v0.1.47) (2025-12-18)
+
+
+### Bug Fixes
+
+* netd on hart0 for direct hardware access ([cecf8ff](https://github.com/trust0-project/havy-os/commit/cecf8fff3225ad3e257f16f3051e771eb5bfa073))
+
 ## [0.1.46](https://github.com/trust0-project/havy-os/compare/v0.1.45...v0.1.46) (2025-12-18)
 
 
