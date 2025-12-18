@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.46](https://github.com/trust0-project/havy-os/compare/v0.1.45...v0.1.46) (2025-12-18)
+
+
+### Bug Fixes
+
+* havy os improvement ([2590732](https://github.com/trust0-project/havy-os/commit/25907322c90191f7eaca2361eba31e6bcd2ab0e3))
+
 ## [0.1.45](https://github.com/trust0-project/havy-os/compare/v0.1.44...v0.1.45) (2025-12-18)
 
 
