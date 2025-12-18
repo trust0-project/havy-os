@@ -3,6 +3,8 @@
 //! Driver for the Goodix GT911 touchscreen controller on D1 platforms.
 //! Uses simplified MMIO interface matching the emulator's d1_touch device.
 //!
+//! Thread-safe: All state is protected by a Spinlock, allowing any hart to poll.
+//!
 //! # Registers (emulator-specific MMIO at 0x0250_2000)
 //! - 0x100: INT status (1 = touch event pending)
 //! - 0x104: Touch status (bit 7 = data ready, bits 0-3 = touch count)
@@ -13,6 +15,7 @@
 //! - 0x118: Y resolution
 
 use core::ptr::{read_volatile, write_volatile};
+use crate::Spinlock;
 
 // D1 I2C2 base (where GT911 touch controller is attached)
 const D1_I2C2_BASE: usize = 0x0250_2000;
@@ -66,16 +69,62 @@ impl InputEvent {
     }
 }
 
-/// Touch state
-static mut TOUCH_PRESSED: bool = false;
-/// Use -1 to ensure first touch always generates position events
-static mut LAST_X: i32 = -1;
-static mut LAST_Y: i32 = -1;
-static mut EVENTS: [Option<InputEvent>; 16] = [None; 16];
-static mut EVENT_HEAD: usize = 0;
-static mut EVENT_TAIL: usize = 0;
-/// Track if we've ever received a touch event (for debugging)
-static mut TOUCH_EVENT_COUNT: u32 = 0;
+/// Touch driver state - protected by Spinlock for thread safety
+struct TouchState {
+    /// Whether touch is currently pressed
+    pressed: bool,
+    /// Last X coordinate (-1 = unset)
+    last_x: i32,
+    /// Last Y coordinate (-1 = unset)
+    last_y: i32,
+    /// Event queue (circular buffer)
+    events: [Option<InputEvent>; 16],
+    /// Queue head (next write position)
+    head: usize,
+    /// Queue tail (next read position)
+    tail: usize,
+    /// Total events processed (for debugging)
+    event_count: u32,
+}
+
+impl TouchState {
+    const fn new() -> Self {
+        Self {
+            pressed: false,
+            last_x: -1,
+            last_y: -1,
+            events: [None; 16],
+            head: 0,
+            tail: 0,
+            event_count: 0,
+        }
+    }
+
+    fn push_event(&mut self, event: InputEvent) {
+        let next = (self.head + 1) % 16;
+        if next != self.tail {
+            self.events[self.head] = Some(event);
+            self.head = next;
+        }
+    }
+
+    fn pop_event(&mut self) -> Option<InputEvent> {
+        if self.tail == self.head {
+            return None;
+        }
+        let event = self.events[self.tail];
+        self.events[self.tail] = None;
+        self.tail = (self.tail + 1) % 16;
+        event
+    }
+
+    fn has_events(&self) -> bool {
+        self.tail != self.head
+    }
+}
+
+/// Global touch state protected by Spinlock
+static TOUCH_STATE: Spinlock<TouchState> = Spinlock::new(TouchState::new());
 
 /// Read a 32-bit register
 fn read_reg(addr: usize) -> u32 {
@@ -85,17 +134,6 @@ fn read_reg(addr: usize) -> u32 {
 /// Write a 32-bit register
 fn write_reg(addr: usize, value: u32) {
     unsafe { write_volatile(addr as *mut u32, value) }
-}
-
-/// Push an event to the event queue
-fn push_event(event: InputEvent) {
-    unsafe {
-        let next = (EVENT_HEAD + 1) % 16;
-        if next != EVENT_TAIL {
-            EVENTS[EVENT_HEAD] = Some(event);
-            EVENT_HEAD = next;
-        }
-    }
 }
 
 /// Initialize the GT911 touchscreen driver
@@ -112,6 +150,7 @@ pub fn init() -> Result<(), &'static str> {
 }
 
 /// Poll for touch events and queue them
+/// Thread-safe: can be called from any hart
 pub fn poll() {
     let int_status = read_reg(TOUCH_INT_STATUS);
     if int_status == 0 {
@@ -126,66 +165,64 @@ pub fn poll() {
         let x = read_reg(TOUCH_X) as i32;
         let y = read_reg(TOUCH_Y) as i32;
         
-        unsafe {
-            TOUCH_EVENT_COUNT = TOUCH_EVENT_COUNT.wrapping_add(1);
+        let mut state = TOUCH_STATE.lock();
+        state.event_count = state.event_count.wrapping_add(1);
+        
+        if touch_count > 0 {
+            // Touch is active
+            // IMPORTANT: Send position events FIRST so UI has correct coords when handling button
+            let is_new_touch = !state.pressed;
             
-            if touch_count > 0 {
-                // Touch is active
-                // IMPORTANT: Send position events FIRST so UI has correct coords when handling button
-                // For new touches, ALWAYS send both coordinates to ensure cursor is positioned correctly
-                let is_new_touch = !TOUCH_PRESSED;
-                
-                if x != LAST_X || is_new_touch {
-                    LAST_X = x;
-                    push_event(InputEvent {
-                        event_type: EV_ABS,
-                        code: ABS_X,
-                        value: x,
-                    });
-                }
-                if y != LAST_Y || is_new_touch {
-                    LAST_Y = y;
-                    push_event(InputEvent {
-                        event_type: EV_ABS,
-                        code: ABS_Y,
-                        value: y,
-                    });
-                }
-                
-                // Now send button press after position is set
-                if is_new_touch {
-                    // New touch - send BTN_TOUCH press
-                    TOUCH_PRESSED = true;
-                    push_event(InputEvent {
-                        event_type: EV_KEY,
-                        code: BTN_TOUCH,
-                        value: 1,
-                    });
-                }
-                
-                // Sync event
-                push_event(InputEvent {
+            if x != state.last_x || is_new_touch {
+                state.last_x = x;
+                state.push_event(InputEvent {
+                    event_type: EV_ABS,
+                    code: ABS_X,
+                    value: x,
+                });
+            }
+            if y != state.last_y || is_new_touch {
+                state.last_y = y;
+                state.push_event(InputEvent {
+                    event_type: EV_ABS,
+                    code: ABS_Y,
+                    value: y,
+                });
+            }
+            
+            // Now send button press after position is set
+            if is_new_touch {
+                state.pressed = true;
+                state.push_event(InputEvent {
+                    event_type: EV_KEY,
+                    code: BTN_TOUCH,
+                    value: 1,
+                });
+            }
+            
+            // Sync event
+            state.push_event(InputEvent {
+                event_type: EV_SYN,
+                code: 0,
+                value: 0,
+            });
+        } else {
+            // No touch - release if was pressed
+            if state.pressed {
+                state.pressed = false;
+                state.push_event(InputEvent {
+                    event_type: EV_KEY,
+                    code: BTN_TOUCH,
+                    value: 0,
+                });
+                state.push_event(InputEvent {
                     event_type: EV_SYN,
                     code: 0,
                     value: 0,
                 });
-            } else {
-                // No touch - release if was pressed
-                if TOUCH_PRESSED {
-                    TOUCH_PRESSED = false;
-                    push_event(InputEvent {
-                        event_type: EV_KEY,
-                        code: BTN_TOUCH,
-                        value: 0,
-                    });
-                    push_event(InputEvent {
-                        event_type: EV_SYN,
-                        code: 0,
-                        value: 0,
-                    });
-                }
             }
         }
+        // Lock released here
         
         // Clear buffer ready flag
         write_reg(TOUCH_STATUS, 0);
@@ -197,24 +234,16 @@ pub fn poll() {
 
 /// Get the number of touch events processed (for debugging)
 pub fn get_event_count() -> u32 {
-    unsafe { TOUCH_EVENT_COUNT }
+    TOUCH_STATE.lock().event_count
 }
 
 /// Get the next event from the queue
+/// Thread-safe: can be called from any hart
 pub fn next_event() -> Option<InputEvent> {
-    unsafe {
-        if EVENT_TAIL == EVENT_HEAD {
-            return None;
-        }
-        
-        let event = EVENTS[EVENT_TAIL];
-        EVENTS[EVENT_TAIL] = None;
-        EVENT_TAIL = (EVENT_TAIL + 1) % 16;
-        event
-    }
+    TOUCH_STATE.lock().pop_event()
 }
 
 /// Check if there are pending events
 pub fn has_events() -> bool {
-    unsafe { EVENT_TAIL != EVENT_HEAD }
+    TOUCH_STATE.lock().has_events()
 }

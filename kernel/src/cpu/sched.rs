@@ -226,11 +226,7 @@ impl Scheduler {
             &alloc::format!("Spawned '{}' (PID {}) on CPU {}", name, pid, target_cpu),
         );
         
-        // Send IPI to wake target CPU if not BSP
-        if target_cpu != 0 {
-            crate::send_ipi(target_cpu);
-        }
-        
+        // IPI to wake target CPU is handled by enqueue()
         pid
     }
 
@@ -273,11 +269,7 @@ impl Scheduler {
             &alloc::format!("Spawned daemon '{}' (PID {}) on CPU {}", name, pid, target_cpu),
         );
         
-        // Wake target CPU
-        if target_cpu != 0 {
-            crate::send_ipi(target_cpu);
-        }
-        
+        // IPI to wake target CPU is handled by enqueue()
         pid
     }
 
@@ -292,6 +284,17 @@ impl Scheduler {
     fn enqueue(&self, cpu_id: usize, process: Arc<Process>) {
         let cpu = cpu_id.min(self.num_cpus() - 1);
         self.queues[cpu].lock().enqueue(process);
+        
+        // Wake target CPU if it's idle (sleeping in WFI)
+        // Skip if target is current hart (we're already running, no need to IPI self)
+        let current_hart = crate::get_hart_id();
+        if cpu != current_hart {
+            if let Some(cpu_info) = CPU_TABLE.get(cpu) {
+                if cpu_info.is_idle() {
+                    crate::send_ipi(cpu);
+                }
+            }
+        }
     }
 
     /// Pick next process to run on a CPU
