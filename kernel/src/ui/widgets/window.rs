@@ -144,7 +144,7 @@ impl Window {
     
     /// Draw window with batch rendering (faster, but simpler style without rounded corners)
     /// Returns the content area for rendering content inside
-    pub fn draw_fast(&self, gpu: &mut crate::d1_display::GpuDriver) -> WindowContentArea {
+    pub fn draw_fast(&self, gpu: &mut crate::platform::d1_display::GpuDriver) -> WindowContentArea {
         const TITLE_BAR_HEIGHT: u32 = 32;
         
         // Window background - use direct fill_rect for batch rendering

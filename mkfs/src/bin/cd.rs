@@ -12,6 +12,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::syscalls::{arg_count, arg_get, cwd_set, print};
 
     // Static buffer to avoid runtime memory.fill
@@ -27,7 +28,7 @@ mod wasm {
         }
 
         // Get the path argument
-        let len = unsafe { arg_get(0, BUF.as_mut_ptr(), 128) };
+        let len = unsafe { arg_get(0, (*addr_of_mut!(BUF)).as_mut_ptr(), 128) };
         
         if len <= 0 {
             unsafe { cwd_set(b"/".as_ptr(), 1) };
@@ -38,24 +39,25 @@ mod wasm {
         
         // Handle special cases
         unsafe {
-            if len == 1 && BUF[0] == b'~' {
+            let buf = &*addr_of!(BUF);
+            if len == 1 && buf[0] == b'~' {
                 cwd_set(b"/".as_ptr(), 1);
                 return;
             }
             
-            if len == 1 && BUF[0] == b'-' {
+            if len == 1 && buf[0] == b'-' {
                 let msg = b"cd: OLDPWD not set\n";
                 print(msg.as_ptr(), msg.len());
                 return;
             }
 
             // Try to change directory - kernel handles path resolution
-            let result = cwd_set(BUF.as_ptr(), len as i32);
+            let result = cwd_set(buf.as_ptr(), len as i32);
             
             if result != 0 {
                 let err = b"\x1b[1;31mcd:\x1b[0m ";
                 print(err.as_ptr(), err.len());
-                print(BUF.as_ptr(), len);
+                print(buf.as_ptr(), len);
                 let msg = b": No such directory\n";
                 print(msg.as_ptr(), msg.len());
             }

@@ -11,6 +11,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{
         console_log, is_net_available, resolve_dns, get_net_info, format_ipv4,
         argc, argv,
@@ -34,7 +35,7 @@ mod wasm {
         }
 
         // Get hostname argument (arg 0 since command name is not passed)
-        let arg_len = unsafe { argv(0, &mut ARG_BUF) };
+        let arg_len = unsafe { argv(0, &mut *addr_of_mut!(ARG_BUF)) };
         let Some(arg_len) = arg_len else {
             console_log("Error: Could not read argument\n");
             return;
@@ -43,7 +44,7 @@ mod wasm {
         // Trim whitespace
         let mut trimmed_len = arg_len;
         while trimmed_len > 0 {
-            let b = unsafe { ARG_BUF[trimmed_len - 1] };
+            let b = unsafe { (*addr_of!(ARG_BUF))[trimmed_len - 1] };
             if b == b' ' || b == b'\t' {
                 trimmed_len -= 1;
             } else {
@@ -51,16 +52,16 @@ mod wasm {
             }
         }
 
-        let hostname = unsafe { &ARG_BUF[..trimmed_len] };
+        let hostname = unsafe { &(*addr_of!(ARG_BUF))[..trimmed_len] };
         let hostname_str = unsafe { core::str::from_utf8_unchecked(hostname) };
 
         console_log("\n");
 
         // Show DNS server
         if let Some(info) = get_net_info() {
-            let dns_len = unsafe { format_ipv4(&info.dns, &mut IP_BUF) };
+            let dns_len = unsafe { format_ipv4(&info.dns, &mut *addr_of_mut!(IP_BUF)) };
             console_log("\x1b[1;33mServer:\x1b[0m  ");
-            unsafe { print_bytes(&IP_BUF[..dns_len]) };
+            unsafe { print_bytes(&(*addr_of!(IP_BUF))[..dns_len]) };
             console_log("\n");
         } else {
             console_log("\x1b[1;33mServer:\x1b[0m  8.8.8.8\n");
@@ -79,9 +80,9 @@ mod wasm {
             print_bytes(hostname);
             console_log("\n");
 
-            let ip_len = unsafe { format_ipv4(&ip_bytes, &mut IP_BUF) };
+            let ip_len = unsafe { format_ipv4(&ip_bytes, &mut *addr_of_mut!(IP_BUF)) };
             console_log("\x1b[1;32mAddress:\x1b[0m \x1b[1;97m");
-            unsafe { print_bytes(&IP_BUF[..ip_len]) };
+            unsafe { print_bytes(&(*addr_of!(IP_BUF))[..ip_len]) };
             console_log("\x1b[0m\n\n");
         } else {
             console_log("\n");

@@ -13,6 +13,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{
         console_log, get_time, get_heap_stats, get_hart_count, get_ps_list,
         get_version, print_int, argc, argv, sleep,
@@ -59,14 +60,14 @@ mod wasm {
         let arg_count = argc();
         let mut i = 0;
         while i < arg_count {
-            let len = unsafe { argv(i, &mut ARG_BUF) };
+            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
             if let Some(len) = len {
-                let arg = unsafe { &ARG_BUF[..len] };
+                let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                 if arg == b"-n" {
                     i += 1;
                     if i < arg_count {
-                        if let Some(n_len) = unsafe { argv(i, &mut ARG_BUF) } {
-                            iterations = parse_usize(unsafe { &ARG_BUF[..n_len] });
+                        if let Some(n_len) = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) } {
+                            iterations = parse_usize(unsafe { &(*addr_of!(ARG_BUF))[..n_len] });
                             if iterations == 0 {
                                 iterations = 1;
                             }
@@ -101,14 +102,14 @@ mod wasm {
         let harts = get_hart_count();
 
         // Get version
-        let version_len = unsafe { get_version(&mut VERSION_BUF).unwrap_or(0) };
+        let version_len = unsafe { get_version(&mut *addr_of_mut!(VERSION_BUF)).unwrap_or(0) };
 
         // Header
         if batch_mode {
             console_log("===================================================================\n");
             console_log("BAVY OS v");
             if version_len > 0 {
-                unsafe { print_bytes(&VERSION_BUF[..version_len]) };
+                unsafe { print_bytes(&(*addr_of!(VERSION_BUF))[..version_len]) };
             }
             console_log(" - ");
             print_uptime(uptime / 1000);
@@ -119,7 +120,7 @@ mod wasm {
             console_log("\x1b[1;36m===================================================================\x1b[0m\n");
             console_log("\x1b[1;97m BAVY OS v");
             if version_len > 0 {
-                unsafe { print_bytes(&VERSION_BUF[..version_len]) };
+                unsafe { print_bytes(&(*addr_of!(VERSION_BUF))[..version_len]) };
             }
             console_log("\x1b[0m - ");
             print_uptime(uptime / 1000);
@@ -160,9 +161,9 @@ mod wasm {
         }
 
         // Get and parse tasks
-        let ps_len = unsafe { get_ps_list(&mut PS_BUF) };
+        let ps_len = unsafe { get_ps_list(&mut *addr_of_mut!(PS_BUF)) };
         let task_count = if let Some(ps_len) = ps_len {
-            parse_tasks(unsafe { &PS_BUF[..ps_len] })
+            parse_tasks(unsafe { &(*addr_of!(PS_BUF))[..ps_len] })
         } else {
             0
         };

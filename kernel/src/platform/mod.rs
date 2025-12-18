@@ -1,23 +1,18 @@
 //! Platform abstraction layer for havy_os
 //!
 //! This module provides platform-specific constants and initialization
-//! for different target hardware:
-//!
-//! - `virt`: QEMU virt machine / riscv-vm emulator (default)
-//! - `d1`: Allwinner D1 / Lichee RV 86
+//! for D1 hardware (real hardware and VM emulation).
 
-#[cfg(feature = "d1")]
 pub mod d1;
 
-#[cfg(not(feature = "d1"))]
-pub mod virt;
+// D1 device drivers
+pub mod d1_display;     // D1 Display Engine driver (for D1 hardware and VM D1 emulation)
+pub mod d1_emac;        // D1 EMAC Ethernet driver (for D1 hardware and VM D1 emulation)
+pub mod d1_mmc;         // D1 MMC/SD card driver
+pub mod d1_touch;       // D1 Touch (GT911) driver
 
-// Re-export the active platform as `current`
-#[cfg(feature = "d1")]
+// Re-export D1 as the active platform
 pub use d1 as current;
-
-#[cfg(not(feature = "d1"))]
-pub use virt as current;
 
 // Common platform trait (future expansion)
 pub trait Platform {

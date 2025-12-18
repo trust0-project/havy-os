@@ -36,9 +36,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-use crate::ipc::{Channel, ChannelId, Message, IPC};
+use crate::cpu::MAX_HARTS;
+use crate::cpu::ipc::{Channel, ChannelId, Message, IPC};
 use crate::Spinlock;
-use crate::MAX_HARTS;
+use crate::services::klogd::{klog_debug, klog_error, klog_info};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // JOB TYPES
@@ -228,7 +229,7 @@ impl WasmService {
 
         self.num_workers.store(num_harts.saturating_sub(1), Ordering::Release);
 
-        crate::klog::klog_info(
+        klog_info(
             "wasm-svc",
             &alloc::format!("WASM service initialized with {} workers", num_harts.saturating_sub(1)),
         );
@@ -288,7 +289,7 @@ impl WasmService {
         // Update queue depth
         self.workers[hart].queue_depth.fetch_add(1, Ordering::Relaxed);
 
-        crate::klog::klog_debug(
+        klog_debug(
             "wasm-svc",
             &alloc::format!("Submitted job {} to hart {}", job_id, hart),
         );
@@ -410,7 +411,7 @@ impl WasmService {
 pub fn worker_entry() {
     let hart_id = crate::get_hart_id();
     
-    crate::klog::klog_info(
+    klog_info(
         "wasm-svc",
         &alloc::format!("WASM worker starting on hart {}", hart_id),
     );
@@ -419,7 +420,7 @@ pub fn worker_entry() {
     let channel = match WASM_SERVICE.get_channel(hart_id) {
         Some(ch) => ch,
         None => {
-            crate::klog::klog_error(
+            klog_error(
                 "wasm-svc",
                 &alloc::format!("Hart {} has no WASM channel", hart_id),
             );
@@ -466,7 +467,7 @@ fn execute_job(hart_id: usize, job: &WasmJob) {
     job.set_status(JobStatus::Running);
     stats.current_job.store(job.id, Ordering::Release);
 
-    crate::klog::klog_debug(
+    klog_debug(
         "wasm-svc",
         &alloc::format!("Hart {} executing job {}", hart_id, job.id),
     );
@@ -486,7 +487,7 @@ fn execute_job(hart_id: usize, job: &WasmJob) {
             stats.jobs_completed.fetch_add(1, Ordering::Relaxed);
             stats.total_exec_time_ms.fetch_add(exec_time, Ordering::Relaxed);
 
-            crate::klog::klog_debug(
+            klog_debug(
                 "wasm-svc",
                 &alloc::format!("Job {} completed in {}ms", job.id, exec_time),
             );
@@ -495,7 +496,7 @@ fn execute_job(hart_id: usize, job: &WasmJob) {
             job.set_error(e);
             stats.jobs_failed.fetch_add(1, Ordering::Relaxed);
 
-            crate::klog::klog_error(
+            klog_error(
                 "wasm-svc",
                 &alloc::format!("Job {} failed: {:?}", job.id, job.get_error()),
             );

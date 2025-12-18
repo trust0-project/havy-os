@@ -1,12 +1,11 @@
 [package]
 name = "kernel"
-version = "0.1.44"
+version = "0.1.43"
 edition = "2021"
 
 [features]
-default = ["virt"]
-virt = []      # QEMU virt / riscv-vm emulator (default)
-d1 = []        # Allwinner D1 / Lichee RV 86 real hardware
+default = []
+# D1/Lichee RV 86 is now the only supported platform
 
 [dependencies]
 riscv = "0.10.1"
@@ -25,8 +24,14 @@ wasmi = { version = "0.44", default-features = false }
 version = "0.8"
 default-features = false
 
-# Font for text rendering
+# Font for text rendering (legacy, ASCII only)
 [dependencies.profont]
+version = "0.7"
+default-features = false
+features = []
+
+# U8g2 fonts for Unicode support (box-drawing, symbols, etc.)
+[dependencies.u8g2-fonts]
 version = "0.7"
 default-features = false
 

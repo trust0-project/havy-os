@@ -11,6 +11,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{console_log, print_int, ps_list};
 
     // Use a static buffer to avoid large stack allocations
@@ -23,7 +24,7 @@ mod wasm {
         console_log("\x1b[90m-----------------------------------------------------\x1b[0m\n");
 
         // Get process list
-        let len = unsafe { ps_list(BUF.as_mut_ptr(), 2048) };
+        let len = unsafe { ps_list((*addr_of_mut!(BUF)).as_mut_ptr(), 2048) };
         
         if len < 0 {
             console_log("\x1b[1;31mError:\x1b[0m Failed to get process list\n");
@@ -31,7 +32,7 @@ mod wasm {
             console_log("\x1b[90m  (no processes)\x1b[0m\n");
         } else {
             // Parse and display each process
-            let data = unsafe { &BUF[..len as usize] };
+            let data = unsafe { &(*addr_of!(BUF))[..len as usize] };
             let mut start = 0;
             
             for i in 0..len as usize {

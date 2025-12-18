@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 
 use embedded_graphics::pixelcolor::RgbColor;
 
-use crate::d1_display;
-use crate::d1_touch::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
+use crate::platform::d1_display;
+use crate::platform::d1_touch::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 
 use super::colors;
 use super::widgets::{Button, Label};
@@ -190,7 +190,7 @@ pub fn with_ui<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut UiManager) -> R,
 {
-    unsafe { UI_MANAGER.as_mut().map(f) }
+    unsafe { (*core::ptr::addr_of_mut!(UI_MANAGER)).as_mut().map(f) }
 }
 
 /// Render and flush the UI

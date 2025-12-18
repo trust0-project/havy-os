@@ -5,7 +5,7 @@
 //! - (Legacy) VirtIO network
 
 use alloc::boxed::Box;
-use alloc::vec::Vec;
+use core::ptr::addr_of_mut;
 
 /// Network device error types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub unsafe fn init_network_device(device: Box<dyn NetworkDevice>) {
 
 /// Get a mutable reference to the global network device
 pub fn network_device_mut() -> Option<&'static mut dyn NetworkDevice> {
-    unsafe { NETWORK_DEVICE.as_mut().map(|d| d.as_mut()) }
+    unsafe { (*addr_of_mut!(NETWORK_DEVICE)).as_mut().map(|d| d.as_mut()) }
 }
 
 /// Get MAC address of the network device

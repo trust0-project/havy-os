@@ -2,13 +2,44 @@ use alloc::{format, string::String, vec, vec::Vec};
 use wasmi::{Caller, Config, Engine, Func, Linker, Module, Store};
 use core::ptr;
 
-use crate::uart;
-use crate::TEST_FINISHER;
+use crate::{SHELL_CMD_STATE, ShellCmdState, clint::get_time_ms, commands::http, constants::TEST_FINISHER, cpu, lock::{self, utils::BLK_DEV}, services::klogd::{KLOG, klog_info}, uart};
 
 /// State to pass to host functions - includes command arguments
 struct WasmContext {
-    args: Vec<String>,
+    args: Vec<String>, 
 }
+
+/// Get shell command info for ps_list (returns: name, pid, cpu (hart), uptime_ms, is_running)
+pub fn get_shell_cmd_info() -> Option<(String, u32, i64, u64, bool)> {
+    let state: lock::SpinlockGuard<'_, ShellCmdState> = SHELL_CMD_STATE.lock();
+    let current_time = get_time_ms() as u64;
+    
+    if state.is_running {
+        // Currently running command - runs on hart 0 (shell hart)
+        let uptime = current_time.saturating_sub(state.start_time);
+        Some((
+            String::from(state.get_name()),
+            state.pid,
+            0i64,  // Shell commands run on hart 0
+            uptime,
+            true,
+        ))
+    } else if state.name_len > 0 {
+        // Last command finished - show shell as not on any hart
+        let uptime = current_time.saturating_sub(state.session_start);
+        Some((
+            String::from("shell"),
+            0,
+            -1i64, // Not running on any hart
+            uptime,
+            false,
+        ))
+    } else {
+        None
+    }
+}
+
+
 
 /// Execute a WASM binary with the given arguments
 pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
@@ -157,7 +188,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
-                    let cwd = crate::cwd_get();
+                    let cwd = crate::utils::cwd_get();
                     let bytes = cwd.as_bytes();
                     if bytes.len() > buf_len as usize {
                         return -1;
@@ -186,7 +217,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let fs_guard = crate::FS_STATE.read();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_ref(), blk_guard.as_mut())
                                 {
@@ -223,7 +254,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let fs_guard = crate::FS_STATE.read();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_ref(), blk_guard.as_mut())
                                 {
@@ -267,7 +298,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -293,7 +324,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
                     let mut fs_guard = crate::FS_STATE.write();
-                    let mut blk_guard = crate::BLK_DEV.write();
+                    let mut blk_guard = BLK_DEV.write();
                     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
                         let files = fs.list_dir(dev, "/");
                         // Format as simple newline-separated list: "name:size\n"
@@ -334,7 +365,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                  buf_len: i32|
                  -> i32 {
                     let count = (count as usize).max(1).min(100);
-                    let entries = crate::klog::KLOG.recent(count);
+                    let entries = KLOG.recent(count);
                     let mut output = String::new();
                     for entry in entries.iter().rev() {
                         output.push_str(&entry.format_colored());
@@ -356,21 +387,14 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define klog_get: {:?}", e))?;
 
     // Syscall: net_available() -> i32
-    // Check both VirtIO and D1 EMAC network states
+    // Check network state
     linker
         .define(
             "env",
             "net_available",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
-                // Check VirtIO first
                 let net_guard = crate::NET_STATE.lock();
                 if net_guard.is_some() {
-                    return 1;
-                }
-                drop(net_guard);
-                // Fallback to D1 EMAC
-                let d1_guard = crate::D1_NET_STATE.lock();
-                if d1_guard.is_some() {
                     return 1;
                 }
                 0
@@ -397,7 +421,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             if let Ok(url) = core::str::from_utf8(&url_buf) {
                                 let mut net_guard = crate::NET_STATE.lock();
                                 if let Some(ref mut net) = *net_guard {
-                                    match crate::http::get_follow_redirects(
+                                    match http::get_follow_redirects(
                                         net,
                                         url,
                                         30000,
@@ -445,8 +469,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 // Resolve and validate path before setting
                                 let resolved = crate::resolve_path(path);
-                                if crate::path_exists(&resolved) {
-                                    crate::cwd_set(&resolved);
+                                if crate::utils::path_exists(&resolved) {
+                                    crate::utils::cwd_set(&resolved);
                                     return 0;
                                 }
                             }
@@ -464,7 +488,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .define(
             "env",
             "shutdown",
-            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| {
+            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> () {
                 uart::write_line("");
                 uart::write_line(
                     "\x1b[1;31m+===================================================================+\x1b[0m",
@@ -491,6 +515,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 unsafe {
                     ptr::write_volatile(TEST_FINISHER as *mut u32, 0x5555);
                 }
+                #[allow(clippy::empty_loop)]
                 loop {}
             }),
         )
@@ -518,7 +543,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, host_ptr as usize, &mut host_buf).is_ok() {
                             let dns_server = smoltcp::wire::Ipv4Address::new(8, 8, 8, 8);
                             
-                            // Try VirtIO NetState first
+                            // Use unified NET_STATE (D1)
                             let mut net_guard = crate::NET_STATE.lock();
                             if let Some(ref mut net) = *net_guard {
                                 if let Some(ip) = crate::dns::resolve(
@@ -530,23 +555,6 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                                 ) {
                                     if mem.write(&mut caller, ip_buf_ptr as usize, &ip.octets()).is_ok() {
                                         return 4;
-                                    }
-                                }
-                            } else {
-                                // VirtIO not available, try D1 EMAC
-                                drop(net_guard);
-                                let mut d1_guard = crate::D1_NET_STATE.lock();
-                                if let Some(ref mut net) = *d1_guard {
-                                    if let Some(ip) = crate::dns::resolve_d1(
-                                        net,
-                                        &host_buf,
-                                        dns_server,
-                                        5000,
-                                        crate::get_time_ms,
-                                    ) {
-                                        if mem.write(&mut caller, ip_buf_ptr as usize, &ip.octets()).is_ok() {
-                                            return 4;
-                                        }
                                     }
                                 }
                             }
@@ -577,7 +585,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -640,7 +648,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(dir_path) = core::str::from_utf8(&path_buf) {
                                 let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -697,7 +705,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -739,7 +747,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                                     "HOME" => Some("/home"),
                                     "PATH" => Some("/usr/bin"),
                                     "PWD" => {
-                                        let cwd = crate::cwd_get();
+                                        let cwd = crate::utils::cwd_get();
                                         let bytes = cwd.as_bytes();
                                         if bytes.len() <= val_len as usize {
                                             if mem.write(&mut caller, val_ptr as usize, bytes).is_ok() {
@@ -1067,7 +1075,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     let mut seen_pids: alloc::collections::BTreeSet<u32> = alloc::collections::BTreeSet::new();
                     
                     // Include the current shell command (which is the one calling ps_list)
-                    if let Some((name, pid, cpu, uptime, is_running)) = crate::get_shell_cmd_info() {
+                    if let Some((name, pid, cpu, uptime, is_running)) = get_shell_cmd_info() {
                         let state = if is_running { "R+" } else { "S" };
                         seen_pids.insert(pid);
                         output.push_str(&format!(
@@ -1090,11 +1098,11 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             proc.name,
                             proc.state.code(),
                             match proc.priority {
-                                crate::process::Priority::Idle => "idle",
-                                crate::process::Priority::Low => "low",
-                                crate::process::Priority::Normal => "normal",
-                                crate::process::Priority::High => "high",
-                                crate::process::Priority::Realtime => "rt",
+                                cpu::process::Priority::Idle => "idle",
+                                cpu::process::Priority::Low => "low",
+                                cpu::process::Priority::Normal => "normal",
+                                cpu::process::Priority::High => "high",
+                                cpu::process::Priority::Realtime => "rt",
                             },
                             cpu,
                             proc.uptime_ms
@@ -1224,19 +1232,12 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, out_ptr: i32| -> i32 {
-                    // Try VirtIO first
+                    // Use unified NET_STATE
                     let net_guard = crate::NET_STATE.lock();
                     let (ip, mac) = if let Some(ref state) = *net_guard {
                         (crate::net::get_my_ip(), state.mac())
                     } else {
-                        drop(net_guard);
-                        // Fallback to D1 EMAC
-                        let d1_guard = crate::D1_NET_STATE.lock();
-                        if let Some(ref state) = *d1_guard {
-                            (crate::net::get_my_ip(), state.mac())
-                        } else {
-                            return -1;
-                        }
+                        return -1;
                     };
                     
                     // Pack: IP (4) + Gateway (4) + DNS (4) + MAC (6) + prefix_len (1) = 19 bytes
@@ -1272,7 +1273,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -1303,7 +1304,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
                                 let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = crate::BLK_DEV.write();
+                                let mut blk_guard = BLK_DEV.write();
                                 if let (Some(fs), Some(dev)) =
                                     (fs_guard.as_mut(), blk_guard.as_mut())
                                 {
@@ -1525,25 +1526,13 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let seq = seq as u16;
                         let timestamp = crate::get_time_ms();
                         
-                        // Track which network backend we're using
-                        let using_d1_emac;
-                        
-                        // Send ping - try VirtIO NET_STATE first, then D1_NET_STATE
+                        // Send ping using unified NET_STATE
                         let send_result = {
                             let mut net_guard = crate::NET_STATE.lock();
                             if let Some(ref mut state) = *net_guard {
-                                using_d1_emac = false;
                                 state.send_ping(target, seq, timestamp)
                             } else {
-                                drop(net_guard);
-                                // Try D1 EMAC
-                                let mut d1_guard = crate::D1_NET_STATE.lock();
-                                if let Some(ref mut state) = *d1_guard {
-                                    using_d1_emac = true;
-                                    state.send_ping(target, seq, timestamp)
-                                } else {
-                                    return -2; // No network available
-                                }
+                                return -2; // No network available
                             }
                         };
                         
@@ -1560,15 +1549,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             }
                             
                             // Poll network and check for reply
-                            let reply = if using_d1_emac {
-                                let mut d1_guard = crate::D1_NET_STATE.lock();
-                                if let Some(ref mut state) = *d1_guard {
-                                    state.poll(now);
-                                    state.check_ping_reply()
-                                } else {
-                                    None
-                                }
-                            } else {
+                            let reply = {
                                 let mut net_guard = crate::NET_STATE.lock();
                                 if let Some(ref mut state) = *net_guard {
                                     state.poll(now);
@@ -1601,104 +1582,6 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define send_ping: {:?}", e))?;
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // GENERIC PARALLEL EXECUTION SYSCALLS
-    // ═══════════════════════════════════════════════════════════════════════════════
-    // 
-    // These syscalls enable generic parallel task execution from WASM:
-    // 1. Primary WASM submits copies of itself to worker harts with range args
-    // 2. Each worker computes its portion and calls parallel_set_result()
-    // 3. Primary waits for jobs and calls parallel_sum_results()
-
-    // Syscall: parallel_set_result(slot: i32, value: i64) -> i32
-    // Store a result value in a slot (0-31). Workers call this to report results.
-    // Returns 0 on success, -1 on invalid slot.
-    linker
-        .define(
-            "env",
-            "parallel_set_result",
-            Func::wrap(
-                &mut store,
-                |_caller: Caller<'_, WasmContext>, slot: i32, value: i64| -> i32 {
-                    if slot < 0 || slot >= crate::PARALLEL_RESULTS.len() as i32 {
-                        return -1;
-                    }
-                    crate::PARALLEL_RESULTS[slot as usize]
-                        .store(value as u64, core::sync::atomic::Ordering::Release);
-                    0
-                },
-            ),
-        )
-        .map_err(|e| format!("define parallel_set_result: {:?}", e))?;
-
-    // Syscall: parallel_get_result(slot: i32) -> i64
-    // Get result value from a slot. Returns 0 if slot invalid.
-    linker
-        .define(
-            "env",
-            "parallel_get_result",
-            Func::wrap(
-                &mut store,
-                |_caller: Caller<'_, WasmContext>, slot: i32| -> i64 {
-                    if slot < 0 || slot >= crate::PARALLEL_RESULTS.len() as i32 {
-                        return 0;
-                    }
-                    crate::PARALLEL_RESULTS[slot as usize]
-                        .load(core::sync::atomic::Ordering::Acquire) as i64
-                },
-            ),
-        )
-        .map_err(|e| format!("define parallel_get_result: {:?}", e))?;
-
-    // Syscall: parallel_sum_results(start_slot: i32, count: i32) -> i64
-    // Sum result values from slots [start_slot, start_slot + count).
-    linker
-        .define(
-            "env",
-            "parallel_sum_results",
-            Func::wrap(
-                &mut store,
-                |_caller: Caller<'_, WasmContext>, start_slot: i32, count: i32| -> i64 {
-                    let mut sum = 0u64;
-                    for i in 0..count {
-                        let slot = start_slot + i;
-                        if slot >= 0 && (slot as usize) < crate::PARALLEL_RESULTS.len() {
-                            sum += crate::PARALLEL_RESULTS[slot as usize]
-                                .load(core::sync::atomic::Ordering::Acquire);
-                        }
-                    }
-                    sum as i64
-                },
-            ),
-        )
-        .map_err(|e| format!("define parallel_sum_results: {:?}", e))?;
-
-    // Syscall: parallel_clear_results() -> ()
-    // Clear all result slots to 0.
-    linker
-        .define(
-            "env",
-            "parallel_clear_results",
-            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| {
-                for slot in crate::PARALLEL_RESULTS.iter() {
-                    slot.store(0, core::sync::atomic::Ordering::Release);
-                }
-            }),
-        )
-        .map_err(|e| format!("define parallel_clear_results: {:?}", e))?;
-
-    // Syscall: parallel_max_slots() -> i32
-    // Returns the maximum number of parallel result slots available.
-    linker
-        .define(
-            "env",
-            "parallel_max_slots",
-            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
-                crate::PARALLEL_RESULTS.len() as i32
-            }),
-        )
-        .map_err(|e| format!("define parallel_max_slots: {:?}", e))?;
-
-    // ═══════════════════════════════════════════════════════════════════════════════
     // TCP SOCKET SYSCALLS - For user-space TCP clients
     // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1715,7 +1598,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
                         let mut ip_buf = [0u8; 4];
                         if mem.read(&caller, ip_ptr as usize, &mut ip_buf).is_ok() {
-                            crate::klog::klog_info("telnet", &alloc::format!(
+                            klog_info("telnet", &alloc::format!(
                                 "tcp_connect to {}.{}.{}.{}:{}",
                                 ip_buf[0], ip_buf[1], ip_buf[2], ip_buf[3], port
                             ));
@@ -1727,11 +1610,11 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                                     Ok(()) => {
                                         // Poll to actually send the SYN packet
                                         net.poll(now);
-                                        crate::klog::klog_info("telnet", "SYN sent");
+                                        klog_info("telnet", "SYN sent");
                                         return 0;
                                     }
                                     Err(e) => {
-                                        crate::klog::klog_info("telnet", &alloc::format!("connect error: {}", e));
+                                        klog_info("telnet", &alloc::format!("connect error: {}", e));
                                     }
                                 }
                             }
@@ -1876,7 +1759,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         static mut LAST_STATE: &str = "";
                         unsafe {
                             if socket_state != LAST_STATE || now - LAST_LOG > 500 {
-                                crate::klog::klog_info("telnet", &alloc::format!(
+                                klog_info("telnet", &alloc::format!(
                                     "client socket state: {}", socket_state
                                 ));
                                 LAST_LOG = now;

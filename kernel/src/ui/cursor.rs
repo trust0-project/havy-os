@@ -2,8 +2,10 @@
 //!
 //! Manages cursor position, visibility, and rendering.
 
-use crate::d1_display;
-use crate::d1_touch::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
+use core::ptr::addr_of_mut;
+
+use crate::platform::d1_display;
+use crate::platform::d1_touch::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 
 use super::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
@@ -29,9 +31,10 @@ pub fn set_cursor_pos(x: i32, y: i32) {
 
 /// Set mouse button state
 pub fn set_mouse_button(button: u16, pressed: bool) {
+    use crate::platform::d1_touch::BTN_TOUCH;
     unsafe {
         let bit = match button {
-            BTN_LEFT => 0,
+            BTN_LEFT | BTN_TOUCH => 0,  // BTN_TOUCH acts like left mouse button
             BTN_RIGHT => 1,
             BTN_MIDDLE => 2,
             _ => return,
@@ -112,7 +115,7 @@ fn save_cursor_backup(x: i32, y: i32) {
     // Use batch read for faster save
     d1_display::with_gpu(|gpu| {
         gpu.read_rect(x as u32, y as u32, CURSOR_W, CURSOR_H, 
-            unsafe { &mut CURSOR_BACKUP });
+            unsafe { &mut *addr_of_mut!(CURSOR_BACKUP) });
     });
     unsafe { CURSOR_BACKUP_VALID = true; }
 }

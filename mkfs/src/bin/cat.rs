@@ -12,6 +12,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{console_log, argc, argv, get_cwd, print_int};
     use mkfs::syscalls::{print, fs_read};
 
@@ -72,13 +73,13 @@ mod wasm {
         // Parse arguments
         for i in 0..arg_count {
             let len = unsafe {
-                match argv(i, &mut ARG_BUF) {
+                match argv(i, &mut *addr_of_mut!(ARG_BUF)) {
                     Some(l) => l,
                     None => continue,
                 }
             };
             
-            let arg = unsafe { &ARG_BUF[..len] };
+            let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
 
             if arg == b"-n" {
                 show_line_numbers = true;
@@ -97,7 +98,7 @@ mod wasm {
 
         // Get filename
         let filename_len = unsafe {
-            match argv(file_idx, &mut ARG_BUF) {
+            match argv(file_idx, &mut *addr_of_mut!(ARG_BUF)) {
                 Some(len) => len,
                 None => {
                     console_log("\x1b[1;31mError:\x1b[0m Invalid filename\n");
@@ -108,22 +109,22 @@ mod wasm {
 
         // Resolve path
         let path_len = unsafe {
-            resolve_path(&ARG_BUF[..filename_len], &mut PATH_BUF)
+            resolve_path(&(*addr_of!(ARG_BUF))[..filename_len], &mut *addr_of_mut!(PATH_BUF))
         };
 
         // Read file
         let read_len = unsafe {
-            fs_read(PATH_BUF.as_ptr(), path_len as i32, CONTENT_BUF.as_mut_ptr(), CONTENT_BUF.len() as i32)
+            fs_read((*addr_of!(PATH_BUF)).as_ptr(), path_len as i32, (*addr_of_mut!(CONTENT_BUF)).as_mut_ptr(), (*addr_of!(CONTENT_BUF)).len() as i32)
         };
 
         if read_len < 0 {
             console_log("\x1b[1;31mError:\x1b[0m File not found: ");
-            unsafe { print(PATH_BUF.as_ptr(), path_len) };
+            unsafe { print((*addr_of!(PATH_BUF)).as_ptr(), path_len) };
             console_log("\n");
             return;
         }
 
-        let content = unsafe { &CONTENT_BUF[..read_len as usize] };
+        let content = unsafe { &(*addr_of!(CONTENT_BUF))[..read_len as usize] };
 
         if show_line_numbers {
             let mut line_num = 1usize;

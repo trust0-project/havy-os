@@ -3,6 +3,8 @@
 //! This module handles TCP sequence/acknowledgment number patching for both
 //! server and client roles to work around issues with smoltcp's ACK handling.
 
+use core::ptr::{addr_of, addr_of_mut};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // PER-PORT SERVER TCP PATCHING STATE
 // Supports multiple concurrent server connections on different ports
@@ -69,13 +71,13 @@ pub static mut SERVER_PATCHING: [ServerPatchingState; MAX_SERVER_PATCHING_PORTS]
 pub fn get_server_patching(port: u16) -> Option<&'static mut ServerPatchingState> {
     unsafe {
         // First, look for existing entry for this port
-        for state in SERVER_PATCHING.iter_mut() {
+        for state in (*addr_of_mut!(SERVER_PATCHING)).iter_mut() {
             if state.active && state.port == port {
                 return Some(state);
             }
         }
         // If not found, allocate a new slot
-        for state in SERVER_PATCHING.iter_mut() {
+        for state in (*addr_of_mut!(SERVER_PATCHING)).iter_mut() {
             if !state.active {
                 state.port = port;
                 state.active = true;
@@ -89,21 +91,21 @@ pub fn get_server_patching(port: u16) -> Option<&'static mut ServerPatchingState
 /// Find existing patching state for a port (read-only check)
 pub fn find_server_patching(port: u16) -> Option<&'static ServerPatchingState> {
     unsafe {
-        SERVER_PATCHING.iter().find(|s| s.active && s.port == port)
+        (*addr_of!(SERVER_PATCHING)).iter().find(|s| s.active && s.port == port)
     }
 }
 
 /// Find existing patching state for a port (mutable)
 pub fn find_server_patching_mut(port: u16) -> Option<&'static mut ServerPatchingState> {
     unsafe {
-        SERVER_PATCHING.iter_mut().find(|s| s.active && s.port == port)
+        (*addr_of_mut!(SERVER_PATCHING)).iter_mut().find(|s| s.active && s.port == port)
     }
 }
 
 /// Reset patching state for a specific server port
 pub fn reset_server_patching_for_port(port: u16) {
     unsafe {
-        for state in SERVER_PATCHING.iter_mut() {
+        for state in (*addr_of_mut!(SERVER_PATCHING)).iter_mut() {
             if state.active && state.port == port {
                 state.reset();
                 break;
@@ -146,7 +148,7 @@ pub fn reset_client_patching_state() {
 /// Reset SERVER role TCP patching state for ALL ports (legacy function, avoid using)
 pub fn reset_server_patching_state() {
     unsafe {
-        for state in SERVER_PATCHING.iter_mut() {
+        for state in (*addr_of_mut!(SERVER_PATCHING)).iter_mut() {
             state.reset();
         }
     }

@@ -11,6 +11,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{
         console_log, get_time, get_hart_count, get_worker_count,
         get_heap_stats, print_int, ps_list,
@@ -111,10 +112,10 @@ mod wasm {
         console_log("\x1b[1;36m|\x1b[0m  \x1b[90m--------------------------------------------------------------------\x1b[0m  \x1b[1;36m|\x1b[0m\n");
 
         // Get process list
-        let ps_len = unsafe { ps_list(PS_BUF.as_mut_ptr(), 2048) };
+        let ps_len = unsafe { ps_list((*addr_of_mut!(PS_BUF)).as_mut_ptr(), 2048) };
         
         if ps_len > 0 {
-            let data = unsafe { &PS_BUF[..ps_len as usize] };
+            let data = unsafe { &(*addr_of!(PS_BUF))[..ps_len as usize] };
             let mut start = 0;
             let mut count = 0;
             

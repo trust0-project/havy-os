@@ -11,6 +11,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{
         console_log, get_time, get_heap_stats, get_net_info, is_fs_available,
         is_net_available, format_ipv4, print_int, get_version,
@@ -24,7 +25,7 @@ mod wasm {
     pub extern "C" fn _start() {
         // Get version
         let version_len = unsafe { 
-            if let Some(len) = get_version(&mut VERSION_BUF) {
+            if let Some(len) = get_version(&mut *addr_of_mut!(VERSION_BUF)) {
                 len
             } else {
                 0
@@ -42,7 +43,7 @@ mod wasm {
         // Kernel version
         console_log("\x1b[1;35m|\x1b[0m  Kernel:       \x1b[1;97mBAVY OS v");
         if version_len > 0 {
-            unsafe { print_bytes(&VERSION_BUF[..version_len]) };
+            unsafe { print_bytes(&(*addr_of!(VERSION_BUF))[..version_len]) };
         } else {
             console_log("?");
         }
@@ -60,9 +61,9 @@ mod wasm {
         // Network status
         if is_net_available() {
             if let Some(info) = get_net_info() {
-                let ip_len = unsafe { format_ipv4(&info.ip, &mut IP_BUF) };
+                let ip_len = unsafe { format_ipv4(&info.ip, &mut *addr_of_mut!(IP_BUF)) };
                 console_log("\x1b[1;35m|\x1b[0m  Network:      \x1b[1;32m* Online\x1b[0m  IP: \x1b[1;97m");
-                unsafe { print_bytes(&IP_BUF[..ip_len]) };
+                unsafe { print_bytes(&(*addr_of!(IP_BUF))[..ip_len]) };
                 console_log("\x1b[0m");
                 pad_spaces(29 - ip_len.min(29));
                 console_log("\x1b[1;35m|\x1b[0m\n");

@@ -164,22 +164,6 @@ pub mod syscalls {
         pub fn send_ping(ip_ptr: *const u8, seq: i32, timeout_ms: i32, out_ptr: *mut u8) -> i32;
         
         // ═══════════════════════════════════════════════════════════════════
-        // Generic Parallel Execution Syscalls
-        // ═══════════════════════════════════════════════════════════════════
-        
-        /// Store a result value in a slot (0-31). Workers call this to report results.
-        /// Returns 0 on success, -1 on invalid slot.
-        pub fn parallel_set_result(slot: i32, value: i64) -> i32;
-        /// Get result value from a slot. Returns 0 if slot invalid.
-        pub fn parallel_get_result(slot: i32) -> i64;
-        /// Sum result values from slots [start_slot, start_slot + count).
-        pub fn parallel_sum_results(start_slot: i32, count: i32) -> i64;
-        /// Clear all result slots to 0.
-        pub fn parallel_clear_results();
-        /// Returns the maximum number of parallel result slots available.
-        pub fn parallel_max_slots() -> i32;
-        
-        // ═══════════════════════════════════════════════════════════════════
         // TCP Socket Syscalls
         // ═══════════════════════════════════════════════════════════════════
         
@@ -768,55 +752,6 @@ pub mod syscalls {
         17
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Generic Parallel Execution Helpers
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// Set a parallel result in a slot (for workers)
-    pub fn set_parallel_result(slot: usize, value: u64) -> bool {
-        unsafe { parallel_set_result(slot as i32, value as i64) == 0 }
-    }
-
-    /// Get a parallel result from a slot
-    pub fn get_parallel_result(slot: usize) -> u64 {
-        unsafe { parallel_get_result(slot as i32) as u64 }
-    }
-
-    /// Sum parallel results from slots [start, start + count)
-    pub fn sum_parallel_results(start: usize, count: usize) -> u64 {
-        unsafe { parallel_sum_results(start as i32, count as i32) as u64 }
-    }
-
-    /// Clear all parallel result slots
-    pub fn clear_parallel_results() {
-        unsafe { parallel_clear_results() }
-    }
-
-    /// Get maximum number of parallel slots
-    pub fn max_parallel_slots() -> usize {
-        unsafe { parallel_max_slots() as usize }
-    }
-
-    /// Calculate work range for a worker given total range and worker info
-    pub fn calculate_work_range(
-        total_start: u64,
-        total_end: u64,
-        worker_id: usize,
-        num_workers: usize,
-    ) -> (u64, u64) {
-        let total_work = total_end - total_start;
-        let chunk_size = total_work / num_workers as u64;
-        let remainder = total_work % num_workers as u64;
-        
-        // Distribute remainder among first workers
-        let start = total_start + (worker_id as u64) * chunk_size 
-            + (worker_id as u64).min(remainder);
-        let extra = if (worker_id as u64) < remainder { 1 } else { 0 };
-        let end = start + chunk_size + extra;
-        
-        (start, end.min(total_end))
-    }
-
     /// Print an integer
     pub fn print_int(n: i64) {
         let mut buf = [0u8; 20];
@@ -972,9 +907,6 @@ pub use syscalls::{
     version, fs_available, net_info, fs_remove, fs_is_dir,
     service_list_defs, service_list_running, service_start, service_stop,
     service_restart, service_status, send_ping,
-    // Parallel execution syscalls
-    parallel_set_result, parallel_get_result, parallel_sum_results,
-    parallel_clear_results, parallel_max_slots,
     // TCP and console syscalls
     tcp_connect, tcp_send, tcp_recv, tcp_close, tcp_status,
     console_available, console_read,
@@ -989,9 +921,6 @@ pub use syscalls::{
     get_version, is_fs_available, get_net_info, remove_file, is_dir,
     get_service_defs, get_running_services, start_service, stop_service,
     restart_service, get_service_status, ping, format_mac,
-    // Parallel execution helpers
-    set_parallel_result, get_parallel_result, sum_parallel_results,
-    clear_parallel_results, max_parallel_slots, calculate_work_range,
     // TCP and console helpers
     tcp_connect_ip, tcp_send_data, tcp_recv_data, tcp_disconnect, tcp_get_status,
     is_console_available, read_console,

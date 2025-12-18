@@ -12,6 +12,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{console_log, get_net_info, format_ipv4, format_mac, is_net_available, argc, argv};
 
     // Static buffers
@@ -24,10 +25,10 @@ mod wasm {
         // Check for "addr" argument (or no args = show addr)
         // Note: arg 0 is the first arg since command name is not passed
         let show_addr = if argc() > 0 {
-            let arg_len = unsafe { argv(0, &mut ARG_BUF) };
+            let arg_len = unsafe { argv(0, &mut *addr_of_mut!(ARG_BUF)) };
             match arg_len {
                 Some(len) if len <= 4 => {
-                    let arg = unsafe { &ARG_BUF[..len] };
+                    let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
                     arg == b"addr"
                 }
                 _ => false,
@@ -57,16 +58,16 @@ mod wasm {
         console_log("\x1b[1;34m+-------------------------------------------------------------+\x1b[0m\n");
 
         // MAC address
-        let mac_len = unsafe { format_mac(&info.mac, &mut MAC_BUF) };
+        let mac_len = unsafe { format_mac(&info.mac, &mut *addr_of_mut!(MAC_BUF)) };
         console_log("\x1b[1;34m|\x1b[0m  \x1b[1;33mlink/ether\x1b[0m  ");
-        unsafe { print_bytes(&MAC_BUF[..mac_len]) };
+        unsafe { print_bytes(&(*addr_of!(MAC_BUF))[..mac_len]) };
         pad_spaces(47 - mac_len.min(47));
         console_log("\x1b[1;34m|\x1b[0m\n");
 
         // IP address
-        let ip_len = unsafe { format_ipv4(&info.ip, &mut IP_BUF) };
+        let ip_len = unsafe { format_ipv4(&info.ip, &mut *addr_of_mut!(IP_BUF)) };
         console_log("\x1b[1;34m|\x1b[0m  \x1b[1;33minet\x1b[0m        ");
-        unsafe { print_bytes(&IP_BUF[..ip_len]) };
+        unsafe { print_bytes(&(*addr_of!(IP_BUF))[..ip_len]) };
         console_log("/");
         print_u8(info.prefix_len);
         let inet_len = ip_len + 1 + digit_count_u8(info.prefix_len);
@@ -74,9 +75,9 @@ mod wasm {
         console_log("\x1b[1;34m|\x1b[0m\n");
 
         // Gateway
-        let gw_len = unsafe { format_ipv4(&info.gateway, &mut IP_BUF) };
+        let gw_len = unsafe { format_ipv4(&info.gateway, &mut *addr_of_mut!(IP_BUF)) };
         console_log("\x1b[1;34m|\x1b[0m  \x1b[1;33mgateway\x1b[0m     ");
-        unsafe { print_bytes(&IP_BUF[..gw_len]) };
+        unsafe { print_bytes(&(*addr_of!(IP_BUF))[..gw_len]) };
         pad_spaces(47 - gw_len.min(47));
         console_log("\x1b[1;34m|\x1b[0m\n");
 

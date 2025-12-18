@@ -13,6 +13,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::addr_of_mut;
     use mkfs::{console_log, argc, argv, get_cwd};
     use mkfs::syscalls::{print, fs_list};
 
@@ -97,7 +98,7 @@ mod wasm {
         }
 
         let list_len = unsafe {
-            let result = fs_list(LIST_BUF.as_mut_ptr(), 4096);
+            let result = fs_list((*addr_of_mut!(LIST_BUF)).as_mut_ptr(), 4096);
             if result < 0 {
                 console_log("\x1b[31mError: filesystem not available\x1b[0m\n");
                 return;

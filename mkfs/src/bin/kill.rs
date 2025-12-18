@@ -12,6 +12,7 @@ extern crate mkfs;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
+    use core::ptr::{addr_of, addr_of_mut};
     use mkfs::{argc, argv, console_log, kill_process, print_int, KillResult};
 
     // Use static buffer to avoid stack overflow
@@ -32,7 +33,7 @@ mod wasm {
 
         // Get the PID argument
         let len = unsafe {
-            match argv(0, &mut PID_BUF) {
+            match argv(0, &mut *addr_of_mut!(PID_BUF)) {
                 Some(l) => l,
                 None => {
                     console_log("\x1b[1;31mError:\x1b[0m Could not read PID argument\n");
@@ -42,7 +43,7 @@ mod wasm {
         };
 
         // Parse the PID
-        let pid_bytes = unsafe { &PID_BUF[..len] };
+        let pid_bytes = unsafe { &(*addr_of!(PID_BUF))[..len] };
         let pid = match parse_pid(pid_bytes) {
             Some(p) => p,
             None => {
