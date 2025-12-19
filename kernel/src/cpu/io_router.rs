@@ -58,6 +58,8 @@ pub enum DeviceType {
     VirtioBlock,
     /// VirtIO network device
     VirtioNet,
+    /// Audio codec (D1 Audio)
+    Audio,
 }
 
 impl DeviceType {
@@ -70,6 +72,7 @@ impl DeviceType {
             DeviceType::Uart => "uart",
             DeviceType::VirtioBlock => "virtio-blk",
             DeviceType::VirtioNet => "virtio-net",
+            DeviceType::Audio => "audio",
         }
     }
 }
@@ -137,6 +140,23 @@ pub enum IoOp {
     NetIsIpAssigned,
     /// Get assigned IP address (returns 4 bytes)
     NetGetIp,
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // Audio operations (for audio_proxy)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// Write an audio sample to the FIFO (32-bit stereo: L[15:0], R[31:16])
+    AudioWriteSample { sample: u32 },
+    /// Enable or disable audio playback
+    AudioSetEnabled { enabled: bool },
+    /// Set sample rate in Hz (e.g., 48000)
+    AudioSetSampleRate { rate: u32 },
+    /// Get current buffer fill level
+    AudioGetBufferLevel,
+    /// Check if buffer is full
+    AudioIsBufferFull,
+    /// Check if buffer is empty
+    AudioIsBufferEmpty,
 }
 
 /// Request ID type
@@ -444,6 +464,7 @@ fn handle_request(request: &IoRequest) -> IoResult {
         DeviceType::Network | DeviceType::VirtioNet => handle_network_request(request),
         DeviceType::Display => handle_display_request(request),
         DeviceType::Uart => handle_uart_request(request),
+        DeviceType::Audio => handle_audio_request(request),
     }
 }
 
@@ -664,6 +685,44 @@ fn handle_display_request(request: &IoRequest) -> IoResult {
             IoResult::Ok(alloc::vec![if has { 1 } else { 0 }])
         }
         _ => IoResult::Err("Display operation not implemented via I/O router"),
+    }
+}
+
+/// Handle audio device requests
+fn handle_audio_request(request: &IoRequest) -> IoResult {
+    match &request.operation {
+        IoOp::AudioWriteSample { sample } => {
+            let success = crate::platform::d1_audio::write_sample(*sample);
+            IoResult::Ok(alloc::vec![if success { 1 } else { 0 }])
+        }
+        IoOp::AudioSetEnabled { enabled } => {
+            crate::platform::d1_audio::set_enabled(*enabled);
+            IoResult::Ok(Vec::new())
+        }
+        IoOp::AudioSetSampleRate { rate } => {
+            crate::platform::d1_audio::set_sample_rate(*rate);
+            IoResult::Ok(Vec::new())
+        }
+        IoOp::AudioGetBufferLevel => {
+            let level = crate::platform::d1_audio::buffer_level();
+            IoResult::Ok(level.to_le_bytes().to_vec())
+        }
+        IoOp::AudioIsBufferFull => {
+            let full = crate::platform::d1_audio::is_buffer_full();
+            IoResult::Ok(alloc::vec![if full { 1 } else { 0 }])
+        }
+        IoOp::AudioIsBufferEmpty => {
+            let empty = crate::platform::d1_audio::is_buffer_empty();
+            IoResult::Ok(alloc::vec![if empty { 1 } else { 0 }])
+        }
+        IoOp::Status => {
+            if crate::platform::d1_audio::is_initialized() {
+                IoResult::Ok(b"online".to_vec())
+            } else {
+                IoResult::Ok(b"offline".to_vec())
+            }
+        }
+        _ => IoResult::Err("Audio operation not implemented via I/O router"),
     }
 }
 

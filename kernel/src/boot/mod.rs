@@ -8,7 +8,8 @@ use crate::boot::{
     memory::init_memory, 
     network::init_network, 
     storage::init_storage, 
-    touch::init_touch, 
+    touch::init_touch,
+    audio::init_audio,
     services::init_services
 };
 
@@ -22,6 +23,7 @@ pub mod memory;
 pub mod gpu;
 pub mod dtb;
 pub mod touch;
+pub mod audio;
 pub mod services;
 
 pub(crate) static BOOT_READY: AtomicBool = AtomicBool::new(false);
@@ -35,6 +37,7 @@ pub fn init_boot() {
     init_storage();
     init_network();
     init_touch();
+    init_audio();
     init_services();
     BOOT_READY.store(true, Ordering::Release);
 }

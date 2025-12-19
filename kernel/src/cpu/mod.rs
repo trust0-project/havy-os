@@ -12,6 +12,7 @@ pub mod io_router;
 pub mod fs_proxy;
 pub mod display_proxy;
 pub mod net_proxy;
+pub mod audio_proxy;
 
 pub(crate) const MAX_HARTS: usize = 128;
 pub(crate) static HARTS_ONLINE: AtomicUsize = AtomicUsize::new(0);

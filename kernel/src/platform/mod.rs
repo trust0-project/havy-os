@@ -10,6 +10,7 @@ pub mod d1_display;     // D1 Display Engine driver (for D1 hardware and VM D1 e
 pub mod d1_emac;        // D1 EMAC Ethernet driver (for D1 hardware and VM D1 emulation)
 pub mod d1_mmc;         // D1 MMC/SD card driver
 pub mod d1_touch;       // D1 Touch (GT911) driver
+pub mod d1_audio;       // D1 Audio codec driver
 
 // Re-export D1 as the active platform
 pub use d1 as current;
