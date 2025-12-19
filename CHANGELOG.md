@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.49](https://github.com/trust0-project/havy-os/compare/v0.1.48...v0.1.49) (2025-12-19)
+
+
+### Bug Fixes
+
+* run gpu on hart0 ([b0a6715](https://github.com/trust0-project/havy-os/commit/b0a6715be2826d39fc30b649ec8994133c3ec0e8))
+
 ## [0.1.48](https://github.com/trust0-project/havy-os/compare/v0.1.47...v0.1.48) (2025-12-19)
 
 
