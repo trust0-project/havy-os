@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.50](https://github.com/trust0-project/havy-os/compare/v0.1.49...v0.1.50) (2025-12-19)
+
+
+### Bug Fixes
+
+* d1 audio device ([a6fd9cf](https://github.com/trust0-project/havy-os/commit/a6fd9cfcd4f6de5eb401a138bf8d7f3a36cb3351))
+* multi hart FS, Network and UART ([8e039fa](https://github.com/trust0-project/havy-os/commit/8e039fa9819e9dba46266cb69a7a16854e48ee39))
+
 ## [0.1.49](https://github.com/trust0-project/havy-os/compare/v0.1.48...v0.1.49) (2025-12-19)
 
 
