@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use crate::PING_STATE;
 use crate::lock::utils::BLK_DEV;
 use crate::lock::utils::COMMAND_RUNNING;
-use crate::lock::utils::FS_STATE;
+use crate::cpu::fs_proxy;
 use crate::lock::utils::TAIL_FOLLOW_STATE;
 use crate::net;
 use crate::services::netd;
@@ -168,18 +168,14 @@ pub fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
 
         // Also check /usr/bin/ for scripts
         {
-            let mut fs_guard = FS_STATE.write();
-            let mut blk_guard = BLK_DEV.write();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-                let files = fs.list_dir(dev, "/");
-                for f in files {
-                    if f.name.starts_with("/usr/bin/") {
-                        let script_name = &f.name[9..]; // Strip "/usr/bin/"
-                        if script_name.starts_with(word_to_complete) {
-                            // Avoid duplicates with builtins
-                            if !matches.iter().any(|m| m == script_name) {
-                                matches.push(String::from(script_name));
-                            }
+            let files = fs_proxy::fs_list("/");
+            for f in files {
+                if f.name.starts_with("/usr/bin/") {
+                    let script_name = &f.name[9..]; // Strip "/usr/bin/"
+                    if script_name.starts_with(word_to_complete) {
+                        // Avoid duplicates with builtins
+                        if !matches.iter().any(|m| m == script_name) {
+                            matches.push(String::from(script_name));
                         }
                     }
                 }
@@ -208,62 +204,58 @@ pub fn handle_tab_completion(buffer: &mut [u8], len: usize) -> usize {
         };
 
         {
-            let mut fs_guard = FS_STATE.write();
-            let mut blk_guard = BLK_DEV.write();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-                let files = fs.list_dir(dev, "/");
-                let mut seen_dirs: Vec<String> = Vec::new();
+            let files = fs_proxy::fs_list("/");
+            let mut seen_dirs: Vec<String> = Vec::new();
 
-                for f in files {
-                    // Check if file is in the target directory
-                    let check_prefix = if dir_path == "/" { "/" } else { dir_path };
+            for f in files {
+                // Check if file is in the target directory
+                let check_prefix = if dir_path == "/" { "/" } else { dir_path };
 
-                    if !f.name.starts_with(check_prefix) {
+                if !f.name.starts_with(check_prefix) {
+                    continue;
+                }
+
+                // Get the part after the directory
+                let relative = if dir_path == "/" {
+                    &f.name[1..]
+                } else if f.name.len() > check_prefix.len() + 1 {
+                    &f.name[check_prefix.len() + 1..]
+                } else {
+                    continue;
+                };
+
+                // Get just the immediate child (first path component)
+                let child_name = if let Some(slash_pos) = relative.find('/') {
+                    &relative[..slash_pos]
+                } else {
+                    relative
+                };
+
+                if child_name.is_empty() {
+                    continue;
+                }
+
+                // Check if it matches the prefix
+                if !child_name.starts_with(file_prefix) {
+                    continue;
+                }
+
+                // Check if this is a directory (has more path after)
+                let is_dir = relative.len() > child_name.len();
+
+                let completion = if is_dir {
+                    let dir_name = String::from(child_name) + "/";
+                    if seen_dirs.contains(&dir_name) {
                         continue;
                     }
+                    seen_dirs.push(dir_name.clone());
+                    dir_name
+                } else {
+                    String::from(child_name)
+                };
 
-                    // Get the part after the directory
-                    let relative = if dir_path == "/" {
-                        &f.name[1..]
-                    } else if f.name.len() > check_prefix.len() + 1 {
-                        &f.name[check_prefix.len() + 1..]
-                    } else {
-                        continue;
-                    };
-
-                    // Get just the immediate child (first path component)
-                    let child_name = if let Some(slash_pos) = relative.find('/') {
-                        &relative[..slash_pos]
-                    } else {
-                        relative
-                    };
-
-                    if child_name.is_empty() {
-                        continue;
-                    }
-
-                    // Check if it matches the prefix
-                    if !child_name.starts_with(file_prefix) {
-                        continue;
-                    }
-
-                    // Check if this is a directory (has more path after)
-                    let is_dir = relative.len() > child_name.len();
-
-                    let completion = if is_dir {
-                        let dir_name = String::from(child_name) + "/";
-                        if seen_dirs.contains(&dir_name) {
-                            continue;
-                        }
-                        seen_dirs.push(dir_name.clone());
-                        dir_name
-                    } else {
-                        String::from(child_name)
-                    };
-
-                    if !matches.iter().any(|m| m == &completion) {
-                        matches.push(completion);
-                    }
+                if !matches.iter().any(|m| m == &completion) {
+                    matches.push(completion);
                 }
             }
         }
@@ -407,9 +399,6 @@ pub fn shell_tick() {
         
         process_input_byte(byte);
     }
-    
-    // In single-hart mode, we need to run daemon tasks cooperatively
-
     
     // Poll tail follow mode (always)
     poll_tail_follow();
@@ -610,36 +599,29 @@ pub fn parse_tail_follow_command(cmd: &[u8]) -> Option<(String, usize)> {
 /// Start tail follow mode for a file
 /// Returns (success, initial_size)
 pub fn start_tail_follow(path: &str, num_lines: usize) -> (bool, usize) {
-    let mut fs_guard = FS_STATE.write();
-    let mut blk_guard = BLK_DEV.write();
+    if let Some(content) = fs_proxy::fs_read(path) {
+        // Show last N lines
+        if let Ok(text) = core::str::from_utf8(&content) {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = if lines.len() > num_lines {
+                lines.len() - num_lines
+            } else {
+                0
+            };
 
-    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-        if let Some(content) = fs.read_file(dev, path) {
-            // Show last N lines
-            if let Ok(text) = core::str::from_utf8(&content) {
-                let lines: Vec<&str> = text.lines().collect();
-                let start = if lines.len() > num_lines {
-                    lines.len() - num_lines
-                } else {
-                    0
-                };
-
-                for i in start..lines.len() {
-                    uart::write_line(lines[i]);
-                }
+            for i in start..lines.len() {
+                uart::write_line(lines[i]);
             }
-
-            uart::write_line("");
-            uart::write_line("\x1b[2m--- Following (Ctrl+C or 'q' to stop) ---\x1b[0m");
-
-            return (true, content.len());
-        } else {
-            uart::write_str("\x1b[1;31mtail: cannot open '");
-            uart::write_str(path);
-            uart::write_line("': No such file\x1b[0m");
         }
+
+        uart::write_line("");
+        uart::write_line("\x1b[2m--- Following (Ctrl+C or 'q' to stop) ---\x1b[0m");
+
+        return (true, content.len());
     } else {
-        uart::write_line("\x1b[1;31mtail: filesystem not available\x1b[0m");
+        uart::write_str("\x1b[1;31mtail: cannot open '");
+        uart::write_str(path);
+        uart::write_line("': No such file\x1b[0m");
     }
 
     (false, 0)

@@ -285,15 +285,13 @@ impl Scheduler {
         let cpu = cpu_id.min(self.num_cpus() - 1);
         self.queues[cpu].lock().enqueue(process);
         
-        // Wake target CPU if it's idle (sleeping in WFI)
-        // Skip if target is current hart (we're already running, no need to IPI self)
+        // Wake target CPU if it's different from current hart
+        // Always send IPI - even if target might be running, it's cheap and ensures wake-up
+        // The previous is_idle() check failed during boot because secondary harts
+        // hadn't marked themselves online/idle yet
         let current_hart = crate::get_hart_id();
         if cpu != current_hart {
-            if let Some(cpu_info) = CPU_TABLE.get(cpu) {
-                if cpu_info.is_idle() {
-                    crate::send_ipi(cpu);
-                }
-            }
+            crate::send_ipi(cpu);
         }
     }
 
@@ -305,10 +303,18 @@ impl Scheduler {
         }
         
         // Try work stealing from other CPUs
+        // IMPORTANT: Skip Hart 0's queue - critical services (shelld, netd) are pinned there
+        // and we don't want to cause lock contention with the BSP
         let num_cpus = self.num_cpus();
         for other_cpu in 0..num_cpus {
-            if other_cpu != cpu_id {
-                if let Some(process) = self.queues[other_cpu].lock().steal() {
+            // Skip our own queue and Hart 0's queue (to avoid BSP contention)
+            if other_cpu == cpu_id || other_cpu == 0 {
+                continue;
+            }
+            
+            // Use try_lock to avoid blocking if another hart is accessing this queue
+            if let Some(mut guard) = self.queues[other_cpu].try_lock() {
+                if let Some(process) = guard.steal() {
                     // Check if process can run on this CPU
                     if process.can_run_on_cpu(cpu_id) {
                         klog_trace(
@@ -321,19 +327,34 @@ impl Scheduler {
                         return Some(process);
                     } else {
                         // Put it back, wrong affinity
-                        self.queues[other_cpu].lock().enqueue(process);
+                        guard.enqueue(process);
                     }
                 }
             }
+            // If try_lock fails, just skip this queue and try the next
         }
         
         None
     }
 
-    /// Re-queue a process after its time slice expires
-    pub fn requeue(&self, process: Arc<Process>, cpu_id: usize) {
+    /// Re-queue a process after its time slice expires.
+    /// 
+    /// For processes with CPU affinity, requeues to the pinned hart.
+    /// For floating processes (no affinity), rebalances to the least loaded ready hart.
+    pub fn requeue(&self, process: Arc<Process>, _current_cpu: usize) {
         process.mark_ready();
-        self.enqueue(cpu_id, process);
+        
+        // Check if process has CPU affinity
+        let target_cpu = match process.get_cpu_affinity() {
+            Some(pinned_cpu) => pinned_cpu, // Pinned: MUST go to pinned hart
+            None => {
+                // Floating: rebalance to least loaded ready hart
+                // This enables load distribution across harts
+                self.find_least_loaded_cpu()
+            }
+        };
+        
+        self.enqueue(target_cpu, process);
     }
 
     // ─── Load Balancing ─────────────────────────────────────────────────────
@@ -345,26 +366,31 @@ impl Scheduler {
             return 0;
         }
         
-        // First, try to find an idle non-BSP CPU
+        // First, try to find an idle non-BSP CPU that is READY (actively scheduling)
         for cpu_id in 1..num_cpus {
-            if let Some(cpu) = CPU_TABLE.get(cpu_id) {
-                if cpu.is_online() && cpu.is_idle() {
-                    let queue_len = self.queues[cpu_id].lock().len();
-                    if queue_len == 0 {
-                        return cpu_id;
-                    }
+            // Prefer ready harts to avoid work going to sleeping harts that would be stolen
+            let is_ready = crate::cpu::is_hart_ready(cpu_id);
+            if is_ready {
+                let queue_len = self.queues[cpu_id].lock().len();
+                if queue_len == 0 {
+                    return cpu_id;
                 }
             }
         }
         
-        // Find CPU with shortest queue (prefer non-BSP)
+        // Find CPU with shortest queue (prefer non-BSP, prefer ready harts)
         let mut best_cpu = 0;
         let mut min_load = self.queues[0].lock().len();
         
         for cpu_id in 1..num_cpus {
-            if let Some(cpu) = CPU_TABLE.get(cpu_id) {
-                if !cpu.is_online() {
-                    continue;
+            // Skip harts that are not ready (still booting or sleeping)
+            let is_ready = crate::cpu::is_hart_ready(cpu_id);
+            if !is_ready {
+                // Fall back to online check if not ready yet
+                if let Some(cpu) = CPU_TABLE.get(cpu_id) {
+                    if !cpu.is_online() {
+                        continue;
+                    }
                 }
             }
             

@@ -173,7 +173,7 @@ pub fn init_services() {
             "Shell daemon - handles interactive command input",
             shelld::shell_service,
             Priority::High,
-            Some(0),  // Testing: keep on hart 0
+            None,  // Testing: keep on hart 0
         );
 
     if has_net {
@@ -182,7 +182,7 @@ pub fn init_services() {
             "Network daemon - handles IP assignment from relay",
             netd::netd_service,
             Priority::High,
-            Some(0),  // Can run on any hart
+            None,  // Can run on any hart
         );
     
         schedule_service(
@@ -208,7 +208,7 @@ pub fn init_services() {
             "GPU UI daemon - handles keyboard input and display updates",
             gpuid_service,
             Priority::High,
-            Some(0),  // Can run on any hart (touch driver is thread-safe)
+            None,  // Can run on any hart (touch driver is thread-safe)
         );
     }
 

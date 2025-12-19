@@ -8,10 +8,29 @@ use crate::dtb::DTB_ADDR;
 pub mod sched;
 pub mod process;
 pub mod ipc;
+pub mod io_router;
+pub mod fs_proxy;
 
 pub(crate) const MAX_HARTS: usize = 128;
 pub(crate) static HARTS_ONLINE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) const CLINT_HART_COUNT: usize = 0x0200_0F00;
+
+/// Tracks which harts are actively running hart_loop() and ready for scheduling.
+/// This is set AFTER a hart enters hart_loop(), not just when it goes online.
+/// Used by the scheduler to avoid sending work to harts still in boot spin-loops.
+pub(crate) static HART_READY: [AtomicBool; MAX_HARTS] = {
+    const INIT: AtomicBool = AtomicBool::new(false);
+    [INIT; MAX_HARTS]
+};
+
+/// Check if a hart is ready for scheduling (actively running hart_loop).
+/// 
+/// This is different from "online" - a hart can be online but still waiting
+/// for INIT_COMPLETE before entering the scheduling loop.
+#[inline]
+pub fn is_hart_ready(hart_id: usize) -> bool {
+    hart_id < MAX_HARTS && HART_READY[hart_id].load(Ordering::Acquire)
+}
 
 /// Read the hart count from the CLINT register (set by emulator)
 pub(crate) fn get_expected_harts() -> usize {
@@ -61,25 +80,22 @@ pub(crate) fn spin_delay_ms(ms: u64) {
 /// 2. Return (yielding to the scheduler)
 /// The scheduler will call them again on the next round.
 pub(crate) fn hart_loop(hart_id: usize) -> ! {
-    // Track first few picks for debugging
-    static PICK_COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    
+    // Mark this hart as ready for scheduling BEFORE entering the loop
+    // This signals to the scheduler that we're actively picking up work
+    if hart_id < MAX_HARTS {
+        HART_READY[hart_id].store(true, Ordering::Release);
+    }
     
     loop {
-        
         let mut did_work = false;
         
         // Run scheduler round-robin: pick a process, run one tick, requeue, repeat
         // All harts participate in scheduling once the scheduler is active
         let can_schedule = sched::SCHEDULER.is_active();
-        
-        // Export can_schedule diagnostic
             
         if can_schedule {
             if let Some(process) = sched::SCHEDULER.pick_next(hart_id) {
                 did_work = true;
-                
-                // Mark CPU as running this process
                 
                 // Mark CPU as running this process
                 if let Some(cpu) = CPU_TABLE.get(hart_id) {
@@ -90,7 +106,6 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
                 process.mark_running(hart_id);
 
                 let start_time = get_time_ms() as u64;
-
 
                 // Execute ONE TICK of the process
                 // Daemons should do one iteration of work and return
@@ -112,8 +127,6 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
                 } else {
                     sched::SCHEDULER.exit(process.pid, 0);
                 }
-            } else {
-                 // No process picked
             }
         }
 
@@ -124,6 +137,8 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
             sysmond::sysmond_tick();
             // Update system info MMIO device (for emulator UI)
             update_sysinfo();
+            // Process I/O requests from secondary harts
+            io_router::dispatch_io();
         }
 
         // If no work was done, sleep immediately via WFI
