@@ -102,6 +102,41 @@ pub enum IoOp {
     FsExists { path: alloc::string::String },
     /// Sync filesystem to disk
     FsSync,
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // Display operations (for display_proxy)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// Flush display (copy dirty region from back buffer to front buffer)
+    DisplayFlush,
+    /// Clear display to black
+    DisplayClear,
+    /// Mark entire screen as dirty
+    DisplayMarkAllDirty,
+    /// Check if display is available
+    DisplayIsAvailable,
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // Touch operations (for display_proxy)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// Poll for touch events
+    TouchPoll,
+    /// Get next touch event (serialized as [type:2][code:2][value:4])
+    TouchNextEvent,
+    /// Check if touch events are pending
+    TouchHasEvents,
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // Network operations (for net_proxy)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    /// Poll the network stack
+    NetPoll { timestamp_ms: i64 },
+    /// Check if IP is assigned
+    NetIsIpAssigned,
+    /// Get assigned IP address (returns 4 bytes)
+    NetGetIp,
 }
 
 /// Request ID type
@@ -535,6 +570,9 @@ fn handle_block_request(request: &IoRequest) -> IoResult {
                 IoResult::Err("Filesystem not available")
             }
         }
+        
+        // Display/Touch/Network operations should not reach block handler
+        _ => IoResult::Err("Operation not supported for block device"),
     }
 }
 
@@ -559,6 +597,22 @@ fn handle_network_request(request: &IoRequest) -> IoResult {
                 IoResult::Ok(b"offline".to_vec())
             }
         }
+        IoOp::NetPoll { timestamp_ms } => {
+            let mut net = crate::lock::utils::NET_STATE.lock();
+            if let Some(state) = net.as_mut() {
+                state.poll(*timestamp_ms);
+            }
+            IoResult::Ok(Vec::new())
+        }
+        IoOp::NetIsIpAssigned => {
+            let assigned = crate::net::is_ip_assigned();
+            IoResult::Ok(alloc::vec![if assigned { 1 } else { 0 }])
+        }
+        IoOp::NetGetIp => {
+            let ip = crate::net::get_my_ip();
+            let octets = ip.octets();
+            IoResult::Ok(octets.to_vec())
+        }
         _ => IoResult::Err("Network operation not implemented via I/O router"),
     }
 }
@@ -573,9 +627,41 @@ fn handle_display_request(request: &IoRequest) -> IoResult {
                 IoResult::Ok(b"offline".to_vec())
             }
         }
-        IoOp::Flush => {
-            // Trigger display refresh
+        IoOp::Flush | IoOp::DisplayFlush => {
+            crate::platform::d1_display::flush();
             IoResult::Ok(Vec::new())
+        }
+        IoOp::DisplayClear => {
+            crate::platform::d1_display::clear_display();
+            IoResult::Ok(Vec::new())
+        }
+        IoOp::DisplayMarkAllDirty => {
+            crate::platform::d1_display::mark_all_dirty();
+            IoResult::Ok(Vec::new())
+        }
+        IoOp::DisplayIsAvailable => {
+            let available = crate::platform::d1_display::is_available();
+            IoResult::Ok(alloc::vec![if available { 1 } else { 0 }])
+        }
+        IoOp::TouchPoll => {
+            crate::platform::d1_touch::poll();
+            IoResult::Ok(Vec::new())
+        }
+        IoOp::TouchNextEvent => {
+            if let Some(event) = crate::platform::d1_touch::next_event() {
+                // Serialize event: [type:2][code:2][value:4] = 8 bytes
+                let mut data = Vec::with_capacity(8);
+                data.extend_from_slice(&event.event_type.to_le_bytes());
+                data.extend_from_slice(&event.code.to_le_bytes());
+                data.extend_from_slice(&event.value.to_le_bytes());
+                IoResult::Ok(data)
+            } else {
+                IoResult::Ok(Vec::new()) // Empty = no event
+            }
+        }
+        IoOp::TouchHasEvents => {
+            let has = crate::platform::d1_touch::has_events();
+            IoResult::Ok(alloc::vec![if has { 1 } else { 0 }])
         }
         _ => IoResult::Err("Display operation not implemented via I/O router"),
     }

@@ -274,6 +274,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define cwd_get: {:?}", e))?;
 
     // Syscall: fs_exists(path_ptr, path_len) -> i32
+    // Multi-hart safe: Uses fs_proxy for filesystem access.
     linker
         .define(
             "env",
@@ -285,17 +286,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let fs_guard = crate::FS_STATE.read();
-                                let mut blk_guard = BLK_DEV.write();
-                                if let (Some(fs), Some(dev)) =
-                                    (fs_guard.as_ref(), blk_guard.as_mut())
-                                {
-                                    return if fs.read_file(dev, path).is_some() {
-                                        1
-                                    } else {
-                                        0
-                                    };
-                                }
+                                // Use fs_proxy for multi-hart safety
+                                return if crate::cpu::fs_proxy::fs_exists(path) { 1 } else { 0 };
                             }
                         }
                     }
@@ -303,9 +295,10 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 },
             ),
         )
-        .map_err(|e| format!("define fs_exists: {:?}", e))?;
+        .map_err(|e| format!("define fs_exists: {:?}", e))?;;
 
     // Syscall: fs_read(path_ptr, path_len, buf_ptr, buf_len) -> i32
+    // Multi-hart safe: Uses fs_proxy for filesystem access.
     linker
         .define(
             "env",
@@ -322,19 +315,14 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let fs_guard = crate::FS_STATE.read();
-                                let mut blk_guard = BLK_DEV.write();
-                                if let (Some(fs), Some(dev)) =
-                                    (fs_guard.as_ref(), blk_guard.as_mut())
-                                {
-                                    if let Some(data) = fs.read_file(dev, path) {
-                                        let to_copy = data.len().min(buf_len as usize);
-                                        if mem
-                                            .write(&mut caller, buf_ptr as usize, &data[..to_copy])
-                                            .is_ok()
-                                        {
-                                            return to_copy as i32;
-                                        }
+                                // Use fs_proxy for multi-hart safety
+                                if let Some(data) = crate::cpu::fs_proxy::fs_read(path) {
+                                    let to_copy = data.len().min(buf_len as usize);
+                                    if mem
+                                        .write(&mut caller, buf_ptr as usize, &data[..to_copy])
+                                        .is_ok()
+                                    {
+                                        return to_copy as i32;
                                     }
                                 }
                             }
@@ -347,6 +335,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define fs_read: {:?}", e))?;
 
     // Syscall: fs_write(path_ptr, path_len, data_ptr, data_len) -> i32
+    // Multi-hart safe: Uses fs_proxy for filesystem access.
     linker
         .define(
             "env",
@@ -366,14 +355,9 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                             && mem.read(&caller, data_ptr as usize, &mut data_buf).is_ok()
                         {
                             if let Ok(path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = BLK_DEV.write();
-                                if let (Some(fs), Some(dev)) =
-                                    (fs_guard.as_mut(), blk_guard.as_mut())
-                                {
-                                    if fs.write_file(dev, path, &data_buf).is_ok() {
-                                        return data_len;
-                                    }
+                                // Use fs_proxy for multi-hart safety
+                                if crate::cpu::fs_proxy::fs_write(path, &data_buf).is_ok() {
+                                    return data_len;
                                 }
                             }
                         }

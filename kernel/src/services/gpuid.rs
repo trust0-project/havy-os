@@ -3,9 +3,14 @@ use crate::cpu::spin_delay_ms;
 /// Daemon service entry point for gpuid (GPU UI daemon)
 /// Handles keyboard input and GPU display updates.
 /// Runs at ~60 FPS when input is detected, otherwise polls less frequently.
+/// 
+/// Multi-hart safe: Uses display_proxy to delegate hardware access to Hart 0.
 pub fn gpuid_service() {
-    use crate::{ui, platform::d1_display, platform::d1_touch};
+    use crate::ui;
+    use crate::cpu::display_proxy;
+    use crate::platform::d1_touch::{EV_ABS, ABS_X, ABS_Y}; // Constants only
     use crate::services::klogd::klog_info;
+    
     // Check if we need to transition from boot console to GUI
     if ui::boot::get_phase() == ui::boot::BootPhase::Console {
         klog_info("gpuid", "Transitioning from boot console to GUI");
@@ -16,7 +21,7 @@ pub fn gpuid_service() {
         ui::boot::render();
         
         // Clear framebuffer and switch to GUI phase
-        d1_display::clear_display();
+        display_proxy::clear_display();
         ui::boot::set_phase_gui();
         
         // Setup the boot screen UI elements
@@ -33,8 +38,8 @@ pub fn gpuid_service() {
         return;
     }
     
-    // Poll for input events
-    d1_touch::poll();
+    // Poll for input events (proxied to Hart 0 if needed)
+    display_proxy::touch_poll();
     
     // Check main screen mode once before processing events (optimization)
     let is_main_screen = ui::with_ui(|ui_mgr| ui_mgr.is_main_screen_mode()).unwrap_or(false);
@@ -44,16 +49,16 @@ pub fn gpuid_service() {
     let mut had_input = false;
     let mut had_button_action = false;
     
-    while let Some(event) = d1_touch::next_event() {
+    while let Some(event) = display_proxy::touch_next_event() {
         had_input = true;
         
         if is_main_screen {
             // For mouse movement (EV_ABS), just update position - don't process fully
             // This allows coalescing of multiple movement events
-            if event.event_type == d1_touch::EV_ABS {
+            if event.event_type == EV_ABS {
                 match event.code {
-                    d1_touch::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
-                    d1_touch::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
+                    ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
+                    ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
                     _ => {}
                 }
             } else {
@@ -76,7 +81,7 @@ pub fn gpuid_service() {
         
         // Only flush if there was input (button clicked) or periodically for stats
         if had_input {
-            d1_display::flush();
+            display_proxy::flush();
         } else {
             // Periodically update hardware stats
             ui::update_main_screen_hardware_stats();
@@ -95,11 +100,15 @@ pub fn gpuid_service() {
 
 /// GPU UI tick function for cooperative mode (single-hart operation)
 /// Called periodically from shell_tick to handle input and render updates.
+/// 
+/// Multi-hart safe: Uses display_proxy to delegate hardware access to Hart 0.
 pub fn gpuid_tick() {
-    use crate::{ui, platform::d1_display, platform::d1_touch};
+    use crate::ui;
+    use crate::cpu::display_proxy;
+    use crate::platform::d1_touch::{EV_ABS, ABS_X, ABS_Y}; // Constants only
     
-    // Skip if GPU not available
-    if !d1_display::is_available() {
+    // Skip if GPU not available (proxied check)
+    if !display_proxy::is_available() {
         return;
     }
     
@@ -110,7 +119,7 @@ pub fn gpuid_tick() {
         ui::boot::render();
         
         // Clear and switch to GUI
-        d1_display::clear_display();
+        display_proxy::clear_display();
         ui::boot::set_phase_gui();
         ui::setup_main_screen();
         
@@ -118,26 +127,26 @@ pub fn gpuid_tick() {
             ui_mgr.mark_dirty();
             ui_mgr.render();
         });
-        d1_display::flush();
+        display_proxy::flush();
         return;
     }
     
-    // Poll for input events
-    d1_touch::poll();
+    // Poll for input events (proxied to Hart 0 if needed)
+    display_proxy::touch_poll();
     
     // Check main screen mode once before processing events
     let is_main_screen = ui::with_ui(|ui_mgr| ui_mgr.is_main_screen_mode()).unwrap_or(false);
     
     // COALESCED event processing (same as gpuid_service)
     let mut had_input = false;
-    while let Some(event) = d1_touch::next_event() {
+    while let Some(event) = display_proxy::touch_next_event() {
         had_input = true;
         if is_main_screen {
             // For mouse movement, just update position - coalesce multiple events
-            if event.event_type == d1_touch::EV_ABS {
+            if event.event_type == EV_ABS {
                 match event.code {
-                    d1_touch::ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
-                    d1_touch::ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
+                    ABS_X => ui::set_cursor_pos(event.value, ui::get_cursor_pos().1),
+                    ABS_Y => ui::set_cursor_pos(ui::get_cursor_pos().0, event.value),
                     _ => {}
                 }
             } else {
@@ -154,7 +163,7 @@ pub fn gpuid_tick() {
     if is_main_screen {
         // Position is updated for click hit-testing only
         if had_input {
-            d1_display::flush();
+            display_proxy::flush();
         } else {
             ui::update_main_screen_hardware_stats();
         }
@@ -164,6 +173,6 @@ pub fn gpuid_tick() {
                 ui_mgr.render();
             }
         });
-        d1_display::flush();
+        display_proxy::flush();
     }
 }

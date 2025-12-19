@@ -171,33 +171,31 @@ pub(crate) fn update_sysinfo() {
 
 /// Check for new content in a file being followed by tail -f
 /// Returns the new file size if content was found, None otherwise
+/// 
+/// Multi-hart safe: Uses fs_proxy for hart-aware filesystem access.
 pub(crate) fn check_tail_follow(path: &str, last_size: usize) -> Option<usize> {
-    let mut fs_guard = FS_STATE.write();
-    let mut blk_guard = BLK_DEV.write();
+    // Use fs_proxy for multi-hart safety
+    if let Some(content) = crate::cpu::fs_proxy::fs_read(path) {
+        let new_size = content.len();
 
-    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-        if let Some(content) = fs.read_file(dev, path) {
-            let new_size = content.len();
-
-            if new_size > last_size {
-                // Print new content with green highlighting
-                let new_content = &content[last_size..];
-                if let Ok(text) = core::str::from_utf8(new_content) {
-                    for line in text.lines() {
-                        uart::write_str("\x1b[1;32m");
-                        uart::write_str(line);
-                        uart::write_line("\x1b[0m");
-                    }
+        if new_size > last_size {
+            // Print new content with green highlighting
+            let new_content = &content[last_size..];
+            if let Ok(text) = core::str::from_utf8(new_content) {
+                for line in text.lines() {
+                    uart::write_str("\x1b[1;32m");
+                    uart::write_str(line);
+                    uart::write_line("\x1b[0m");
                 }
-                return Some(new_size);
-            } else if new_size < last_size {
-                // File was truncated
-                uart::write_line("\x1b[1;33mtail: file truncated\x1b[0m");
-                return Some(new_size);
             }
-
-            return Some(last_size); // No change
+            return Some(new_size);
+        } else if new_size < last_size {
+            // File was truncated
+            uart::write_line("\x1b[1;33mtail: file truncated\x1b[0m");
+            return Some(new_size);
         }
+
+        return Some(last_size); // No change
     }
     None
 }

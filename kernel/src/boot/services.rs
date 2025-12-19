@@ -208,7 +208,7 @@ pub fn init_services() {
             "GPU UI daemon - handles keyboard input and display updates",
             gpuid_service,
             Priority::High,
-            Some(0),  // Can run on any hart (touch driver is thread-safe)
+            None,  // Can run on any hart (touch driver is thread-safe)
         );
     }
 

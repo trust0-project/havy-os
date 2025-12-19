@@ -39,16 +39,15 @@ pub fn has_ip() -> bool {
 
 
 /// Poll the network stack
+/// 
+/// Multi-hart safe: Uses net_proxy to delegate MMIO operations to Hart 0.
 pub(crate) fn poll_network() {
+    use crate::cpu::net_proxy;
+    
     let timestamp = get_time_ms();
 
-    // Poll the unified network state
-    {
-        let mut net_guard = NET_STATE.lock();
-        if let Some(ref mut state) = *net_guard {
-            state.poll(timestamp);
-        }
-    }
+    // Poll the unified network state (proxied to Hart 0 if needed)
+    net_proxy::poll(timestamp);
 
     // Then handle ping state separately to avoid holding both locks
     let mut ping_guard = PING_STATE.lock();
@@ -149,23 +148,18 @@ pub fn tick() {
 }
 
 /// Try to get IP from D1 EMAC MMIO register
+/// 
+/// Multi-hart safe: Uses net_proxy for hart-aware access.
 fn try_get_ip() -> bool {
-    let mut net = match crate::NET_STATE.try_lock() {
-        Some(guard) => guard,
-        None => return false,
-    };
+    use crate::cpu::net_proxy;
     
-    let net = match net.as_mut() {
-        Some(n) => n,
-        None => return false,
-    };
+    // Poll the network to check for IP assignment (proxied to Hart 0 if needed)
+    let timestamp = crate::get_time_ms();
+    net_proxy::poll(timestamp);
     
-    // Poll the network to check for IP assignment
-    net.poll(crate::get_time_ms());
-    
-    // Check if IP was assigned via poll()
-    if is_ip_assigned() {
-        let ip = get_my_ip();
+    // Check if IP was assigned via poll() (reads atomic global, safe from any hart)
+    if net_proxy::is_ip_assigned() {
+        let ip = net_proxy::get_ip();
         let octets = ip.octets();
         klog_info("netd", &alloc::format!(
             "IP assigned from relay: {}.{}.{}.{}/{}",
