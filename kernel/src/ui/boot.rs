@@ -201,18 +201,9 @@ pub fn print_boot_msg(prefix: &str, msg: &str) {
     }
 }
 
-/// Clear the screen to background color using embedded-graphics
-fn clear_screen() {
-    d1_display::with_gpu(|gpu| {
-        let _ = gpu.clear(COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
-    });
-}
 
-/// Track if we've done initial clear
-static mut INITIAL_CLEAR_DONE: bool = false;
 
-/// Track how many lines we've rendered (for incremental updates)
-static mut LAST_LINE_COUNT: usize = 0;
+
 
 /// Batch depth counter: when > 0, render() skips flushing
 /// Uses reference counting so nested batch_begin/batch_end pairs work correctly
@@ -239,6 +230,8 @@ pub fn batch_end() {
 }
 
 /// Render the boot console to the framebuffer using embedded-graphics
+/// Uses FULL REDRAW approach - always redraws all visible lines
+/// This is simpler and guarantees correct display regardless of timing
 pub fn render() {
     if !is_initialized() || get_phase() != BootPhase::Console {
         return;
@@ -249,13 +242,6 @@ pub fn render() {
     let visible_lines = visible_lines.min(MAX_LINES);
     
     unsafe {
-        // Initial full clear on first render only
-        if !INITIAL_CLEAR_DONE {
-            clear_screen();
-            INITIAL_CLEAR_DONE = true;
-            LAST_LINE_COUNT = 0;
-        }
-        
         let line_count = CONSOLE.line_count;
         if line_count == 0 {
             if BATCH_DEPTH == 0 {
@@ -267,71 +253,31 @@ pub fn render() {
         // Calculate scroll offset (how many lines scrolled off the top)
         let scroll_offset = line_count.saturating_sub(visible_lines);
         
-        // Determine if we need a full redraw (scrolling occurred)
-        let needs_full_redraw = line_count > LAST_LINE_COUNT && scroll_offset > 0 && 
-                                LAST_LINE_COUNT >= visible_lines;
-        
+        // ALWAYS do full redraw - simpler and more reliable
         d1_display::with_gpu(|gpu| {
-            if needs_full_redraw {
-                // Scrolling happened - use FAST bulk clear (64-bit writes)
-                // NOT Rectangle::draw() which does 786,432 pixel-by-pixel writes!
-                let _ = gpu.clear(COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
-                // Note: gpu.clear() already calls mark_all_dirty()
-                
-                // Draw all visible lines with pixel batching for speed
-                // This skips per-pixel dirty tracking (~3000 calls per line -> 0)
-                d1_display::begin_pixel_batch();
-                let num_to_show = line_count.min(visible_lines);
-                for i in 0..num_to_show {
-                    let buffer_idx = scroll_offset + i;
-                    let y = MARGIN_TOP + (i as i32 * LINE_HEIGHT as i32) + FONT_HEIGHT as i32;
-                    if let Some(text) = CONSOLE.get_line(buffer_idx) {
-                        let _ = FONT.render_aligned(
-                            text,
-                            Point::new(MARGIN_LEFT, y),
-                            VerticalPosition::Baseline,
-                            HorizontalAlignment::Left,
-                            FontColor::Transparent(COLOR_TEXT),
-                            gpu,
-                        );
-                    }
-                }
-                d1_display::end_pixel_batch();
-                // Dirty region already marked by mark_all_dirty() above
-            } else if line_count > LAST_LINE_COUNT {
-                // No scrolling - just draw new lines (typewriter effect)
-                // Use pixel batching for speed, mark dirty region once per line
-                d1_display::begin_pixel_batch();
-                for line_idx in LAST_LINE_COUNT..line_count {
-                    let display_pos = line_idx.saturating_sub(scroll_offset);
-                    if display_pos < visible_lines {
-                        let y = MARGIN_TOP + (display_pos as i32 * LINE_HEIGHT as i32) + FONT_HEIGHT as i32;
-                        if let Some(text) = CONSOLE.get_line(line_idx) {
-                            let _ = FONT.render_aligned(
-                                text,
-                                Point::new(MARGIN_LEFT, y),
-                                VerticalPosition::Baseline,
-                                HorizontalAlignment::Left,
-                                FontColor::Transparent(COLOR_TEXT),
-                                gpu,
-                            );
-                        }
-                    }
-                }
-                d1_display::end_pixel_batch();
-                
-                // Mark dirty regions ONCE for all new lines (not per-pixel)
-                for line_idx in LAST_LINE_COUNT..line_count {
-                    let display_pos = line_idx.saturating_sub(scroll_offset);
-                    if display_pos < visible_lines {
-                        let line_y = MARGIN_TOP as u32 + (display_pos as u32 * LINE_HEIGHT);
-                        d1_display::mark_dirty(0, line_y, DISPLAY_WIDTH, LINE_HEIGHT);
-                    }
+            // Clear with bulk 64-bit writes
+            let _ = gpu.clear(COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+            
+            // Draw ALL visible lines with pixel batching for speed
+            d1_display::begin_pixel_batch();
+            let num_to_show = line_count.min(visible_lines);
+            for i in 0..num_to_show {
+                let buffer_idx = scroll_offset + i;
+                let y = MARGIN_TOP + (i as i32 * LINE_HEIGHT as i32) + FONT_HEIGHT as i32;
+                if let Some(text) = CONSOLE.get_line(buffer_idx) {
+                    let _ = FONT.render_aligned(
+                        text,
+                        Point::new(MARGIN_LEFT, y),
+                        VerticalPosition::Baseline,
+                        HorizontalAlignment::Left,
+                        FontColor::Transparent(COLOR_TEXT),
+                        gpu,
+                    );
                 }
             }
+            d1_display::end_pixel_batch();
+            // Dirty region already marked by mark_all_dirty() from clear()
         });
-        
-        LAST_LINE_COUNT = line_count;
         
         // Only flush when not in any batch (BATCH_DEPTH == 0)
         // When batching, batch_end() handles the flush

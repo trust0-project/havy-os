@@ -166,31 +166,28 @@ impl GpuDriver {
         Ok(())
     }
     
-    /// Clear both framebuffers (front and back) to black
+    /// Clear both framebuffers (front and back) to opaque black
     /// Called lazily on first boot console init
-    /// Optimized for BLAZING FAST boot using bulk memory writes
+    /// Uses 64-bit writes for speed while ensuring proper alpha channel
     pub fn init_clear_buffers(&mut self) {
-        let fb_size_bytes = (self.width * self.height * 4) as usize;
+        let total_pixels = (self.width * self.height) as usize;
+        let total_pairs = total_pixels / 2;
+        
+        // Opaque black: 0xFF000000 duplicated for 64-bit writes
+        let pixel64: u64 = 0xFF000000_FF000000;
         
         unsafe {
-            // Use bulk write_bytes (memset) - MUCH faster than per-pixel volatile writes
-            // This clears to 0x00000000 (transparent black), but we immediately set first pixel
-            // to 0xFF000000 which triggers the frame version increment on flush
+            // Front buffer - fill with opaque black
+            let front_ptr64 = FRAMEBUFFER_ADDR as *mut u64;
+            for i in 0..total_pairs {
+                core::ptr::write_volatile(front_ptr64.add(i), pixel64);
+            }
             
-            // Front buffer - bulk zero
-            core::ptr::write_bytes(FRAMEBUFFER_ADDR as *mut u8, 0, fb_size_bytes);
-            
-            // Back buffer - bulk zero
-            core::ptr::write_bytes(BACK_BUFFER_ADDR as *mut u8, 0, fb_size_bytes);
-            
-            // Set alpha channel to 0xFF (opaque) using 64-bit writes
-            // This is still fast because we're only touching 1/4 of the memory
-            // Actually, for boot console on black background, 0x00000000 (transparent black)
-            // displays the same as 0xFF000000 (opaque black), so we can skip this!
-            
-            // Mark frame as ready with a single write to trigger version increment
-            let front_ptr = FRAMEBUFFER_ADDR as *mut u32;
-            core::ptr::write_volatile(front_ptr, 0xFF000000);
+            // Back buffer - fill with opaque black
+            let back_ptr64 = BACK_BUFFER_ADDR as *mut u64;
+            for i in 0..total_pairs {
+                core::ptr::write_volatile(back_ptr64.add(i), pixel64);
+            }
         }
     }
 
@@ -229,35 +226,27 @@ impl GpuDriver {
     }
 
     /// Clear the back buffer - OPTIMIZED to avoid blocking scheduler
-    /// Uses bulk write_bytes (memset) instead of slow volatile loop
+    /// Uses bulk 64-bit writes for speed while ensuring proper alpha channel
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
         let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
-        let fb_size_bytes = (self.width * self.height * 4) as usize;
         
         unsafe {
-            // Fast path: if clearing to black, use super-fast memset
-            if r == 0 && g == 0 && b == 0 {
-                core::ptr::write_bytes(BACK_BUFFER_ADDR as *mut u8, 0, fb_size_bytes);
-                // Set first pixel to opaque black
-                core::ptr::write_volatile(BACK_BUFFER_ADDR as *mut u32, 0xFF000000);
-            } else {
-                // Non-black clear: use bulk copy for speed
-                // Fill first row with the color, then replicate
+            // Use 64-bit writes for maximum speed (2 pixels per write)
+            // This is faster than memset because we need to set alpha=0xFF for all pixels
+            let pixel64 = (pixel as u64) | ((pixel as u64) << 32);
+            let ptr64 = BACK_BUFFER_ADDR as *mut u64;
+            let total_pairs = (self.width * self.height / 2) as usize;
+            
+            // Write 2 pixels at a time using 64-bit stores
+            for i in 0..total_pairs {
+                core::ptr::write_volatile(ptr64.add(i), pixel64);
+            }
+            
+            // Handle odd pixel count (shouldn't happen for 1024x768 but be safe)
+            if (self.width * self.height) % 2 != 0 {
                 let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-                let row_pixels = self.width as usize;
-                
-                // Fill first row (1024 pixels = fast)
-                for i in 0..row_pixels {
-                    core::ptr::write_volatile(fb_ptr.add(i), pixel);
-                }
-                
-                // Copy first row to all other rows using memcpy (FAST)
-                let row_bytes = row_pixels * 4;
-                let src = BACK_BUFFER_ADDR as *const u8;
-                for row in 1..self.height as usize {
-                    let dst = (BACK_BUFFER_ADDR as *mut u8).add(row * row_bytes);
-                    core::ptr::copy_nonoverlapping(src, dst, row_bytes);
-                }
+                let last_idx = (self.width * self.height - 1) as usize;
+                core::ptr::write_volatile(fb_ptr.add(last_idx), pixel);
             }
         }
         mark_all_dirty();
