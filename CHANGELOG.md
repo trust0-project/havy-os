@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.51](https://github.com/trust0-project/havy-os/compare/v0.1.50...v0.1.51) (2025-12-20)
+
+
+### Bug Fixes
+
+* improve display ([2eccbfe](https://github.com/trust0-project/havy-os/commit/2eccbfe38aa96226ddcb8e8191526117886964c2))
+
 ## [0.1.50](https://github.com/trust0-project/havy-os/compare/v0.1.49...v0.1.50) (2025-12-19)
 
 
