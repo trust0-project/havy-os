@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.52](https://github.com/trust0-project/havy-os/compare/v0.1.51...v0.1.52) (2025-12-21)
+
+
+### Bug Fixes
+
+* termina GUI ([a0ddc9f](https://github.com/trust0-project/havy-os/commit/a0ddc9f987a66f7a61d0c0f02f1e463472bf71d7))
+
 ## [0.1.51](https://github.com/trust0-project/havy-os/compare/v0.1.50...v0.1.51) (2025-12-20)
 
 
