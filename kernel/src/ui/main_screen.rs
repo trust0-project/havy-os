@@ -102,11 +102,11 @@ static mut MAIN_SCREEN_LAST_SELECTED: Option<usize> = None;
 static mut MAIN_SCREEN_OPEN_WINDOW: Option<usize> = None;
 
 // Window backing store - saves region behind child window for instant restore on close
-// Child window: 500x400 at (260, 180), shadow: +8 pixels, total ~508x408
-const WINDOW_BACKING_W: usize = 510;
-const WINDOW_BACKING_H: usize = 410;
-const WINDOW_BACKING_X: u32 = 258;
-const WINDOW_BACKING_Y: u32 = 178;
+// Terminal window: 700x500 at (162, 134), shadow: +8 pixels, total ~708x508
+const WINDOW_BACKING_W: usize = 710;
+const WINDOW_BACKING_H: usize = 510;
+const WINDOW_BACKING_X: u32 = 160;
+const WINDOW_BACKING_Y: u32 = 132;
 static mut WINDOW_BACKING_STORE: [u32; WINDOW_BACKING_W * WINDOW_BACKING_H] = [0; WINDOW_BACKING_W * WINDOW_BACKING_H];
 static mut WINDOW_BACKING_VALID: bool = false;
 
@@ -116,12 +116,25 @@ static mut MAIN_SCREEN_LAST_HW_UPDATE: i64 = 0;
 /// Hardware stats update interval in ms
 const MAIN_SCREEN_HW_UPDATE_INTERVAL: i64 = 2000; // Update every 2 seconds
 
+// Terminal window state
+const TERMINAL_INPUT_MAX: usize = 256;
+const TERMINAL_OUTPUT_MAX: usize = 2048;
+static mut TERMINAL_INPUT_BUFFER: [u8; TERMINAL_INPUT_MAX] = [0; TERMINAL_INPUT_MAX];
+static mut TERMINAL_INPUT_LEN: usize = 0;
+static mut TERMINAL_OUTPUT_BUFFER: [u8; TERMINAL_OUTPUT_MAX] = [0; TERMINAL_OUTPUT_MAX];
+static mut TERMINAL_OUTPUT_LEN: usize = 0;
+/// Whether a command is currently executing (shows Cancel button instead of Run)
+static mut TERMINAL_COMMAND_RUNNING: bool = false;
+/// Whether a cancel has been requested (checked by should_cancel syscall)
+static mut TERMINAL_CANCEL_REQUESTED: bool = false;
+
 /// Check if a point is inside a main_screen button, returns button index if hit
 pub fn hit_test_main_screen_button(x: i32, y: i32) -> Option<usize> {
     // Button positions (must match draw_main_screen_content)
-    // Only Network button now, aligned left (adjusted for 1024x768)
+    // Network and Terminal buttons, aligned left (adjusted for 1024x768)
     let buttons = [
-        (30, 500, 110, 32),  // Network (aligned with left column)
+        (30, 500, 110, 32),   // Network (aligned with left column)
+        (150, 500, 110, 32),  // Terminal
     ];
     
     for (i, (bx, by, bw, bh)) in buttons.iter().enumerate() {
@@ -169,6 +182,7 @@ fn restore_window_backing() {
 fn get_button_name(index: usize) -> &'static str {
     match index {
         0 => "Network",
+        1 => "Terminal",
         _ => "Unknown",
     }
 }
@@ -290,14 +304,14 @@ pub fn update_main_screen_buttons(selected_button: usize) {
     restore_cursor_backup();
     
     d1_display::with_gpu(|gpu| {
-        // Button definitions - only Network now, left aligned (adjusted for 1024x768)
+        // Button definitions - Network and Terminal, left aligned (adjusted for 1024x768)
         let buttons = [
             ("Network", 30),
+            ("Terminal", 150),
         ];
         
-        // Clear the buttons area 
-        // Clear the buttons area (adjusted for 1024x768)
-        gpu.fill_rect(28, 498, 120, 38, 28, 28, 38);
+        // Clear the buttons area (adjusted for 1024x768: wider for 2 buttons)
+        gpu.fill_rect(28, 498, 240, 38, 28, 28, 38);
         
         // Redraw all buttons
         for (i, (label, x)) in buttons.iter().enumerate() {
@@ -313,7 +327,7 @@ pub fn update_main_screen_buttons(selected_button: usize) {
                 Rgb888::new(60, 60, 80)
             };
             
-            // Button background (110 width for Network)
+            // Button background (110 width)
             let _ = RoundedRectangle::with_equal_corners(
                 Rectangle::new(Point::new(*x, 500), Size::new(110, 32)),
                 Size::new(4, 4),
@@ -345,6 +359,7 @@ pub fn update_main_screen_buttons(selected_button: usize) {
     d1_display::flush();
 }
 
+
 /// Setup a main_screen screen showing embedded_graphics capabilities with dynamic hardware info
 pub fn setup_main_screen() {
     // Get hardware info
@@ -369,10 +384,19 @@ pub fn setup_main_screen() {
 
 /// Draw a child window (opened by clicking a button)
 /// Draws ONLY the child window on top of existing content for maximum speed
-fn draw_child_window(_button_index: usize) {
+fn draw_child_window(button_index: usize) {
     // PERFORMANCE: Save region behind window for instant restore on close
     save_window_backing();
     
+    match button_index {
+        0 => draw_network_window(),
+        1 => draw_terminal_window(),
+        _ => {}
+    }
+}
+
+/// Draw the Network Statistics window content
+fn draw_network_window() {
     // Pre-compute network info BEFORE entering GPU closure (avoid locks inside)
     // Use is_ip_assigned() which checks for valid IP without needing locks
     let is_online = crate::net::is_ip_assigned();
@@ -470,9 +494,409 @@ fn draw_child_window(_button_index: usize) {
         // Close hint
         let _ = Text::new("Press ESC or click red button to close", Point::new(330, 560), hint_style).draw(gpu);
     });
-    
-    // No flush here - caller will handle it
 }
+
+/// Draw the Terminal window content
+fn draw_terminal_window() {
+    // Window dimensions: 700x500, centered on 1024x768
+    // Position: (162, 134) - use u32 for fill_rect, cast to i32 for Points
+    const WIN_X: u32 = 162;
+    const WIN_Y: u32 = 134;
+    const WIN_W: u32 = 700;
+    const WIN_H: u32 = 500;
+    
+    d1_display::with_gpu(|gpu| {
+        // Shadow + window background in one batch
+        gpu.fill_rect(WIN_X + 8, WIN_Y + 8, WIN_W, WIN_H, 5, 5, 10);  // Shadow
+        gpu.fill_rect(WIN_X, WIN_Y, WIN_W, WIN_H, 28, 28, 38);  // Window bg
+        gpu.fill_rect(WIN_X, WIN_Y, WIN_W, 32, 40, 40, 55);  // Title bar
+        
+        // Border (stroke only)
+        let _ = Rectangle::new(Point::new(WIN_X as i32, WIN_Y as i32), Size::new(WIN_W, WIN_H))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+            .draw(gpu);
+        
+        // Traffic light buttons (cast to i32 for Point)
+        let _ = Circle::new(Point::new(WIN_X as i32 + 12, WIN_Y as i32 + 10), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(220, 80, 80)))
+            .draw(gpu);
+        let _ = Circle::new(Point::new(WIN_X as i32 + 32, WIN_Y as i32 + 10), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
+            .draw(gpu);
+        let _ = Circle::new(Point::new(WIN_X as i32 + 52, WIN_Y as i32 + 10), 12)
+            .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
+            .draw(gpu);
+        
+        // Title + logo (centered)
+        let title_style = MonoTextStyle::new(&FONT_9X15_BOLD, Rgb888::WHITE);
+        let _ = Text::new("Terminal", Point::new(WIN_X as i32 + 310, WIN_Y as i32 + 22), title_style).draw(gpu);
+        draw_image(gpu, WIN_X + WIN_W - LOGO_SMALL_SIZE as u32 - 8, WIN_Y + 4, LOGO_SMALL_SIZE, LOGO_SMALL_SIZE, LOGO_SMALL);
+        
+        let hint_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(100, 100, 120));
+        let value_style = MonoTextStyle::new(&FONT_7X14, Rgb888::WHITE);
+        
+        // Content area starts at WIN_Y + 40
+        let content_y = WIN_Y + 45;
+        let content_x = WIN_X + 15;
+        
+        // Command label
+        let _ = Text::new("Command:", Point::new(content_x as i32, content_y as i32), hint_style).draw(gpu);
+        
+        // Input field background (dark) - wider: 580px
+        let input_y = content_y + 10;
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(content_x as i32, input_y as i32), Size::new(580, 28)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(Rgb888::new(18, 18, 28)))
+        .draw(gpu);
+        
+        // Input field border
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(content_x as i32, input_y as i32), Size::new(580, 28)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(80, 80, 100), 1))
+        .draw(gpu);
+        
+        // Draw current input text
+        let input_text = unsafe {
+            core::str::from_utf8(&TERMINAL_INPUT_BUFFER[..TERMINAL_INPUT_LEN]).unwrap_or("")
+        };
+        let _ = Text::new(input_text, Point::new(content_x as i32 + 7, input_y as i32 + 19), value_style).draw(gpu);
+        
+        // Draw cursor (always visible, simple block cursor)
+        let cursor_x = content_x as i32 + 7 + (unsafe { TERMINAL_INPUT_LEN } as i32 * 7);
+        if cursor_x < content_x as i32 + 570 {  // Don't draw cursor past input field
+            let _ = Rectangle::new(Point::new(cursor_x, input_y as i32 + 5), Size::new(2, 16))
+                .into_styled(PrimitiveStyle::with_fill(Rgb888::new(200, 200, 220)))
+                .draw(gpu);
+        }
+        
+        // Run/Cancel button (right of input field) - red Cancel when running, blue Run otherwise
+        let btn_x = content_x as i32 + 590;
+        let is_running = unsafe { TERMINAL_COMMAND_RUNNING };
+        let (btn_color, btn_text) = if is_running {
+            (Rgb888::new(200, 80, 80), "Cancel")  // Red cancel button
+        } else {
+            (Rgb888::new(80, 140, 200), "Run")    // Blue run button
+        };
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(btn_x, input_y as i32), Size::new(80, 28)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(btn_color))
+        .draw(gpu);
+        let text_x = if is_running { btn_x + 14 } else { btn_x + 25 }; // Center text differently
+        let _ = Text::new(btn_text, Point::new(text_x, input_y as i32 + 19), 
+            MonoTextStyle::new(&FONT_7X14, Rgb888::WHITE)).draw(gpu);
+        
+        // CWD label (shows current working directory)
+        let output_label_y = input_y + 40;
+        let cwd = crate::utils::cwd_get();
+        let cwd_label = alloc::format!("{}$", cwd);
+        let _ = Text::new(&cwd_label, Point::new(content_x as i32, output_label_y as i32), hint_style).draw(gpu);
+        
+        // Output area background - larger: 670x340
+        let output_y = output_label_y + 10;
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(content_x as i32, output_y as i32), Size::new(670, 340)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(Rgb888::new(10, 10, 15)))
+        .draw(gpu);
+        
+        // Output area border
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(content_x as i32, output_y as i32), Size::new(670, 340)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
+        .draw(gpu);
+        
+        // Draw output text (multi-line) - now fits ~22 lines
+        let output_text = unsafe {
+            core::str::from_utf8(&TERMINAL_OUTPUT_BUFFER[..TERMINAL_OUTPUT_LEN]).unwrap_or("")
+        };
+        
+        let output_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(80, 200, 120));
+        let mut y = output_y as i32 + 15;
+        let max_chars_per_line = 92;  // 670px / 7px per char ≈ 95, leave margin
+        let mut line_count = 0;
+        
+        for line in output_text.lines() {
+            if line_count >= 22 {
+                break;
+            }
+            // Truncate long lines
+            let display_line = if line.len() > max_chars_per_line {
+                &line[..max_chars_per_line]
+            } else {
+                line
+            };
+            let _ = Text::new(display_line, Point::new(content_x as i32 + 7, y), output_style).draw(gpu);
+            y += 15;
+            line_count += 1;
+        }
+        
+        // Close hint at bottom
+        let _ = Text::new("Press ESC to close, Enter to run command", Point::new(WIN_X as i32 + 200, WIN_Y as i32 + WIN_H as i32 - 15), hint_style).draw(gpu);
+    });
+}
+
+/// Fast partial redraw of ONLY the input field (for responsive typing)
+/// This is much faster than redrawing the entire terminal window
+fn draw_terminal_input_only() {
+    // Must match coordinates from draw_terminal_window
+    const WIN_X: u32 = 162;
+    const WIN_Y: u32 = 134;
+    const CONTENT_X: u32 = WIN_X + 15;
+    const INPUT_Y: u32 = WIN_Y + 55;
+    
+    d1_display::with_gpu(|gpu| {
+        let value_style = MonoTextStyle::new(&FONT_7X14, Rgb888::WHITE);
+        
+        // Clear only the input field interior (not the border)
+        // Input field is at (CONTENT_X, INPUT_Y) with size (580, 28)
+        gpu.fill_rect(CONTENT_X + 1, INPUT_Y + 1, 578, 26, 18, 18, 28);
+        
+        // Draw current input text
+        let input_text = unsafe {
+            core::str::from_utf8(&TERMINAL_INPUT_BUFFER[..TERMINAL_INPUT_LEN]).unwrap_or("")
+        };
+        let _ = Text::new(input_text, Point::new(CONTENT_X as i32 + 7, INPUT_Y as i32 + 19), value_style).draw(gpu);
+        
+        // Draw cursor (always visible, simple block cursor)
+        let cursor_x = CONTENT_X as i32 + 7 + (unsafe { TERMINAL_INPUT_LEN } as i32 * 7);
+        if cursor_x < CONTENT_X as i32 + 570 {  // Don't draw cursor past input field
+            let _ = Rectangle::new(Point::new(cursor_x, INPUT_Y as i32 + 5), Size::new(2, 16))
+                .into_styled(PrimitiveStyle::with_fill(Rgb888::new(200, 200, 220)))
+                .draw(gpu);
+        }
+    });
+}
+
+/// Execute a command in the terminal window and capture output
+fn terminal_execute_command() {
+    use crate::lock::utils::OUTPUT_CAPTURE;
+    use crate::lock::state::output::OUTPUT_BUFFER_SIZE;
+    
+    let cmd_len = unsafe { TERMINAL_INPUT_LEN };
+    if cmd_len == 0 {
+        return;
+    }
+    
+    // Get the command string
+    let cmd_bytes = unsafe { &TERMINAL_INPUT_BUFFER[..cmd_len] };
+    let cmd_str = match core::str::from_utf8(cmd_bytes) {
+        Ok(s) => s.trim(),
+        Err(_) => return,
+    };
+    
+    if cmd_str.is_empty() {
+        return;
+    }
+    
+    // Split into command and arguments
+    let mut parts = cmd_str.splitn(2, ' ');
+    let cmd = parts.next().unwrap_or("");
+    let args = parts.next().unwrap_or("");
+    
+    // Mark command as running and update UI to show Cancel button
+    unsafe { TERMINAL_COMMAND_RUNNING = true; }
+    draw_terminal_window();
+    d1_display::flush();
+    
+    // Start capturing output
+    {
+        let mut cap = OUTPUT_CAPTURE.lock();
+        cap.capturing = true;
+        cap.len = 0;
+    }
+    
+    // Execute the command using scripting module
+    crate::scripting::execute_command(cmd.as_bytes(), args.as_bytes());
+    
+    // Mark command as finished
+    unsafe { TERMINAL_COMMAND_RUNNING = false; }
+    
+    // Stop capturing and get output  
+    let output = {
+        let mut cap = OUTPUT_CAPTURE.lock();
+        cap.capturing = false;
+        let len = cap.len.min(OUTPUT_BUFFER_SIZE);
+        alloc::vec::Vec::from(&cap.buffer[..len])
+    };
+    
+    // Copy output to terminal buffer (strip ANSI escape codes for cleaner display)
+    unsafe {
+        TERMINAL_OUTPUT_LEN = 0;
+        let mut i = 0;
+        while i < output.len() && TERMINAL_OUTPUT_LEN < TERMINAL_OUTPUT_MAX {
+            // Skip ANSI escape sequences
+            if output[i] == 0x1b && i + 1 < output.len() && output[i + 1] == b'[' {
+                // Find the end of the escape sequence (letter)
+                i += 2;
+                while i < output.len() && !output[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < output.len() {
+                    i += 1; // Skip the letter
+                }
+                continue;
+            }
+            TERMINAL_OUTPUT_BUFFER[TERMINAL_OUTPUT_LEN] = output[i];
+            TERMINAL_OUTPUT_LEN += 1;
+            i += 1;
+        }
+    }
+    
+    // Clear input after execution
+    unsafe {
+        TERMINAL_INPUT_LEN = 0;
+    }
+    
+    // Redraw the terminal window content
+    draw_terminal_window();
+    d1_display::flush();
+}
+
+/// Refresh terminal output during WASM execution (called by terminal_refresh syscall)
+/// Copies current OUTPUT_CAPTURE to TERMINAL_OUTPUT and redraws the window
+pub fn refresh_terminal_output() {
+    use crate::lock::utils::OUTPUT_CAPTURE;
+    use crate::lock::state::output::OUTPUT_BUFFER_SIZE;
+    
+    // Only refresh if terminal window is open and command is running
+    let window_open = unsafe { MAIN_SCREEN_OPEN_WINDOW };
+    if window_open != Some(1) {  // Not terminal window
+        return;
+    }
+    
+    // Copy current output capture to terminal buffer
+    {
+        let cap = OUTPUT_CAPTURE.lock();
+        let len = cap.len.min(OUTPUT_BUFFER_SIZE).min(TERMINAL_OUTPUT_MAX);
+        
+        unsafe {
+            TERMINAL_OUTPUT_LEN = 0;  // Clear first
+            // Copy with ANSI escape code filtering (simplified)
+            let mut i = 0;
+            while i < len && TERMINAL_OUTPUT_LEN < TERMINAL_OUTPUT_MAX {
+                let output = &cap.buffer[..len];
+                if output[i] == 0x1b && i + 1 < len && output[i + 1] == b'[' {
+                    // Skip ANSI escape sequence
+                    i += 2;
+                    while i < len && !output[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    if i < len {
+                        i += 1; // Skip the letter
+                    }
+                    continue;
+                }
+                TERMINAL_OUTPUT_BUFFER[TERMINAL_OUTPUT_LEN] = cap.buffer[i];
+                TERMINAL_OUTPUT_LEN += 1;
+                i += 1;
+            }
+        }
+    }
+    
+    // Redraw terminal window with updated output
+    draw_terminal_window();
+    d1_display::flush();
+}
+
+/// Check if command cancellation was requested (for WASM syscall)
+/// Returns true if cancel was requested, clearing the flag
+pub fn should_cancel() -> bool {
+    unsafe {
+        let requested = TERMINAL_CANCEL_REQUESTED;
+        if requested {
+            TERMINAL_CANCEL_REQUESTED = false;  // Clear after reading
+        }
+        requested
+    }
+}
+
+/// Request cancellation of running command (called by Cancel button or Ctrl+C)
+pub fn request_cancel() {
+    unsafe {
+        if TERMINAL_COMMAND_RUNNING {
+            TERMINAL_CANCEL_REQUESTED = true;
+            // Also add "^C" to output
+            if TERMINAL_OUTPUT_LEN + 3 < TERMINAL_OUTPUT_MAX {
+                TERMINAL_OUTPUT_BUFFER[TERMINAL_OUTPUT_LEN] = b'^';
+                TERMINAL_OUTPUT_BUFFER[TERMINAL_OUTPUT_LEN + 1] = b'C';
+                TERMINAL_OUTPUT_BUFFER[TERMINAL_OUTPUT_LEN + 2] = b'\n';
+                TERMINAL_OUTPUT_LEN += 3;
+            }
+            draw_terminal_window();
+            d1_display::flush();
+        }
+    }
+}
+
+/// Clear cancellation flag (called at command start)
+fn clear_cancel() {
+    unsafe { TERMINAL_CANCEL_REQUESTED = false; }
+}
+
+/// Handle terminal window input (keyboard chars)
+fn handle_terminal_input(key_code: u16, _key_value: i32) -> bool {
+    use crate::platform::d1_touch::{KEY_BACKSPACE, KEY_ENTER};
+    
+    match key_code {
+        KEY_ENTER => {
+            terminal_execute_command();
+            true
+        }
+        KEY_BACKSPACE => {
+            unsafe {
+                if TERMINAL_INPUT_LEN > 0 {
+                    TERMINAL_INPUT_LEN -= 1;
+                    // Fast partial redraw of input field only
+                    draw_terminal_input_only();
+                    d1_display::flush();
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Handle character input for terminal (from ASCII key events)
+fn handle_terminal_char(ch: u8) {
+    // Handle Ctrl+C (0x03) - request cancellation
+    if ch == 0x03 {
+        unsafe { TERMINAL_INPUT_LEN = 0; }  // Clear input
+        request_cancel();
+        return;
+    }
+    
+    if ch >= 0x20 && ch < 0x7F {  // Printable ASCII
+        unsafe {
+            if TERMINAL_INPUT_LEN < TERMINAL_INPUT_MAX - 1 {
+                TERMINAL_INPUT_BUFFER[TERMINAL_INPUT_LEN] = ch;
+                TERMINAL_INPUT_LEN += 1;
+                // Fast partial redraw of input field only
+                draw_terminal_input_only();
+                d1_display::flush();
+            }
+        }
+    }
+}
+
+/// Check if terminal send button was clicked
+fn hit_test_terminal_send_button(x: i32, y: i32) -> bool {
+    // Send button position for 700x500 window:
+    // WIN_X=162, content_x=177, btn_x=content_x+590=767, input_y=WIN_Y+55=189
+    // Button size: 80x28
+    x >= 767 && x < 847 && y >= 189 && y < 217
+}
+
+
 
 /// Redraw the main_screen screen with the given selected button index
 /// Public entry point that calls inner function
@@ -588,14 +1012,15 @@ fn draw_main_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
         
         // Navigation hint
         let hint_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(100, 100, 120));
-        let _ = Text::new("Press Enter to open Network Stats", Point::new(col1_x, 488), hint_style).draw(gpu);
+        let _ = Text::new("Use arrows to select, Enter to open", Point::new(col1_x, 488), hint_style).draw(gpu);
         
         // Mark static content as drawn so next time we skip the expensive clear
         unsafe { MAIN_SCREEN_STATIC_DRAWN = true; }
         
-        // Only Network button now, left aligned (adjusted for 1024x768)
+        // Network and Terminal buttons, left aligned (adjusted for 1024x768)
         let buttons = [
             ("Network", 30),
+            ("Terminal", 150),
         ];
         
         for (i, (label, x)) in buttons.iter().enumerate() {
@@ -761,6 +1186,19 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
         return None;
     }
     
+    // Handle character events (typed characters respecting keyboard layout)
+    // These come from browser with actual character codes (e.g., '/' from Shift+7)
+    if event.event_type == d1_touch::EV_CHAR {
+        // If Terminal window is open, handle the character
+        if let Some(win_idx) = open_window {
+            if win_idx == 1 && event.code > 0 && event.code < 128 {
+                handle_terminal_char(event.code as u8);
+                return None;
+            }
+        }
+        return None;
+    }
+    
     // Handle mouse button events and touch events
     if event.event_type == d1_touch::EV_KEY {
         match event.code {
@@ -775,26 +1213,51 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
                     // Update debug info for touch tracking
                     update_touch_debug(x, y);
                     
-                    // If child window is open, check for close button click
-                    if open_window.is_some() {
-                        // Child window is at (260, 180, 500, 400) - centered for 1024x768
-                        // Close button is at (260 + 12, 180 + 10) with radius 6
-                        let close_btn_x = 260 + 12;
-                        let close_btn_y = 180 + 10;
+                    // If child window is open, check for close button click or Terminal send button
+                    if let Some(win_idx) = open_window {
+                        // Close button position depends on which window is open
+                        // Network window (idx 0): at (260, 180) - close button at (260 + 12, 180 + 10)
+                        // Terminal window (idx 1): at (162, 134) - close button at (162 + 12, 134 + 10)
+                        let (win_x, win_y) = if win_idx == 1 { (162, 134) } else { (260, 180) };
+                        let close_btn_x = win_x + 12;
+                        let close_btn_y = win_y + 10;
                         let dx = x - close_btn_x;
                         let dy = y - close_btn_y;
                         // Check if click is within 12px of button center (button is 12px diameter)
                         if dx * dx + dy * dy < 12 * 12 {
                             // Close the child window - use backing store for instant restore
-                            unsafe { MAIN_SCREEN_OPEN_WINDOW = None; }
+                            // Clear terminal state on close
+                            unsafe {
+                                TERMINAL_INPUT_LEN = 0;
+                                TERMINAL_OUTPUT_LEN = 0;
+                                MAIN_SCREEN_OPEN_WINDOW = None;
+                            }
                             restore_window_backing();
                             d1_display::flush();  // Immediate update
+                            return None;
+                        }
+                        
+                        // If Terminal window is open, check for Run/Cancel button click
+                        if win_idx == 1 && hit_test_terminal_send_button(x, y) {
+                            // If command is running, this is a Cancel button
+                            if unsafe { TERMINAL_COMMAND_RUNNING } {
+                                request_cancel();
+                            } else {
+                                terminal_execute_command();
+                            }
                             return None;
                         }
                     } else {
                         // Main window - check for button clicks
                         if let Some(button_idx) = hit_test_main_screen_button(x, y) {
                             // Open the child window for this button
+                            // Clear terminal state when opening terminal
+                            if button_idx == 1 {
+                                unsafe {
+                                    TERMINAL_INPUT_LEN = 0;
+                                    TERMINAL_OUTPUT_LEN = 0;
+                                }
+                            }
                             unsafe {
                                 MAIN_SCREEN_SELECTED_BUTTON = button_idx;
                                 MAIN_SCREEN_OPEN_WINDOW = Some(button_idx);
@@ -816,36 +1279,122 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
         return None;
     }
     
-    // If child window is open, Escape closes it
-    if open_window.is_some() {
+    // If child window is open
+    if let Some(win_idx) = open_window {
         use crate::platform::d1_touch::KEY_ESC;
+        
+        // ESC closes any child window
         if event.code == KEY_ESC {
-            unsafe { MAIN_SCREEN_OPEN_WINDOW = None; }
+            // Clear terminal state on close
+            unsafe {
+                TERMINAL_INPUT_LEN = 0;
+                TERMINAL_OUTPUT_LEN = 0;
+                MAIN_SCREEN_OPEN_WINDOW = None;
+            }
             restore_window_backing();
             d1_display::flush();
+            return None;
         }
+        
+        // If Terminal window is open, handle keyboard input
+        if win_idx == 1 {
+            // Handle special keys
+            if handle_terminal_input(event.code, event.value) {
+                return None;
+            }
+            
+            // Handle printable characters (key codes 2-13 are numbers, 16-25 are letters etc)
+            // Convert key code to ASCII character
+            let ch = key_code_to_ascii(event.code);
+            if ch != 0 {
+                handle_terminal_char(ch);
+                return None;
+            }
+        }
+        
         return None;
     }
     
     match event.code {
-        KEY_LEFT | KEY_RIGHT => {
-            // Only one button, no navigation needed
+        KEY_LEFT => {
+            // Navigate to previous button
+            unsafe {
+                if MAIN_SCREEN_SELECTED_BUTTON > 0 {
+                    MAIN_SCREEN_SELECTED_BUTTON -= 1;
+                    update_main_screen_buttons(MAIN_SCREEN_SELECTED_BUTTON);
+                }
+            }
+            None
+        }
+        KEY_RIGHT => {
+            // Navigate to next button (2 buttons: 0 and 1)
+            unsafe {
+                if MAIN_SCREEN_SELECTED_BUTTON < 1 {
+                    MAIN_SCREEN_SELECTED_BUTTON += 1;
+                    update_main_screen_buttons(MAIN_SCREEN_SELECTED_BUTTON);
+                }
+            }
             None
         }
         KEY_UP | KEY_DOWN => {
-            // Only one button, no navigation needed
+            // No vertical navigation between buttons
             None
         }
         KEY_ENTER => {
             // Open child window for selected button
             let button_idx = unsafe { MAIN_SCREEN_SELECTED_BUTTON };
+            // Clear terminal state when opening terminal
+            if button_idx == 1 {
+                unsafe {
+                    TERMINAL_INPUT_LEN = 0;
+                    TERMINAL_OUTPUT_LEN = 0;
+                }
+            }
             unsafe { MAIN_SCREEN_OPEN_WINDOW = Some(button_idx); }
             draw_child_window(button_idx);
+            d1_display::flush();
             Some(button_idx)
         }
         _ => None,
     }
 }
+
+/// Convert a key code to ASCII character (basic US keyboard layout)
+fn key_code_to_ascii(code: u16) -> u8 {
+    // Linux input key codes (from linux/input-event-codes.h)
+    // Numbers: KEY_1=2, KEY_2=3, ... KEY_0=11
+    // Letters: KEY_Q=16, KEY_W=17, ... 
+    match code {
+        // Number row
+        2 => b'1', 3 => b'2', 4 => b'3', 5 => b'4', 6 => b'5',
+        7 => b'6', 8 => b'7', 9 => b'8', 10 => b'9', 11 => b'0',
+        12 => b'-', 13 => b'=',
+        
+        // First letter row: QWERTYUIOP
+        16 => b'q', 17 => b'w', 18 => b'e', 19 => b'r', 20 => b't',
+        21 => b'y', 22 => b'u', 23 => b'i', 24 => b'o', 25 => b'p',
+        26 => b'[', 27 => b']',
+        
+        // Second letter row: ASDFGHJKL
+        30 => b'a', 31 => b's', 32 => b'd', 33 => b'f', 34 => b'g',
+        35 => b'h', 36 => b'j', 37 => b'k', 38 => b'l',
+        39 => b';', 40 => b'\'',
+        
+        // Third letter row: ZXCVBNM
+        44 => b'z', 45 => b'x', 46 => b'c', 47 => b'v', 48 => b'b',
+        49 => b'n', 50 => b'm',
+        51 => b',', 52 => b'.', 53 => b'/',
+        
+        // Space
+        57 => b' ',
+        
+        // Punctuation
+        41 => b'`', 43 => b'\\',
+        
+        _ => 0,
+    }
+}
+
 
 // Helper function to format CPU string
 fn format_cpu_str(count: usize, buf: &mut [u8; 32]) -> &str {

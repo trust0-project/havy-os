@@ -29,10 +29,20 @@ const TOUCH_COUNT: usize = D1_I2C2_BASE + 0x110;
 const TOUCH_X_RES: usize = D1_I2C2_BASE + 0x114;
 const TOUCH_Y_RES: usize = D1_I2C2_BASE + 0x118;
 
+// Keyboard MMIO registers (emulator-specific)
+const KEY_COUNT: usize = D1_I2C2_BASE + 0x11C;   // Number of pending keyboard events
+const KEY_CODE: usize = D1_I2C2_BASE + 0x120;    // Key code (Linux evdev)
+const KEY_STATE: usize = D1_I2C2_BASE + 0x124;   // Key state (1=pressed, 0=released)
+
+// Character queue MMIO registers (for typed characters respecting keyboard layout)
+const CHAR_COUNT: usize = D1_I2C2_BASE + 0x128;  // Number of pending characters
+const CHAR_CODE: usize = D1_I2C2_BASE + 0x12C;   // Character ASCII code
+
 // Event types (compatible with VirtIO Input / Linux evdev)
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
+pub const EV_CHAR: u16 = 0x10;  // Custom: typed character (code = ASCII value)
 
 // Absolute axis codes
 pub const ABS_X: u16 = 0x00;
@@ -149,12 +159,73 @@ pub fn init() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Poll for touch events and queue them
+/// Poll for touch and keyboard events and queue them
 /// Thread-safe: can be called from any hart
 pub fn poll() {
+    // First, poll for typed characters (respects keyboard layout)
+    // These are used for Terminal window text input
+    loop {
+        let char_count = read_reg(CHAR_COUNT);
+        if char_count == 0 {
+            break;
+        }
+        
+        // Read the character
+        let char_code = read_reg(CHAR_CODE) as u8;
+        
+        let mut state = TOUCH_STATE.lock();
+        state.event_count = state.event_count.wrapping_add(1);
+        // Use a special event type (0x10) to indicate this is a typed character
+        // This is a custom extension - UI code should check for this
+        state.push_event(InputEvent {
+            event_type: EV_CHAR,  // Custom event type for characters
+            code: char_code as u16,
+            value: 1,  // Always "pressed" for characters
+        });
+        state.push_event(InputEvent {
+            event_type: EV_SYN,
+            code: 0,
+            value: 0,
+        });
+        drop(state);
+        
+        // Acknowledge the character (consume from queue)
+        write_reg(CHAR_COUNT, 0);
+    }
+    
+    // Second, poll for keyboard events (raw keycodes - for Enter, Backspace, etc.)
+    loop {
+        let key_count = read_reg(KEY_COUNT);
+        if key_count == 0 {
+            break;
+        }
+        
+        // Read the key event
+        let key_code = read_reg(KEY_CODE) as u16;
+        let key_state = read_reg(KEY_STATE) as i32;
+        
+        let mut state = TOUCH_STATE.lock();
+        state.event_count = state.event_count.wrapping_add(1);
+        state.push_event(InputEvent {
+            event_type: EV_KEY,
+            code: key_code,
+            value: key_state,
+        });
+        state.push_event(InputEvent {
+            event_type: EV_SYN,
+            code: 0,
+            value: 0,
+        });
+        drop(state);
+        
+        // Clear the key event (by reading - or write 0 to acknowledge)
+        write_reg(KEY_COUNT, 0);
+    }
+    
+    // Then poll for touch events
     let int_status = read_reg(TOUCH_INT_STATUS);
     if int_status == 0 {
-        return; // No interrupt pending
+        return; // No touch interrupt pending
     }
     
     let status = read_reg(TOUCH_STATUS);
@@ -246,4 +317,23 @@ pub fn next_event() -> Option<InputEvent> {
 /// Check if there are pending events
 pub fn has_events() -> bool {
     TOUCH_STATE.lock().has_events()
+}
+
+/// Check if there are pending character inputs
+pub fn has_char_input() -> bool {
+    read_reg(CHAR_COUNT) > 0
+}
+
+/// Peek at the next character without consuming it
+pub fn peek_char() -> Option<u8> {
+    if read_reg(CHAR_COUNT) > 0 {
+        Some(read_reg(CHAR_CODE) as u8)
+    } else {
+        None
+    }
+}
+
+/// Consume the current character from the queue
+pub fn consume_char() {
+    write_reg(CHAR_COUNT, 0);
 }

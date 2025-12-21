@@ -85,6 +85,11 @@ pub mod syscalls {
         pub fn heap_stats(out_ptr: *mut u8) -> i32;
         /// Power off the system. Does not return.
         pub fn shutdown() -> !;
+        /// Refresh terminal display during WASM execution (for live updates like tail -f)
+        pub fn terminal_refresh();
+        /// Check if cancellation was requested (Cancel button or Ctrl+C)
+        /// Returns 1 if should cancel, 0 otherwise
+        pub fn should_cancel() -> i32;
         
         // ═══════════════════════════════════════════════════════════════════
         // WASM Worker Syscalls - For multi-hart WASM execution

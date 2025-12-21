@@ -124,6 +124,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
     let mut linker = Linker::new(&engine);
 
     // Syscall: print(ptr, len)
+    // Uses scripting::out_str to respect OUTPUT_CAPTURE for Terminal window
     linker
         .define(
             "env",
@@ -134,7 +135,8 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
                         let mut buffer = vec![0u8; len as usize];
                         if mem.read(&caller, ptr as usize, &mut buffer).is_ok() {
-                            uart::write_str(&String::from_utf8_lossy(&buffer));
+                            // Use out_str to respect OUTPUT_CAPTURE mode
+                            crate::scripting::out_str(&String::from_utf8_lossy(&buffer));
                         }
                     }
                 },
@@ -861,6 +863,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
 
     // Syscall: sleep_ms(ms) -> ()
     // Sleeps for the specified number of milliseconds.
+    // Also polls for input events to allow Cancel button to work during sleep.
     linker
         .define(
             "env",
@@ -868,12 +871,80 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>, ms: i32| {
                 let start = crate::get_time_ms();
                 let target = start + ms as i64;
+                
                 while crate::get_time_ms() < target {
-                    core::hint::spin_loop();
+                    // Poll for touch/input events
+                    crate::platform::d1_touch::poll();
+                    
+                    // Process any queued events - this allows Cancel button clicks
+                    // to set the cancellation flag
+                    while let Some(event) = crate::platform::d1_touch::next_event() {
+                        crate::ui::main_screen::handle_main_screen_input(event);
+                    }
+                    
+                    // Small delay to avoid burning CPU
+                    for _ in 0..100 {
+                        core::hint::spin_loop();
+                    }
                 }
             }),
         )
         .map_err(|e| format!("define sleep_ms: {:?}", e))?;
+
+    // Syscall: terminal_refresh() -> ()
+    // Updates the Terminal window display with current output during WASM execution.
+    // Used by tail -f and other commands that need to show live updates.
+    linker
+        .define(
+            "env",
+            "terminal_refresh",
+            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| {
+                // Copy from OUTPUT_CAPTURE to Terminal output buffer and redraw
+                crate::ui::main_screen::refresh_terminal_output();
+            }),
+        )
+        .map_err(|e| format!("define terminal_refresh: {:?}", e))?;
+
+    // Syscall: should_cancel() -> i32
+    // Checks if command cancellation was requested (Cancel button, Ctrl+C, or 'q' key)
+    // Also polls for touch events to detect Cancel button clicks
+    // Returns 1 if cancel requested, 0 otherwise.
+    linker
+        .define(
+            "env",
+            "should_cancel",
+            Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
+                // FIRST: Check for 'q' in character queue BEFORE poll() consumes it
+                // This prevents 'q' from becoming an EV_CHAR that goes to Terminal input
+                if crate::platform::d1_touch::has_char_input() {
+                    if let Some(ch) = crate::platform::d1_touch::peek_char() {
+                        if ch == b'q' || ch == b'Q' {
+                            crate::platform::d1_touch::consume_char(); // Remove from queue
+                            return 1;
+                        }
+                    }
+                }
+                
+                // Check the cancellation flag first (set by Cancel button or Ctrl+C)
+                if crate::ui::main_screen::should_cancel() {
+                    return 1;
+                }
+                
+                // Poll for touch events to get any button clicks
+                crate::platform::d1_touch::poll();
+                while let Some(event) = crate::platform::d1_touch::next_event() {
+                    crate::ui::main_screen::handle_main_screen_input(event);
+                }
+                
+                // Check again after processing events (Cancel button might have been clicked)
+                if crate::ui::main_screen::should_cancel() {
+                    return 1;
+                }
+                
+                0
+            }),
+        )
+        .map_err(|e| format!("define should_cancel: {:?}", e))?;
 
     // Syscall: disk_stats(out_ptr) -> i32
     // Gets disk usage statistics. Writes to out_ptr: u64 used_bytes, u64 total_bytes
