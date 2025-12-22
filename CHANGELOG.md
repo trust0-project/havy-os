@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.53](https://github.com/trust0-project/havy-os/compare/v0.1.52...v0.1.53) (2025-12-22)
+
+
+### Bug Fixes
+
+* improve filesystem and fs ([693d4bc](https://github.com/trust0-project/havy-os/commit/693d4bc83c5849d78f8a0d50f2be52c46f849f47))
+
 ## [0.1.52](https://github.com/trust0-project/havy-os/compare/v0.1.51...v0.1.52) (2025-12-21)
 
 
