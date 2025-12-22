@@ -15,7 +15,7 @@ extern crate mkfs;
 mod wasm {
     use core::ptr::addr_of_mut;
     use mkfs::{console_log, argc, argv, get_cwd};
-    use mkfs::syscalls::{print, fs_list};
+    use mkfs::syscalls::{print, fs_list, fs_list_dir};
 
     // Static buffers
     static mut LIST_BUF: [u8; 4096] = [0u8; 4096];
@@ -82,13 +82,34 @@ mod wasm {
             let mut arg = [0u8; 64];
             if let Some(len) = argv(i, &mut arg) {
                 if len > 0 && arg[0] == b'-' {
+                    // Flag argument
                     for j in 1..len {
                         if arg[j] == b'l' { show_long = true; }
                     }
                 } else if len > 0 && arg[0] == b'/' {
+                    // Absolute path
                     let copy = len.min(128);
                     target[..copy].copy_from_slice(&arg[..copy]);
                     target_len = copy;
+                } else if len > 0 {
+                    // Relative path - prepend CWD
+                    // Get current CWD
+                    let cwd_len = target_len;
+                    
+                    // Calculate new path: CWD + "/" + arg
+                    let need_slash = cwd_len > 0 && target[cwd_len - 1] != b'/';
+                    let total_len = cwd_len + (if need_slash { 1 } else { 0 }) + len;
+                    
+                    if total_len <= 128 {
+                        if need_slash {
+                            target[cwd_len] = b'/';
+                            target[cwd_len + 1..cwd_len + 1 + len].copy_from_slice(&arg[..len]);
+                            target_len = cwd_len + 1 + len;
+                        } else {
+                            target[cwd_len..cwd_len + len].copy_from_slice(&arg[..len]);
+                            target_len = cwd_len + len;
+                        }
+                    }
                 }
             }
         }
@@ -97,8 +118,21 @@ mod wasm {
             target_len -= 1;
         }
 
+        let is_root = target_len == 1 && target[0] == b'/';
+        
         let list_len = unsafe {
-            let result = fs_list((*addr_of_mut!(LIST_BUF)).as_mut_ptr(), 4096);
+            let result = if is_root {
+                // For root, use fs_list (lists all entries)
+                fs_list((*addr_of_mut!(LIST_BUF)).as_mut_ptr(), 4096)
+            } else {
+                // For specific directories, use fs_list_dir (routes through VFS)
+                fs_list_dir(
+                    target.as_ptr(),
+                    target_len as i32,
+                    (*addr_of_mut!(LIST_BUF)).as_mut_ptr(),
+                    4096
+                )
+            };
             if result < 0 {
                 console_log("\x1b[31mError: filesystem not available\x1b[0m\n");
                 return;
@@ -112,7 +146,6 @@ mod wasm {
         }
 
         let data = unsafe { &LIST_BUF[..list_len] };
-        let is_root = target_len == 1 && target[0] == b'/';
 
         let mut prefix = [0u8; 130];
         let prefix_len = if is_root {
@@ -155,13 +188,17 @@ mod wasm {
             }
 
             // Check if under target (use manual comparison)
+            // For non-root (fs_list_dir), entries are already relative to target dir
             let is_under = if is_root {
                 (path.len() > 0 && path[0] == b'/') || !bytes_contains(path, b'/')
             } else {
-                bytes_starts_with(path, &prefix[..prefix_len])
+                // fs_list_dir returns entries relative to the target directory
+                // All returned entries are "under" the target, so accept all
+                true
             };
             if !is_under { continue; }
 
+            // Get relative path portion
             let relative = if is_root {
                 if path.len() > 0 && path[0] == b'/' && path.len() > 1 {
                     &path[1..]
@@ -169,8 +206,8 @@ mod wasm {
                     path
                 } else { continue; }
             } else {
-                if prefix_len >= path.len() { continue; }
-                &path[prefix_len..]
+                // For fs_list_dir, path is already relative (e.g., "demo.txt")
+                path
             };
             if relative.is_empty() { continue; }
 
@@ -192,7 +229,7 @@ mod wasm {
                             break;
                         }
                     }
-                    if !already_seen && seen_count < 32 && entry_count < 64 && names_pos + dir_name.len() <= NAMES.len() {
+                    if !already_seen && dir_name.len() > 0 && seen_count < 32 && entry_count < 64 && names_pos + dir_name.len() <= NAMES.len() {
                         let copy_len = dir_name.len().min(255);
                         NAMES[names_pos..names_pos + copy_len].copy_from_slice(&dir_name[..copy_len]);
                         SEEN_START[seen_count] = names_pos as u16;

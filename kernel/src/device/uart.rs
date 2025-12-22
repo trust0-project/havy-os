@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::vec::Vec;
 
-use crate::lock::utils::{BLK_DEV, FS_STATE, OUTPUT_CAPTURE};
+use crate::lock::utils::OUTPUT_CAPTURE;
 use crate::scripting::execute_command;
 use crate::utils::{poll_tail_follow, resolve_path};
 use crate::services::{klogd, sysmond};
@@ -407,39 +407,31 @@ pub fn handle_line(buffer: &[u8], len: usize, _count: &mut usize) {
             // Resolve path relative to CWD
             let resolved_path = resolve_path(filename);
 
-            let mut fs_guard = FS_STATE.write();
-            let mut blk_guard = BLK_DEV.write();
-            if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-                let final_data = if redirect_mode == RedirectMode::Append {
-                    // Read existing file content and append
-                    let mut combined = match fs.read_file(dev, &resolved_path) {
-                        Some(existing) => existing,
-                        None => Vec::new(),
-                    };
-                    combined.extend_from_slice(&output);
-                    combined
-                } else {
-                    // Overwrite mode - just use new output
-                    output
+            // Use fs_proxy for VFS support (mount point routing)
+            let final_data = if redirect_mode == RedirectMode::Append {
+                // Read existing file content and append
+                let mut combined = match crate::cpu::fs_proxy::fs_read(&resolved_path) {
+                    Some(existing) => existing,
+                    None => Vec::new(),
                 };
-
-                match fs.write_file(dev, &resolved_path, &final_data) {
-                    Ok(()) => {
-                        // Sync to ensure data is written to disk
-                        let _ = fs.sync(dev);
-                        write_line("");
-                        write_str("\x1b[1;32m[OK]\x1b[0m Output written to ");
-                        write_line(&resolved_path);
-                    }
-                    Err(e) => {
-                        write_line("");
-                        write_str("\x1b[1;31mError:\x1b[0m Failed to write to file: ");
-                        write_line(e);
-                    }
-                }
+                combined.extend_from_slice(&output);
+                combined
             } else {
-                write_line("");
-                write_line("\x1b[1;31mError:\x1b[0m Filesystem not available");
+                // Overwrite mode - just use new output
+                output
+            };
+
+            match crate::cpu::fs_proxy::fs_write(&resolved_path, &final_data) {
+                Ok(()) => {
+                    write_line("");
+                    write_str("\x1b[1;32m[OK]\x1b[0m Output written to ");
+                    write_line(&resolved_path);
+                }
+                Err(e) => {
+                    write_line("");
+                    write_str("\x1b[1;31mError:\x1b[0m Failed to write to file: ");
+                    write_line(e);
+                }
             }
         } else {
             write_line("");

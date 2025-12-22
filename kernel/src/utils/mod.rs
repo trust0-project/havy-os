@@ -89,14 +89,22 @@ pub(crate) fn resolve_path(path: &str) -> alloc::string::String {
 
 /// Check if a path exists (has files under it or is a file)
 pub(crate) fn path_exists(path: &str) -> bool {
+    // Root always exists
+    if path == "/" {
+        return true;
+    }
+    
+    // Use VFS for mount point visibility
+    let mut vfs_guard = crate::lock::utils::VFS_STATE.write();
+    if let Some(vfs) = vfs_guard.as_mut() {
+        return vfs.exists(path);
+    }
+    drop(vfs_guard);
+    
+    // Fall back to legacy FS_STATE
     let mut fs_guard = FS_STATE.write();
     let mut blk_guard = BLK_DEV.write();
     if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-        // Root always exists
-        if path == "/" {
-            return true;
-        }
-
         let files = fs.list_dir(dev, "/");
         let path_with_slash = if path.ends_with('/') {
             alloc::string::String::from(path)

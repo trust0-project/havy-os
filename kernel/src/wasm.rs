@@ -371,6 +371,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("define fs_write: {:?}", e))?;
 
     // Syscall: fs_list(buf_ptr, buf_len) -> i32
+    // Multi-hart safe: Uses fs_proxy for filesystem access with VFS support.
     linker
         .define(
             "env",
@@ -378,27 +379,25 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             Func::wrap(
                 &mut store,
                 |mut caller: Caller<'_, WasmContext>, buf_ptr: i32, buf_len: i32| -> i32 {
-                    let mut fs_guard = crate::FS_STATE.write();
-                    let mut blk_guard = BLK_DEV.write();
-                    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-                        let files = fs.list_dir(dev, "/");
-                        // Format as simple newline-separated list: "name:size\n"
-                        let mut output = String::new();
-                        for file in files {
-                            output.push_str(&file.name);
-                            output.push(':');
-                            output.push_str(&format!("{}", file.size));
-                            output.push('\n');
-                        }
-                        let bytes = output.as_bytes();
-                        if bytes.len() > buf_len as usize {
-                            return -1;
-                        }
-                        if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory())
-                        {
-                            if mem.write(&mut caller, buf_ptr as usize, bytes).is_ok() {
-                                return bytes.len() as i32;
-                            }
+                    // Use fs_proxy for VFS support (includes mount points)
+                    let files = crate::cpu::fs_proxy::fs_list("/");
+                    
+                    // Format as simple newline-separated list: "name:size\n"
+                    let mut output = String::new();
+                    for file in files {
+                        output.push_str(&file.name);
+                        output.push(':');
+                        output.push_str(&format!("{}", file.size));
+                        output.push('\n');
+                    }
+                    let bytes = output.as_bytes();
+                    if bytes.len() > buf_len as usize {
+                        return -1;
+                    }
+                    if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory())
+                    {
+                        if mem.write(&mut caller, buf_ptr as usize, bytes).is_ok() {
+                            return bytes.len() as i32;
                         }
                     }
                     -1
@@ -685,6 +684,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
 
     // Syscall: fs_list_dir(path_ptr, path_len, buf_ptr, buf_len) -> i32
     // Lists files in a specific directory (not just root).
+    // Multi-hart safe: Uses fs_proxy for filesystem access with VFS support.
     // Returns bytes written or -1 on error.
     linker
         .define(
@@ -702,40 +702,24 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                         let mut path_buf = vec![0u8; path_len as usize];
                         if mem.read(&caller, path_ptr as usize, &mut path_buf).is_ok() {
                             if let Ok(dir_path) = core::str::from_utf8(&path_buf) {
-                                let mut fs_guard = crate::FS_STATE.write();
-                                let mut blk_guard = BLK_DEV.write();
-                                if let (Some(fs), Some(dev)) =
-                                    (fs_guard.as_mut(), blk_guard.as_mut())
-                                {
-                                    let files = fs.list_dir(dev, dir_path);
+                                // Use fs_proxy for VFS support (includes mount points)
+                                let files = crate::cpu::fs_proxy::fs_list(dir_path);
 
-                                    // Build prefix for filtering
-                                    let prefix = if dir_path == "/" {
-                                        String::from("/")
-                                    } else {
-                                        let p = dir_path.trim_end_matches('/');
-                                        format!("{}/", p)
-                                    };
+                                // Format entries as "name:size\n"
+                                let mut output = String::new();
+                                for file in files {
+                                    output.push_str(&file.name);
+                                    output.push(':');
+                                    output.push_str(&format!("{}", file.size));
+                                    output.push('\n');
+                                }
 
-                                    // Format filtered entries as "name:size\n"
-                                    let mut output = String::new();
-                                    for file in files {
-                                        // Only include files that match the directory
-                                        if file.name.starts_with(&prefix) || (dir_path == "/" && file.name.starts_with('/')) {
-                                            output.push_str(&file.name);
-                                            output.push(':');
-                                            output.push_str(&format!("{}", file.size));
-                                            output.push('\n');
-                                        }
-                                    }
-
-                                    let bytes = output.as_bytes();
-                                    if bytes.len() > buf_len as usize {
-                                        return -1;
-                                    }
-                                    if mem.write(&mut caller, buf_ptr as usize, bytes).is_ok() {
-                                        return bytes.len() as i32;
-                                    }
+                                let bytes = output.as_bytes();
+                                if bytes.len() > buf_len as usize {
+                                    return -1;
+                                }
+                                if mem.write(&mut caller, buf_ptr as usize, bytes).is_ok() {
+                                    return bytes.len() as i32;
                                 }
                             }
                         }

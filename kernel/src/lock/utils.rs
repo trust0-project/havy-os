@@ -10,6 +10,8 @@ use crate::{RwLock, Spinlock, lock::state::{
     tail::TailFollowState,
     waitq::WaitQueueState,
 }};
+use crate::fs::Vfs;
+
 
 // Re-export constants from state submodules
 pub(crate) use crate::lock::state::cwd::CWD_MAX_LEN;
@@ -18,6 +20,8 @@ pub(crate) use crate::lock::state::output::OUTPUT_BUFFER_SIZE;
 pub(crate) static CWD_STATE: Spinlock<CwdState> = Spinlock::new(CwdState::new());
 pub(crate) static NET_STATE: Spinlock<Option<NetState>> = Spinlock::new(None);
 pub(crate) static FS_STATE: RwLock<Option<FileSystemState>> = RwLock::new(None);
+pub(crate) static VFS_STATE: RwLock<Option<Vfs>> = RwLock::new(None);
+
 pub(crate) static TIMER_WAITQ: Spinlock<Option<WaitQueueState>> = Spinlock::new(None);
 pub(crate) static IO_WAITQ: Spinlock<Option<WaitQueueState>> = Spinlock::new(None);
 pub(crate) static IPC_WAITQ: Spinlock<Option<WaitQueueState>> = Spinlock::new(None);

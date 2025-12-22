@@ -520,48 +520,96 @@ fn handle_block_request(request: &IoRequest) -> IoResult {
         // ═══════════════════════════════════════════════════════════════════════
         
         IoOp::FsRead { path } => {
-            let mut fs = crate::lock::utils::FS_STATE.write();
-            let mut blk = crate::lock::utils::BLK_DEV.write();
-            
-            if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
-                match fs.read_file(dev, path) {
-                    Some(data) => IoResult::Ok(data),
-                    None => IoResult::Err("File not found"),
+            // Check if path is under a VFS mount point (9P filesystem)
+            if path.starts_with("/mnt/") {
+                // Use VFS for mounted filesystems
+                let mut vfs_guard = crate::lock::utils::VFS_STATE.write();
+                if let Some(vfs) = vfs_guard.as_mut() {
+                    let result = vfs.read_file(path);
+                    drop(vfs_guard);
+                    match result {
+                        Some(data) => IoResult::Ok(data),
+                        None => IoResult::Err("File not found"),
+                    }
+                } else {
+                    IoResult::Err("VFS not available")
                 }
             } else {
-                IoResult::Err("Filesystem not available")
+                // Use FS_STATE directly for root filesystem (SFS)
+                let mut fs = crate::lock::utils::FS_STATE.write();
+                let mut blk = crate::lock::utils::BLK_DEV.write();
+                
+                if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
+                    match fs.read_file(dev, path) {
+                        Some(data) => IoResult::Ok(data),
+                        None => IoResult::Err("File not found"),
+                    }
+                } else {
+                    IoResult::Err("Filesystem not available")
+                }
             }
         }
         
         IoOp::FsWrite { path, data } => {
-            let mut fs = crate::lock::utils::FS_STATE.write();
-            let mut blk = crate::lock::utils::BLK_DEV.write();
-            
-            if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
-                match fs.write_file(dev, path, data) {
+            // Use VFS for mount point routing
+            let mut vfs_guard = crate::lock::utils::VFS_STATE.write();
+            if let Some(vfs) = vfs_guard.as_mut() {
+                match vfs.write_file(path, data) {
                     Ok(()) => IoResult::Ok(Vec::new()),
                     Err(e) => IoResult::Err(e),
                 }
             } else {
-                IoResult::Err("Filesystem not available")
+                drop(vfs_guard);
+                // Fallback to legacy FS_STATE
+                let mut fs = crate::lock::utils::FS_STATE.write();
+                let mut blk = crate::lock::utils::BLK_DEV.write();
+                
+                if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
+                    match fs.write_file(dev, path, data) {
+                        Ok(()) => IoResult::Ok(Vec::new()),
+                        Err(e) => IoResult::Err(e),
+                    }
+                } else {
+                    IoResult::Err("Filesystem not available")
+                }
             }
         }
         
         IoOp::FsList { path } => {
-            let mut fs = crate::lock::utils::FS_STATE.write();
-            let mut blk = crate::lock::utils::BLK_DEV.write();
-            
-            if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
-                let entries = fs.list_dir(dev, path);
-                // Serialize entries as newline-separated paths
+            // Use VFS for mount point visibility
+            let mut vfs_guard = crate::lock::utils::VFS_STATE.write();
+            if let Some(vfs) = vfs_guard.as_mut() {
+                let entries = vfs.list_dir(path);
+                // Serialize entries as "name:size\n" format (compatible with ls binary)
                 let mut result = Vec::new();
                 for entry in entries {
                     result.extend_from_slice(entry.name.as_bytes());
+                    result.push(b':');
+                    // Format size as string
+                    let size_str = alloc::format!("{}", entry.size);
+                    result.extend_from_slice(size_str.as_bytes());
                     result.push(b'\n');
                 }
                 IoResult::Ok(result)
             } else {
-                IoResult::Err("Filesystem not available")
+                // Fall back to legacy FS_STATE
+                let mut fs = crate::lock::utils::FS_STATE.write();
+                let mut blk = crate::lock::utils::BLK_DEV.write();
+                
+                if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
+                    let entries = fs.list_dir(dev, path);
+                    let mut result = Vec::new();
+                    for entry in entries {
+                        result.extend_from_slice(entry.name.as_bytes());
+                        result.push(b':');
+                        let size_str = alloc::format!("{}", entry.size);
+                        result.extend_from_slice(size_str.as_bytes());
+                        result.push(b'\n');
+                    }
+                    IoResult::Ok(result)
+                } else {
+                    IoResult::Err("Filesystem not available")
+                }
             }
         }
         
