@@ -157,34 +157,58 @@ pub struct InputDriver {
 }
 
 impl InputDriver {
-    /// Probe for VirtIO Input device at potential base addresses
+    /// Probe for VirtIO Input device using DTB discovery or fallback addresses
     pub fn probe() -> Option<Self> {
-        const VIRTIO_BASE: usize = 0x1000_1000;
-        const VIRTIO_STRIDE: usize = 0x1000;
+        // Try DTB discovery first
+        let virtio_devices = crate::dtb::find_by_compatible("virtio,mmio");
+        
+        // Check each VirtIO device for Input capability
+        for device in &virtio_devices {
+            let base = device.reg_base as usize;
+            if Self::check_device_id(base) {
+                return Self::create_driver(base);
+            }
+        }
+        
+        // Fallback to legacy hardcoded addresses if DTB discovery didn't find anything
+        if virtio_devices.is_empty() {
+            const VIRTIO_BASE: usize = 0x1000_1000;
+            const VIRTIO_STRIDE: usize = 0x1000;
 
-        for i in 0..8 {
-            let base = VIRTIO_BASE + i * VIRTIO_STRIDE;
-            unsafe {
-                let magic = core::ptr::read_volatile((base + MAGIC_VALUE_OFFSET) as *const u32);
-                let device_id = core::ptr::read_volatile((base + DEVICE_ID_OFFSET) as *const u32);
-                
-                if magic == 0x7472_6976 && device_id == VIRTIO_INPUT_DEVICE_ID {
-                    let queue_mem = InputQueueMem::new();
-                    let event_buffers = alloc::boxed::Box::new(
-                        [InputEvent { event_type: 0, code: 0, value: 0 }; QUEUE_SIZE as usize]
-                    );
-                    return Some(Self {
-                        base,
-                        queue_mem,
-                        event_buffers,
-                        event_queue: VecDeque::with_capacity(32),
-                        last_used_idx: 0,
-                        initialized: AtomicBool::new(false),
-                    });
+            for i in 0..8 {
+                let base = VIRTIO_BASE + i * VIRTIO_STRIDE;
+                if Self::check_device_id(base) {
+                    return Self::create_driver(base);
                 }
             }
         }
+        
         None
+    }
+    
+    /// Check if device at base address is a VirtIO Input device
+    fn check_device_id(base: usize) -> bool {
+        unsafe {
+            let magic = core::ptr::read_volatile((base + MAGIC_VALUE_OFFSET) as *const u32);
+            let device_id = core::ptr::read_volatile((base + DEVICE_ID_OFFSET) as *const u32);
+            magic == 0x7472_6976 && device_id == VIRTIO_INPUT_DEVICE_ID
+        }
+    }
+    
+    /// Create driver instance for device at base address
+    fn create_driver(base: usize) -> Option<Self> {
+        let queue_mem = InputQueueMem::new();
+        let event_buffers = alloc::boxed::Box::new(
+            [InputEvent { event_type: 0, code: 0, value: 0 }; QUEUE_SIZE as usize]
+        );
+        Some(Self {
+            base,
+            queue_mem,
+            event_buffers,
+            event_queue: VecDeque::with_capacity(32),
+            last_used_idx: 0,
+            initialized: AtomicBool::new(false),
+        })
     }
 
     /// Initialize the input device with proper virtqueue setup

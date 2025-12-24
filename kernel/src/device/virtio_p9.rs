@@ -137,38 +137,62 @@ pub struct VirtioP9Driver {
 }
 
 impl VirtioP9Driver {
-    /// Probe for VirtIO 9P device at potential base addresses
+    /// Probe for VirtIO 9P device using DTB discovery or fallback addresses
     pub fn probe() -> Option<Self> {
-        const VIRTIO_BASE: usize = 0x1000_1000;
-        const VIRTIO_STRIDE: usize = 0x1000;
-
-        for i in 0..8 {
-            let base = VIRTIO_BASE + i * VIRTIO_STRIDE;
-            unsafe {
-                let magic = core::ptr::read_volatile((base + MAGIC_VALUE_OFFSET) as *const u32);
-                let device_id = core::ptr::read_volatile((base + DEVICE_ID_OFFSET) as *const u32);
-
-                if magic == 0x7472_6976 && device_id == VIRTIO_9P_DEVICE_ID {
-                    let queue_mem = P9QueueMem::new();
-                    let request_buf = Box::new([0u8; DEFAULT_MSIZE as usize]);
-                    let response_buf = Box::new([0u8; DEFAULT_MSIZE as usize]);
-                    
-                    return Some(Self {
-                        base,
-                        queue_mem,
-                        request_buf,
-                        response_buf,
-                        msize: DEFAULT_MSIZE,
-                        root_fid: 0,
-                        next_fid: AtomicU32::new(1),
-                        last_used_idx: 0,
-                        next_tag: AtomicU32::new(1),
-                        initialized: AtomicBool::new(false),
-                    });
+        // Try DTB discovery first
+        let virtio_devices = crate::dtb::find_by_compatible("virtio,mmio");
+        
+        // Check each VirtIO device for 9P capability
+        for device in &virtio_devices {
+            let base = device.reg_base as usize;
+            if Self::check_device_id(base, VIRTIO_9P_DEVICE_ID) {
+                return Self::create_driver(base);
+            }
+        }
+        
+        // Fallback to legacy hardcoded addresses if DTB discovery didn't find anything
+        if virtio_devices.is_empty() {
+            const VIRTIO_BASE: usize = 0x1000_1000;
+            const VIRTIO_STRIDE: usize = 0x1000;
+            
+            for i in 0..8 {
+                let base = VIRTIO_BASE + i * VIRTIO_STRIDE;
+                if Self::check_device_id(base, VIRTIO_9P_DEVICE_ID) {
+                    return Self::create_driver(base);
                 }
             }
         }
+        
         None
+    }
+    
+    /// Check if device at base address has matching device ID
+    fn check_device_id(base: usize, expected_id: u32) -> bool {
+        unsafe {
+            let magic = core::ptr::read_volatile((base + MAGIC_VALUE_OFFSET) as *const u32);
+            let device_id = core::ptr::read_volatile((base + DEVICE_ID_OFFSET) as *const u32);
+            magic == 0x7472_6976 && device_id == expected_id
+        }
+    }
+    
+    /// Create driver instance for device at base address
+    fn create_driver(base: usize) -> Option<Self> {
+        let queue_mem = P9QueueMem::new();
+        let request_buf = Box::new([0u8; DEFAULT_MSIZE as usize]);
+        let response_buf = Box::new([0u8; DEFAULT_MSIZE as usize]);
+        
+        Some(Self {
+            base,
+            queue_mem,
+            request_buf,
+            response_buf,
+            msize: DEFAULT_MSIZE,
+            root_fid: 0,
+            next_fid: AtomicU32::new(1),
+            last_used_idx: 0,
+            next_tag: AtomicU32::new(1),
+            initialized: AtomicBool::new(false),
+        })
     }
 
     /// Read the mount tag from config space

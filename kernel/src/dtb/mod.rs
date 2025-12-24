@@ -1,9 +1,19 @@
 pub(crate) static DTB_ADDR: AtomicUsize = AtomicUsize::new(0);
 
+mod parser;
+
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::services::klogd::{klog_info, klog_warning};
+use crate::Spinlock;
+
+// Re-export parser types
+pub use parser::DeviceNode;
+
+/// Cached device registry (parsed once at init)
+static DEVICE_REGISTRY: Spinlock<Vec<DeviceNode>> = Spinlock::new(Vec::new());
 
 /// FDT header magic number
 const FDT_MAGIC: u32 = 0xd00dfeed;
@@ -31,6 +41,19 @@ pub fn init(dtb_addr: usize) {
         if let Some(size) = validate_dtb(dtb_addr) {
             DTB_SIZE.store(size, Ordering::Relaxed);
             klog_info("dtb", &alloc::format!("DTB valid, size: {} bytes", size));
+            
+            // Parse device nodes and cache them
+            let devices = parser::parse_devices(dtb_addr);
+            klog_info("dtb", &alloc::format!("Discovered {} devices", devices.len()));
+            
+            for device in &devices {
+                klog_info("dtb", &alloc::format!(
+                    "  {} @ 0x{:x} ({})",
+                    device.name, device.reg_base, device.compatible
+                ));
+            }
+            
+            *DEVICE_REGISTRY.lock() = devices;
         } else {
             klog_warning("dtb", "Invalid DTB magic - ignoring");
             DTB_ADDRESS.store(0, Ordering::Release);
@@ -150,4 +173,48 @@ pub fn read_string_at_offset(strings_offset: usize) -> Option<String> {
     }
     
     String::from_utf8(bytes).ok()
+}
+
+// ============================================================================
+// Device Discovery API
+// ============================================================================
+
+/// Find all devices matching a compatible string.
+///
+/// # Example
+/// ```
+/// let virtio_devices = dtb::find_by_compatible("virtio,mmio");
+/// for dev in virtio_devices {
+///     println!("VirtIO device at 0x{:x}", dev.reg_base);
+/// }
+/// ```
+pub fn find_by_compatible(compat: &str) -> Vec<DeviceNode> {
+    DEVICE_REGISTRY
+        .lock()
+        .iter()
+        .filter(|d| d.compatible == compat || d.compatible.starts_with(compat))
+        .cloned()
+        .collect()
+}
+
+/// Get all discovered devices.
+pub fn get_all_devices() -> Vec<DeviceNode> {
+    DEVICE_REGISTRY.lock().clone()
+}
+
+/// Check if a device with given compatible string exists.
+pub fn has_device(compat: &str) -> bool {
+    DEVICE_REGISTRY
+        .lock()
+        .iter()
+        .any(|d| d.compatible == compat || d.compatible.starts_with(compat))
+}
+
+/// Find first device matching a compatible string.
+pub fn find_first(compat: &str) -> Option<DeviceNode> {
+    DEVICE_REGISTRY
+        .lock()
+        .iter()
+        .find(|d| d.compatible == compat || d.compatible.starts_with(compat))
+        .cloned()
 }
