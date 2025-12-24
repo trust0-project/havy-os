@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.55](https://github.com/trust0-project/havy-os/compare/v0.1.54...v0.1.55) (2025-12-24)
+
+
+### Bug Fixes
+
+* file system access with single hart ([97f7195](https://github.com/trust0-project/havy-os/commit/97f71957821d2c61363af47e3644f1cfdc8d8d6d))
+
 ## [0.1.54](https://github.com/trust0-project/havy-os/compare/v0.1.53...v0.1.54) (2025-12-24)
 
 
