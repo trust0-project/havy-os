@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.54](https://github.com/trust0-project/havy-os/compare/v0.1.53...v0.1.54) (2025-12-24)
+
+
+### Bug Fixes
+
+* device tree discovery ([1a899d4](https://github.com/trust0-project/havy-os/commit/1a899d4395307b83c395371075ab0b31cb3b26b3))
+
 ## [0.1.53](https://github.com/trust0-project/havy-os/compare/v0.1.52...v0.1.53) (2025-12-22)
 
 
