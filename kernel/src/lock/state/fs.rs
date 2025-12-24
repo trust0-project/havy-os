@@ -568,20 +568,29 @@ impl FileSystemState {
     }
 
     fn find_entry_pos(&self, dev: &mut BlockDev, name: &str) -> Option<(u64, usize)> {
+        use crate::device::uart::{write_str, write_hex};
+        
+ 
+        
         let mut buf = [0u8; 512];
+        let mut entries_found = 0u64;
         
         for i in 0..SEC_DIR_COUNT {
             let sector = SEC_DIR_START + i;
             
             if dev.read_sector(sector, &mut buf).is_err() {
+         
                 return None;
             }
+            
+
             
             for j in 0..ENTRIES_PER_SECTOR {
                 let offset = j * DIR_ENTRY_SIZE;
                 if buf[offset] == 0 {
                     continue;
                 }
+                entries_found += 1;
                 let entry = unsafe { &*(buf[offset..offset + DIR_ENTRY_SIZE].as_ptr() as *const DirEntry) };
                 let len = entry.name.iter().position(|&c| c == 0).unwrap_or(64);
                 let entry_name = core::str::from_utf8(&entry.name[..len]).unwrap_or("");

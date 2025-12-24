@@ -132,8 +132,13 @@ impl Vfs {
 
     /// Read a file
     pub fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
-        let (fs, relative) = self.resolve_mut(path)?;
-        fs.read_file(&relative)
+        use crate::device::uart::write_str;
+        if let Some((fs, relative)) = self.resolve_mut(path) {
+            let result = fs.read_file(&relative);
+            result
+        } else {
+            None
+        }
     }
 
     /// Write a file

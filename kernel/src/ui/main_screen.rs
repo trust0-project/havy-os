@@ -676,6 +676,80 @@ fn draw_terminal_input_only() {
     });
 }
 
+/// Fast partial redraw of ONLY the output area (for responsive command output)
+/// This is much faster than redrawing the entire terminal window
+fn draw_terminal_output_only() {
+    // Must match coordinates from draw_terminal_window
+    const WIN_X: u32 = 162;
+    const WIN_Y: u32 = 134;
+    const CONTENT_X: u32 = WIN_X + 15;
+    // OUTPUT_Y = input_y + 40 + 10 = (WIN_Y + 55) + 40 + 10 = WIN_Y + 105
+    const OUTPUT_Y: u32 = WIN_Y + 105;
+    
+    d1_display::with_gpu(|gpu| {
+        let output_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(80, 200, 120));
+        
+        // Clear only the output area interior (not the border)
+        // Output area is at (CONTENT_X, OUTPUT_Y) with size (670, 340)
+        gpu.fill_rect(CONTENT_X + 1, OUTPUT_Y + 1, 668, 338, 10, 10, 15);
+        
+        // Draw output text (multi-line)
+        let output_text = unsafe {
+            core::str::from_utf8(&TERMINAL_OUTPUT_BUFFER[..TERMINAL_OUTPUT_LEN]).unwrap_or("")
+        };
+        
+        let max_chars_per_line = 92;  // 670px / 7px per char ≈ 95, leave margin
+        let mut y = OUTPUT_Y as i32 + 15;
+        let mut line_count = 0;
+        
+        for line in output_text.lines() {
+            if line_count >= 22 {
+                break;
+            }
+            let display_line = if line.len() > max_chars_per_line {
+                &line[..max_chars_per_line]
+            } else {
+                line
+            };
+            let _ = Text::new(display_line, Point::new(CONTENT_X as i32 + 7, y), output_style).draw(gpu);
+            y += 15;
+            line_count += 1;
+        }
+    });
+}
+
+/// Fast partial redraw of ONLY the Run/Cancel button (for responsive button state changes)
+/// This is much faster than redrawing the entire terminal window
+fn draw_terminal_button_only() {
+    // Must match coordinates from draw_terminal_window
+    const WIN_X: u32 = 162;
+    const WIN_Y: u32 = 134;
+    const CONTENT_X: u32 = WIN_X + 15;
+    const INPUT_Y: u32 = WIN_Y + 55;
+    const BTN_X: i32 = CONTENT_X as i32 + 590;
+    
+    d1_display::with_gpu(|gpu| {
+        let is_running = unsafe { TERMINAL_COMMAND_RUNNING };
+        let (btn_color, btn_text) = if is_running {
+            (Rgb888::new(200, 80, 80), "Cancel")  // Red cancel button
+        } else {
+            (Rgb888::new(80, 140, 200), "Run")    // Blue run button
+        };
+        
+        // Clear button area and redraw
+        let _ = RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(BTN_X, INPUT_Y as i32), Size::new(80, 28)),
+            Size::new(4, 4),
+        )
+        .into_styled(PrimitiveStyle::with_fill(btn_color))
+        .draw(gpu);
+        
+        let text_x = if is_running { BTN_X + 14 } else { BTN_X + 25 };
+        let _ = Text::new(btn_text, Point::new(text_x, INPUT_Y as i32 + 19), 
+            MonoTextStyle::new(&FONT_7X14, Rgb888::WHITE)).draw(gpu);
+    });
+}
+
 /// Execute a command in the terminal window and capture output
 fn terminal_execute_command() {
     use crate::lock::utils::OUTPUT_CAPTURE;
@@ -702,9 +776,9 @@ fn terminal_execute_command() {
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("");
     
-    // Mark command as running and update UI to show Cancel button
+    // Mark command as running and update UI to show Cancel button (partial redraw - just the button)
     unsafe { TERMINAL_COMMAND_RUNNING = true; }
-    draw_terminal_window();
+    draw_terminal_button_only();
     d1_display::flush();
     
     // Start capturing output
@@ -756,8 +830,10 @@ fn terminal_execute_command() {
         TERMINAL_INPUT_LEN = 0;
     }
     
-    // Redraw the terminal window content
-    draw_terminal_window();
+    // Partial redraws: clear input, update output, restore button to Run state
+    draw_terminal_input_only();
+    draw_terminal_output_only();
+    draw_terminal_button_only();
     d1_display::flush();
 }
 
@@ -802,8 +878,8 @@ pub fn refresh_terminal_output() {
         }
     }
     
-    // Redraw terminal window with updated output
-    draw_terminal_window();
+    // Fast partial redraw of just the output area (much faster than full window redraw)
+    draw_terminal_output_only();
     d1_display::flush();
 }
 
@@ -1283,17 +1359,23 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
     if let Some(win_idx) = open_window {
         use crate::platform::d1_touch::KEY_ESC;
         
-        // ESC closes any child window
+        // ESC handling: if command is running, cancel it; otherwise close the window
         if event.code == KEY_ESC {
-            // Clear terminal state on close
-            unsafe {
-                TERMINAL_INPUT_LEN = 0;
-                TERMINAL_OUTPUT_LEN = 0;
-                MAIN_SCREEN_OPEN_WINDOW = None;
+            if unsafe { TERMINAL_COMMAND_RUNNING } {
+                // Command is running - ESC cancels it
+                request_cancel();
+                return None;
+            } else {
+                // No command running - close the child window
+                unsafe {
+                    TERMINAL_INPUT_LEN = 0;
+                    TERMINAL_OUTPUT_LEN = 0;
+                    MAIN_SCREEN_OPEN_WINDOW = None;
+                }
+                restore_window_backing();
+                d1_display::flush();
+                return None;
             }
-            restore_window_backing();
-            d1_display::flush();
-            return None;
         }
         
         // If Terminal window is open, handle keyboard input

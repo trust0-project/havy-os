@@ -109,7 +109,8 @@ impl D1Mmc {
 
     /// Initialize the MMC controller and detect SD card
     pub fn init(&mut self) -> Result<(), BlockError> {
-        // Reset controller
+        use crate::device::uart::{write_str, write_hex};
+        
         self.write_reg(SMHC_CTRL, 0x7);  // Software reset
         self.wait_reset()?;
 
@@ -132,10 +133,10 @@ impl D1Mmc {
             if (resp & 0xFF) != 0xAA {
                 return Err(BlockError::NotReady);
             }
-        }
+        } 
 
         // Send ACMD41 (SD_SEND_OP_COND) repeatedly until card is ready
-        for _ in 0..100 {
+        for i in 0..100 {
             // CMD55 (APP_CMD) precedes ACMD
             self.send_cmd(55, 0, CMD_RESP_EXP)?;
             

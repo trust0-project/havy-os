@@ -860,8 +860,18 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                     // Poll for touch/input events
                     crate::platform::d1_touch::poll();
                     
+                    // Check for 'q' key directly in character queue
+                    if crate::platform::d1_touch::has_char_input() {
+                        if let Some(ch) = crate::platform::d1_touch::peek_char() {
+                            if ch == b'q' || ch == b'Q' {
+                                crate::platform::d1_touch::consume_char();
+                                crate::ui::main_screen::request_cancel();
+                            }
+                        }
+                    }
+                    
                     // Process any queued events - this allows Cancel button clicks
-                    // to set the cancellation flag
+                    // and ESC key to set the cancellation flag
                     while let Some(event) = crate::platform::d1_touch::next_event() {
                         crate::ui::main_screen::handle_main_screen_input(event);
                     }
@@ -878,17 +888,33 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
     // Syscall: terminal_refresh() -> ()
     // Updates the Terminal window display with current output during WASM execution.
     // Used by tail -f and other commands that need to show live updates.
+    // Also polls for input events to ensure Cancel button/ESC/q work.
     linker
         .define(
             "env",
             "terminal_refresh",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| {
+                // Poll for touch/input events first (to catch Cancel button clicks and ESC/q)
+                crate::platform::d1_touch::poll();
+                while let Some(event) = crate::platform::d1_touch::next_event() {
+                    crate::ui::main_screen::handle_main_screen_input(event);
+                }
+                
+                // Also check character queue for 'q' key directly
+                if crate::platform::d1_touch::has_char_input() {
+                    if let Some(ch) = crate::platform::d1_touch::peek_char() {
+                        if ch == b'q' || ch == b'Q' {
+                            crate::platform::d1_touch::consume_char();
+                            crate::ui::main_screen::request_cancel();
+                        }
+                    }
+                }
+                
                 // Copy from OUTPUT_CAPTURE to Terminal output buffer and redraw
                 crate::ui::main_screen::refresh_terminal_output();
             }),
         )
         .map_err(|e| format!("define terminal_refresh: {:?}", e))?;
-
     // Syscall: should_cancel() -> i32
     // Checks if command cancellation was requested (Cancel button, Ctrl+C, or 'q' key)
     // Also polls for touch events to detect Cancel button clicks
@@ -898,23 +924,23 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             "env",
             "should_cancel",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| -> i32 {
-                // FIRST: Check for 'q' in character queue BEFORE poll() consumes it
-                // This prevents 'q' from becoming an EV_CHAR that goes to Terminal input
-                if crate::platform::d1_touch::has_char_input() {
-                    if let Some(ch) = crate::platform::d1_touch::peek_char() {
-                        if ch == b'q' || ch == b'Q' {
-                            crate::platform::d1_touch::consume_char(); // Remove from queue
-                            return 1;
-                        }
-                    }
+                // FIRST: Check the shared cancellation flag from SharedArrayBuffer
+                // This is set by the main thread when user clicks Cancel, presses 'q', ESC, or Ctrl+C
+                // This works across workers because it reads from SharedArrayBuffer via MMIO
+                let shared_cancel = unsafe { 
+                    core::ptr::read_volatile((0x0250_2000 + 0x130) as *const u32)
+                };
+                if shared_cancel != 0 {
+                    return 1;
                 }
                 
-                // Check the cancellation flag first (set by Cancel button or Ctrl+C)
+                // SECOND: Check the kernel-side cancellation flag (set by Cancel button or Ctrl+C)
                 if crate::ui::main_screen::should_cancel() {
                     return 1;
                 }
                 
-                // Poll for touch events to get any button clicks
+                // THIRD: Poll for touch/keyboard events and process them
+                // This handles Cancel button clicks and key presses locally
                 crate::platform::d1_touch::poll();
                 while let Some(event) = crate::platform::d1_touch::next_event() {
                     crate::ui::main_screen::handle_main_screen_input(event);

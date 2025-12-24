@@ -39,10 +39,13 @@ fn request_io_blocking(device: DeviceType, operation: IoOp) -> IoResult {
 
 /// Read using VFS if available, otherwise fall back to legacy FS_STATE
 fn read_with_vfs_or_legacy(path: &str) -> Option<Vec<u8>> {
+    use crate::device::uart::write_str;
+    
     // Try VFS first
     let mut vfs = VFS_STATE.write();
     if let Some(vfs) = vfs.as_mut() {
-        return vfs.read_file(path);
+        let result = vfs.read_file(path);
+        return result;
     }
     drop(vfs);
     
@@ -50,7 +53,8 @@ fn read_with_vfs_or_legacy(path: &str) -> Option<Vec<u8>> {
     let mut fs = FS_STATE.write();
     let mut blk = BLK_DEV.write();
     if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
-        fs.read_file(dev, path)
+        let result = fs.read_file(dev, path);
+        result
     } else {
         None
     }

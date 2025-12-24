@@ -55,14 +55,13 @@ impl Sfs {
 
 impl FileSystem for Sfs {
     fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
-        // Strip leading slash for SFS compatibility
-        let normalized = path.trim_start_matches('/');
-        self.state.read_file(&mut self.dev, normalized)
+        // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+        self.state.read_file(&mut self.dev, path)
     }
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), &'static str> {
-        let normalized = path.trim_start_matches('/');
-        self.state.write_file(&mut self.dev, normalized, data)
+        // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+        self.state.write_file(&mut self.dev, path, data)
     }
 
     fn list_dir(&mut self, path: &str) -> Vec<FileInfo> {
@@ -79,18 +78,18 @@ impl FileSystem for Sfs {
     }
 
     fn exists(&mut self, path: &str) -> bool {
-        let normalized = path.trim_start_matches('/');
-        self.state.exists(&mut self.dev, normalized)
+        // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+        self.state.exists(&mut self.dev, path)
     }
 
     fn is_dir(&mut self, path: &str) -> bool {
-        let normalized = path.trim_start_matches('/');
-        self.state.is_dir(&mut self.dev, normalized)
+        // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+        self.state.is_dir(&mut self.dev, path)
     }
 
     fn remove(&mut self, path: &str) -> Result<(), &'static str> {
-        let normalized = path.trim_start_matches('/');
-        self.state.remove(&mut self.dev, normalized)
+        // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+        self.state.remove(&mut self.dev, path)
     }
 
     fn sync(&mut self) -> Result<usize, &'static str> {
@@ -98,8 +97,8 @@ impl FileSystem for Sfs {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), &'static str> {
-        let normalized = path.trim_start_matches('/');
-        self.state.mkdir(&mut self.dev, normalized)
+        // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+        self.state.mkdir(&mut self.dev, path)
     }
 }
 
@@ -118,12 +117,16 @@ pub struct GlobalSfs;
 
 impl FileSystem for GlobalSfs {
     fn read_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        use crate::device::uart::write_str;
+        
+
+        
         let mut fs_guard = FS_STATE.write();
         let mut blk_guard = BLK_DEV.write();
         
         if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            let normalized = path.trim_start_matches('/');
-            return fs.read_file(dev, normalized);
+            let result = fs.read_file(dev, path);
+            return result;
         }
         None
     }
@@ -133,8 +136,8 @@ impl FileSystem for GlobalSfs {
         let mut blk_guard = BLK_DEV.write();
         
         if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            let normalized = path.trim_start_matches('/');
-            return fs.write_file(dev, normalized, data);
+            // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+            return fs.write_file(dev, path, data);
         }
         Err("Filesystem not initialized")
     }
@@ -161,8 +164,8 @@ impl FileSystem for GlobalSfs {
         let mut blk_guard = BLK_DEV.write();
         
         if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            let normalized = path.trim_start_matches('/');
-            return fs.exists(dev, normalized);
+            // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+            return fs.exists(dev, path);
         }
         false
     }
@@ -172,8 +175,8 @@ impl FileSystem for GlobalSfs {
         let mut blk_guard = BLK_DEV.write();
         
         if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            let normalized = path.trim_start_matches('/');
-            return fs.is_dir(dev, normalized);
+            // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+            return fs.is_dir(dev, path);
         }
         false
     }
@@ -183,8 +186,8 @@ impl FileSystem for GlobalSfs {
         let mut blk_guard = BLK_DEV.write();
         
         if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            let normalized = path.trim_start_matches('/');
-            return fs.remove(dev, normalized);
+            // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+            return fs.remove(dev, path);
         }
         Err("Filesystem not initialized")
     }
@@ -204,8 +207,8 @@ impl FileSystem for GlobalSfs {
         let mut blk_guard = BLK_DEV.write();
         
         if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            let normalized = path.trim_start_matches('/');
-            return fs.mkdir(dev, normalized);
+            // NOTE: Don't strip leading slash - SFS stores files with full paths including /
+            return fs.mkdir(dev, path);
         }
         Err("Filesystem not initialized")
     }
