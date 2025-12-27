@@ -146,9 +146,11 @@ pub(crate) fn print_prompt() {
 /// Write system statistics to the MMIO SysInfo device
 /// This allows the emulator to read kernel stats and display them in the UI
 pub(crate) fn update_sysinfo() {
-    // Get heap stats
-    let (heap_used, _heap_free) = allocator::heap_stats();
-    let heap_total = allocator::heap_size();
+    // Get CPU count first (needed for memory stats calculation)
+    let cpu_count = HARTS_ONLINE.load(Ordering::Relaxed);
+    
+    // Get comprehensive memory stats (includes kernel code, stacks, heap)
+    let mem_stats = allocator::memory_stats(cpu_count);
     
     // Get disk stats (if filesystem available)
     let (disk_used, disk_total) = {
@@ -160,16 +162,13 @@ pub(crate) fn update_sysinfo() {
         }
     };
     
-    // Get CPU count
-    let cpu_count = HARTS_ONLINE.load(Ordering::Relaxed);
-    
     // Get uptime
     let uptime_ms = get_time_ms() as u64;
     
     // Write to MMIO registers (volatile writes, all 64-bit writes are 8-byte aligned)
     unsafe {
-        core::ptr::write_volatile(SYSINFO_HEAP_USED as *mut u64, heap_used as u64);
-        core::ptr::write_volatile(SYSINFO_HEAP_TOTAL as *mut u64, heap_total as u64);
+        core::ptr::write_volatile(SYSINFO_HEAP_USED as *mut u64, mem_stats.total_used as u64);
+        core::ptr::write_volatile(SYSINFO_HEAP_TOTAL as *mut u64, mem_stats.total_available as u64);
         core::ptr::write_volatile(SYSINFO_DISK_USED as *mut u64, disk_used);
         core::ptr::write_volatile(SYSINFO_DISK_TOTAL as *mut u64, disk_total);
         core::ptr::write_volatile(SYSINFO_CPU_COUNT as *mut u32, cpu_count as u32);
