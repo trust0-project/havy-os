@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.58](https://github.com/trust0-project/havy-os/compare/v0.1.57...v0.1.58) (2025-12-27)
+
+
+### Bug Fixes
+
+* report realtime memory consumption values ([e2dd302](https://github.com/trust0-project/havy-os/commit/e2dd302ff547f74d3b5d12b9a0e6800e3cea297a))
+
 ## [0.1.57](https://github.com/trust0-project/havy-os/compare/v0.1.56...v0.1.57) (2025-12-27)
 
 
