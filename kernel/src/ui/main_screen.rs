@@ -50,11 +50,10 @@ pub fn get_hardware_info() -> HardwareInfo {
     // Get CPU count from HARTS_ONLINE
     let cpu_count = crate::HARTS_ONLINE.load(Ordering::Relaxed);
     
-    // Get memory from allocator
-    let (heap_used, _heap_free) = crate::allocator::heap_stats();
-    let heap_total = crate::allocator::heap_size();
-    let memory_used_kb = heap_used / 1024;
-    let memory_total_kb = heap_total / 1024;
+    // Get comprehensive memory stats (includes kernel, stacks, heap)
+    let stats = crate::allocator::memory_stats(cpu_count);
+    let memory_used_kb = stats.total_used / 1024;
+    let memory_total_kb = stats.total_available / 1024;
     
     // Get disk usage from filesystem
     let (disk_used_kb, disk_total_kb) = {
