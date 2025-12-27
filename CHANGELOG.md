@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.56](https://github.com/trust0-project/havy-os/compare/v0.1.55...v0.1.56) (2025-12-27)
+
+
+### Features
+
+* performance improvements ([7a57cde](https://github.com/trust0-project/havy-os/commit/7a57cdee9905da90f2d522abdfca09b928428037))
+
 ## [0.1.55](https://github.com/trust0-project/havy-os/compare/v0.1.54...v0.1.55) (2025-12-24)
 
 
