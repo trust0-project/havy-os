@@ -147,8 +147,10 @@ impl UiManager {
     }
 
     /// Flush the framebuffer to display
+    /// NOTE: No-op since flush is now deferred to end of gpuid tick
     pub fn flush(&self) {
-        d1_display::flush();
+        // Flushing is now handled centrally at end of gpuid_service/gpuid_tick
+        // This method is kept for API compatibility
     }
 
     /// Check if UI needs redraw

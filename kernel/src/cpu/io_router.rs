@@ -31,10 +31,10 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::Spinlock;
-use crate::cpu::get_hart_id;
+use crate::cpu::{get_hart_id, MAX_HARTS};
 
 /// Maximum number of pending I/O requests
 const MAX_PENDING_REQUESTS: usize = 64;
@@ -158,6 +158,10 @@ pub enum IoOp {
     /// Check if buffer is empty
     AudioIsBufferEmpty,
 }
+
+/// Callback function type for async I/O completion
+/// Called by Hart 0 when an I/O request completes
+pub type IoCallback = fn(RequestId, IoResult);
 
 /// Request ID type
 pub type RequestId = u64;
@@ -292,8 +296,15 @@ impl CompletionSlot {
     }
 }
 
-/// Global I/O request queue
-pub static IO_QUEUE: Spinlock<VecDeque<IoRequest>> = Spinlock::new(VecDeque::new());
+/// Per-hart I/O request queues (eliminates lock contention)
+/// Each hart pushes to its own queue; Hart 0 scans all queues for dispatch
+static IO_QUEUES: [Spinlock<VecDeque<IoRequest>>; MAX_HARTS] = {
+    const INIT: Spinlock<VecDeque<IoRequest>> = Spinlock::new(VecDeque::new());
+    [INIT; MAX_HARTS]
+};
+
+/// Round-robin cursor for fair dispatch across all hart queues
+static DISPATCH_CURSOR: AtomicUsize = AtomicUsize::new(0);
 
 /// Completion slots indexed by (request_id % MAX_PENDING_REQUESTS)
 static IO_COMPLETIONS: [CompletionSlot; MAX_PENDING_REQUESTS] = {
@@ -304,6 +315,10 @@ static IO_COMPLETIONS: [CompletionSlot; MAX_PENDING_REQUESTS] = {
 /// Statistics
 static REQUESTS_SUBMITTED: AtomicU64 = AtomicU64::new(0);
 static REQUESTS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+/// Callback registry for async I/O completion notifications
+/// Indexed by (request_id % MAX_PENDING_REQUESTS)
+static IO_CALLBACKS: Spinlock<[Option<IoCallback>; MAX_PENDING_REQUESTS]> = Spinlock::new([None; MAX_PENDING_REQUESTS]);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // API FOR SECONDARY HARTS
@@ -328,8 +343,9 @@ pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
     // Reset the completion slot
     IO_COMPLETIONS[slot_idx].reset();
     
-    // Submit request to queue
-    IO_QUEUE.lock().push_back(request);
+    // Submit request to caller's hart queue (reduces lock contention)
+    let hart_id = get_hart_id();
+    IO_QUEUES[hart_id].lock().push_back(request);
     REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
     
     // Send IPI to Hart 0 to wake it up
@@ -373,8 +389,9 @@ pub fn request_io_async(request: IoRequest) -> RequestId {
     // Reset the completion slot
     IO_COMPLETIONS[slot_idx].reset();
     
-    // Submit request to queue
-    IO_QUEUE.lock().push_back(request);
+    // Submit request to caller's hart queue (reduces lock contention)
+    let hart_id = get_hart_id();
+    IO_QUEUES[hart_id].lock().push_back(request);
     REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
     
     // Send IPI to Hart 0
@@ -395,40 +412,115 @@ pub fn poll_io(request_id: RequestId) -> Option<IoResult> {
     IO_COMPLETIONS[slot_idx].take()
 }
 
+/// Check if a request is complete without consuming the result.
+pub fn is_io_complete(request_id: RequestId) -> bool {
+    let slot_idx = (request_id as usize) % MAX_PENDING_REQUESTS;
+    IO_COMPLETIONS[slot_idx].is_complete()
+}
+
+/// Submit an I/O request with a completion callback.
+///
+/// The callback will be invoked by Hart 0 when the request completes.
+/// This allows truly non-blocking I/O where the caller doesn't need to poll.
+///
+/// # Arguments
+/// * `device` - Target device type
+/// * `operation` - I/O operation to perform
+/// * `callback` - Function to call on completion (receives request_id and result)
+///
+/// # Returns
+/// * Request ID that can still be used with `poll_io` if needed
+pub fn submit_async_io_with_callback(
+    device: DeviceType,
+    operation: IoOp,
+    callback: IoCallback,
+) -> RequestId {
+    let request = IoRequest::new(device, operation);
+    let request_id = request.request_id;
+    let slot_idx = (request_id as usize) % MAX_PENDING_REQUESTS;
+    
+    // Reset the completion slot
+    IO_COMPLETIONS[slot_idx].reset();
+    
+    // Register the callback
+    IO_CALLBACKS.lock()[slot_idx] = Some(callback);
+    
+    // Submit request to caller's hart queue (reduces lock contention)
+    let hart_id = get_hart_id();
+    IO_QUEUES[hart_id].lock().push_back(request);
+    REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    
+    // Send IPI to Hart 0
+    if get_hart_id() != 0 {
+        crate::cpu::send_ipi(0);
+    }
+    
+    request_id
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // API FOR HART 0 (I/O DISPATCHER)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Check if there are pending I/O requests.
+/// Check if there are pending I/O requests in any hart queue.
 pub fn has_pending_requests() -> bool {
-    !IO_QUEUE.lock().is_empty()
+    let num_harts = crate::cpu::get_expected_harts();
+    for hart in 0..num_harts {
+        if !IO_QUEUES[hart].lock().is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
-/// Get the number of pending requests.
+/// Get the total number of pending requests across all hart queues.
 pub fn pending_count() -> usize {
-    IO_QUEUE.lock().len()
+    let num_harts = crate::cpu::get_expected_harts();
+    (0..num_harts).map(|h| IO_QUEUES[h].lock().len()).sum()
 }
 
-/// Dequeue the next I/O request for processing.
+/// Dequeue the next I/O request using round-robin across hart queues.
 ///
 /// Called by Hart 0's I/O dispatcher to get the next request.
-pub fn dequeue_request() -> Option<IoRequest> {
-    IO_QUEUE.lock().pop_front()
+/// Uses DISPATCH_CURSOR to ensure fair processing across all harts.
+fn dequeue_request_round_robin(num_harts: usize) -> Option<IoRequest> {
+    for _ in 0..num_harts {
+        let cursor = DISPATCH_CURSOR.fetch_add(1, Ordering::Relaxed) % num_harts;
+        if let Some(request) = IO_QUEUES[cursor].lock().pop_front() {
+            return Some(request);
+        }
+    }
+    None
 }
 
 /// Complete an I/O request with a result.
 ///
 /// Called by Hart 0 after processing a request.
+/// This function:
+/// 1. Stores the result in the completion slot
+/// 2. Invokes any registered callback
+/// 3. Wakes any task waiting on this specific request
 pub fn complete_request(request_id: RequestId, result: IoResult) {
     let slot_idx = (request_id as usize) % MAX_PENDING_REQUESTS;
-    IO_COMPLETIONS[slot_idx].store(result);
+    
+    // Store in completion slot for poll_io
+    IO_COMPLETIONS[slot_idx].store(result.clone());
     REQUESTS_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    
+    // Take and invoke callback if registered
+    let callback = IO_CALLBACKS.lock()[slot_idx].take();
+    if let Some(cb) = callback {
+        cb(request_id, result);
+    }
+    
+    // Wake any task waiting on this specific request ID
+    crate::task::wake_io_request(request_id);
 }
 
-/// Process all pending I/O requests.
+/// Process all pending I/O requests from all hart queues.
 ///
 /// This is the main dispatcher function called by Hart 0.
-/// It dequeues requests and routes them to the appropriate device handlers.
+/// It scans all per-hart queues in round-robin order and processes requests.
 ///
 /// # Returns
 /// Number of requests processed
@@ -441,8 +533,10 @@ pub fn dispatch_io() -> usize {
     }
     
     let mut processed = 0;
+    let num_harts = crate::cpu::get_expected_harts();
     
-    while let Some(request) = dequeue_request() {
+    // Process up to one request per hart per dispatch cycle for fairness
+    while let Some(request) = dequeue_request_round_robin(num_harts) {
         let result = handle_request(&request);
         complete_request(request.request_id, result);
         

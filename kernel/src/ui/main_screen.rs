@@ -293,8 +293,7 @@ pub fn update_main_screen_hardware_stats() {
         };
         let _ = Text::new(&time_str, Point::new(410, 756), text_style).draw(gpu);
     });
-    
-    d1_display::flush();
+    // Flush deferred to end of gpuid tick
 }
 
 /// Fast update of just the quick action buttons (for keyboard navigation)
@@ -355,8 +354,7 @@ pub fn update_main_screen_buttons(selected_button: usize) {
     
     // Invalidate backup and force cursor redraw with fresh background
     invalidate_cursor_backup();
-    
-    d1_display::flush();
+    // Flush deferred to end of gpuid tick
 }
 
 
@@ -834,7 +832,7 @@ fn terminal_execute_command() {
     draw_terminal_input_only();
     draw_terminal_output_only();
     draw_terminal_button_only();
-    d1_display::flush();
+    // Flush deferred to end of gpuid tick
 }
 
 /// Refresh terminal output during WASM execution (called by terminal_refresh syscall)
@@ -880,7 +878,7 @@ pub fn refresh_terminal_output() {
     
     // Fast partial redraw of just the output area (much faster than full window redraw)
     draw_terminal_output_only();
-    d1_display::flush();
+    // Flush deferred to end of gpuid tick
 }
 
 /// Check if command cancellation was requested (for WASM syscall)
@@ -908,7 +906,7 @@ pub fn request_cancel() {
                 TERMINAL_OUTPUT_LEN += 3;
             }
             draw_terminal_window();
-            d1_display::flush();
+            // Flush deferred to end of gpuid tick
         }
     }
 }
@@ -933,7 +931,7 @@ fn handle_terminal_input(key_code: u16, _key_value: i32) -> bool {
                     TERMINAL_INPUT_LEN -= 1;
                     // Fast partial redraw of input field only
                     draw_terminal_input_only();
-                    d1_display::flush();
+                    // Flush deferred to end of gpuid tick
                 }
             }
             true
@@ -958,7 +956,7 @@ fn handle_terminal_char(ch: u8) {
                 TERMINAL_INPUT_LEN += 1;
                 // Fast partial redraw of input field only
                 draw_terminal_input_only();
-                d1_display::flush();
+                // Flush deferred to end of gpuid tick
             }
         }
     }
@@ -1237,9 +1235,8 @@ fn draw_main_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
     // If a child window is open, draw it on top of the main content
     if let Some(win_idx) = open_window {
         draw_child_window(win_idx);
-    } else {
-        d1_display::flush();
     }
+    // Flush deferred to end of gpuid tick
 }
 
 /// Handle input for main_screen screen (keyboard navigation and mouse)
@@ -1309,7 +1306,7 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
                                 MAIN_SCREEN_OPEN_WINDOW = None;
                             }
                             restore_window_backing();
-                            d1_display::flush();  // Immediate update
+                            // Flush deferred to end of gpuid tick
                             return None;
                         }
                         
@@ -1339,7 +1336,7 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
                                 MAIN_SCREEN_OPEN_WINDOW = Some(button_idx);
                             }
                             draw_child_window(button_idx);
-                            d1_display::flush();  // Immediate update
+                            // Flush deferred to end of gpuid tick
                             return Some(button_idx);
                         }
                     }
@@ -1373,7 +1370,7 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
                     MAIN_SCREEN_OPEN_WINDOW = None;
                 }
                 restore_window_backing();
-                d1_display::flush();
+                // Flush deferred to end of gpuid tick
                 return None;
             }
         }
@@ -1434,7 +1431,7 @@ pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
             }
             unsafe { MAIN_SCREEN_OPEN_WINDOW = Some(button_idx); }
             draw_child_window(button_idx);
-            d1_display::flush();
+            // Flush deferred to end of gpuid tick
             Some(button_idx)
         }
         _ => None,

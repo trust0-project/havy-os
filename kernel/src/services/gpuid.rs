@@ -27,12 +27,16 @@ pub fn gpuid_service() {
         // Setup the boot screen UI elements
         ui::setup_main_screen();
         
-        // Initial render
+        // Initial render (flush will happen at end of function)
         ui::with_ui(|ui_mgr| {
             ui_mgr.mark_dirty();
             ui_mgr.render();
-            ui_mgr.flush();
         });
+        
+        // Deferred flush at end of frame
+        if crate::platform::d1_display::is_frame_dirty() {
+            display_proxy::flush();
+        }
         
         klog_info("gpuid", "GUI transition complete");
         return;
@@ -79,20 +83,21 @@ pub fn gpuid_service() {
         // No VM cursor rendering - using browser's native cursor
         // Position is updated for click hit-testing only
         
-        // Only flush if there was input (button clicked) or periodically for stats
-        if had_input {
-            display_proxy::flush();
-        } else {
-            // Periodically update hardware stats
+        // Periodically update hardware stats (no input needed)
+        if !had_input {
             ui::update_main_screen_hardware_stats();
         }
     } else {
         ui::with_ui(|ui_mgr| {
             if ui_mgr.is_dirty() {
                 ui_mgr.render();
-                ui_mgr.flush();
             }
         });
+    }
+    
+    // Deferred flush: single flush at end of frame if anything was drawn
+    if crate::platform::d1_display::is_frame_dirty() {
+        display_proxy::flush();
     }
     
     // Return immediately - scheduler handles timing
@@ -127,7 +132,10 @@ pub fn gpuid_tick() {
             ui_mgr.mark_dirty();
             ui_mgr.render();
         });
-        display_proxy::flush();
+        // Deferred flush at end of frame
+        if crate::platform::d1_display::is_frame_dirty() {
+            display_proxy::flush();
+        }
         return;
     }
     
@@ -161,10 +169,8 @@ pub fn gpuid_tick() {
     
     // Render (no cursor - using browser's native cursor)
     if is_main_screen {
-        // Position is updated for click hit-testing only
-        if had_input {
-            display_proxy::flush();
-        } else {
+        // Periodically update hardware stats (no input needed)
+        if !had_input {
             ui::update_main_screen_hardware_stats();
         }
     } else {
@@ -173,6 +179,10 @@ pub fn gpuid_tick() {
                 ui_mgr.render();
             }
         });
+    }
+    
+    // Deferred flush: single flush at end of frame if anything was drawn
+    if crate::platform::d1_display::is_frame_dirty() {
         display_proxy::flush();
     }
 }

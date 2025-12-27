@@ -17,11 +17,84 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::cpu::io_router::{DeviceType, IoOp, IoRequest, IoResult, request_io};
+use crate::cpu::io_router::{
+    DeviceType, IoOp, IoRequest, IoResult, RequestId,
+    request_io, request_io_async, poll_io, is_io_complete,
+};
 use crate::lock::utils::{VFS_STATE, FS_STATE, BLK_DEV};
 
 // Timeout for I/O requests (10 seconds)
 const IO_TIMEOUT_MS: u64 = 10000;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Async I/O Future Type
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A future representing a pending I/O operation.
+/// 
+/// Use `poll()` to check for completion, or `is_complete()` to check without
+/// consuming the result.
+/// 
+/// # Example
+/// ```
+/// let future = fs_read_async("/usr/bin/hello");
+/// // Do other work...
+/// if future.is_complete() {
+///     let result = future.poll();
+/// }
+/// ```
+pub struct IoFuture {
+    request_id: RequestId,
+}
+
+impl IoFuture {
+    /// Create a new I/O future for the given request ID
+    pub fn new(request_id: RequestId) -> Self {
+        Self { request_id }
+    }
+    
+    /// Get the request ID for this future
+    pub fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+    
+    /// Poll for completion.
+    /// Returns `Some(result)` if complete, `None` if still pending.
+    /// 
+    /// Note: This consumes the result - subsequent calls will return None.
+    pub fn poll(&self) -> Option<IoResult> {
+        poll_io(self.request_id)
+    }
+    
+    /// Check if the I/O operation is complete without consuming the result.
+    pub fn is_complete(&self) -> bool {
+        is_io_complete(self.request_id)
+    }
+    
+    /// Block until the I/O operation completes (with timeout).
+    /// 
+    /// This is a convenience method for code transitioning from blocking I/O.
+    pub fn wait(&self, timeout_ms: u64) -> IoResult {
+        use core::arch::asm;
+        let start = crate::get_time_ms();
+        
+        loop {
+            if let Some(result) = self.poll() {
+                return result;
+            }
+            
+            if timeout_ms > 0 {
+                let elapsed = crate::get_time_ms() - start;
+                if elapsed >= timeout_ms as i64 {
+                    return IoResult::Err("I/O future timeout");
+                }
+            }
+            
+            // Yield CPU
+            unsafe { asm!("wfi", options(nomem, nostack)); }
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper: Submit I/O request to Hart 0
@@ -293,4 +366,73 @@ pub fn fs_sync() -> Result<(), &'static str> {
             IoResult::Err(e) => Err(e),
         }
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Async Filesystem API
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Read a file asynchronously (non-blocking).
+///
+/// Returns immediately with an IoFuture that can be polled for completion.
+/// This allows the calling hart to do other work while waiting for the I/O.
+///
+/// # Example
+/// ```
+/// let future = fs_read_async("/usr/bin/hello");
+/// // Do other work while I/O is pending...
+/// if future.is_complete() {
+///     if let Some(IoResult::Ok(data)) = future.poll() {
+///         // Process data
+///     }
+/// }
+/// ```
+pub fn fs_read_async(path: &str) -> IoFuture {
+    let op = IoOp::FsRead { path: String::from(path) };
+    let request = IoRequest::new(DeviceType::Mmc, op);
+    let request_id = request_io_async(request);
+    IoFuture::new(request_id)
+}
+
+/// Write data to a file asynchronously (non-blocking).
+///
+/// Returns immediately with an IoFuture that can be polled for completion.
+pub fn fs_write_async(path: &str, data: &[u8]) -> IoFuture {
+    let op = IoOp::FsWrite { 
+        path: String::from(path), 
+        data: data.to_vec() 
+    };
+    let request = IoRequest::new(DeviceType::Mmc, op);
+    let request_id = request_io_async(request);
+    IoFuture::new(request_id)
+}
+
+/// List directory contents asynchronously (non-blocking).
+///
+/// Returns immediately with an IoFuture that can be polled for completion.
+/// The result will be a serialized list that needs to be parsed.
+pub fn fs_list_async(path: &str) -> IoFuture {
+    let op = IoOp::FsList { path: String::from(path) };
+    let request = IoRequest::new(DeviceType::Mmc, op);
+    let request_id = request_io_async(request);
+    IoFuture::new(request_id)
+}
+
+/// Check if a file exists asynchronously (non-blocking).
+///
+/// Returns immediately with an IoFuture that can be polled for completion.
+pub fn fs_exists_async(path: &str) -> IoFuture {
+    let op = IoOp::FsExists { path: String::from(path) };
+    let request = IoRequest::new(DeviceType::Mmc, op);
+    let request_id = request_io_async(request);
+    IoFuture::new(request_id)
+}
+
+/// Sync filesystem asynchronously (non-blocking).
+///
+/// Returns immediately with an IoFuture that can be polled for completion.
+pub fn fs_sync_async() -> IoFuture {
+    let request = IoRequest::new(DeviceType::Mmc, IoOp::FsSync);
+    let request_id = request_io_async(request);
+    IoFuture::new(request_id)
 }

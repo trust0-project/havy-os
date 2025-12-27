@@ -193,6 +193,37 @@ impl WaitQueueState {
         self.waiters.lock().is_empty()
     }
 
+    /// Wake waiters matching a specific data value (e.g., request_id, channel_id)
+    /// Returns number of tasks woken
+    pub fn wake_by_data(&self, data: u64) -> usize {
+        let mut count = 0;
+        let mut waiters = self.waiters.lock();
+        let mut remaining = VecDeque::new();
+
+        while let Some(waiter) = waiters.pop_front() {
+            if waiter.data == data {
+                crate::services::klogd::klog_trace(
+                    "waitq",
+                    &alloc::format!(
+                        "Waking task {} by data={} (queue={})",
+                        waiter.pid,
+                        data,
+                        self.name
+                    ),
+                );
+                if let Some(process) = crate::cpu::process::PROCESS_TABLE.get(waiter.pid) {
+                    process.mark_ready();
+                }
+                count += 1;
+            } else {
+                remaining.push_back(waiter);
+            }
+        }
+
+        *waiters = remaining;
+        count
+    }
+
     /// Check if a specific PID is waiting
     pub fn is_waiting(&self, pid: Pid) -> bool {
         self.waiters.lock().iter().any(|w| w.pid == pid)

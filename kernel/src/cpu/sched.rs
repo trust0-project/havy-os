@@ -32,9 +32,10 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::cpu::{ self, CPU_TABLE, MAX_HARTS};
+use crate::cpu::chase_lev::{WorkStealingDeque, StealResult};
 use crate::cpu::process::{allocate_pid, Priority, Process, ProcessEntry, ProcessInfo,  Pid, PROCESS_TABLE};
 use crate::Spinlock;
 use crate::services::klogd::{klog_debug, klog_info, klog_trace};
@@ -137,10 +138,30 @@ const fn create_queue_array() -> [Spinlock<RunQueue>; MAX_HARTS] {
     [INIT_QUEUE; MAX_HARTS]
 }
 
+/// Simple LCG for randomized victim selection
+/// Uses per-scheduler RNG state to avoid per-hart state
+static RNG_STATE: AtomicU64 = AtomicU64::new(0xDEADBEEF_CAFEBABE);
+
+#[inline]
+fn next_random() -> usize {
+    // Linear Congruential Generator (fast, good enough for victim selection)
+    loop {
+        let old = RNG_STATE.load(Ordering::Relaxed);
+        let new = old.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        if RNG_STATE.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            return (new >> 33) as usize;
+        }
+    }
+}
+
 /// The process scheduler
 pub struct Scheduler {
-    /// Per-CPU run queues
+    /// Per-CPU run queues (for priority scheduling)
     queues: [Spinlock<RunQueue>; MAX_HARTS],
+    
+    /// Lock-free steal queues (for efficient work stealing)
+    /// Processes are duplicated here for O(1) lock-free stealing
+    steal_queues: [WorkStealingDeque<Arc<Process>>; MAX_HARTS],
     
     /// Number of CPUs available for scheduling
     num_cpus: AtomicUsize,
@@ -155,8 +176,12 @@ pub struct Scheduler {
 impl Scheduler {
     /// Create a new scheduler
     pub const fn new() -> Self {
+        // Const-initialize steal queues using inline const syntax
+        const INIT_STEAL_QUEUE: WorkStealingDeque<Arc<Process>> = WorkStealingDeque::new();
+        
         Self {
             queues: create_queue_array(),
+            steal_queues: [INIT_STEAL_QUEUE; MAX_HARTS],
             num_cpus: AtomicUsize::new(1),
             active: AtomicBool::new(false),
             spawn_count: AtomicUsize::new(0),
@@ -283,12 +308,14 @@ impl Scheduler {
     /// Enqueue a process on a specific CPU's run queue
     fn enqueue(&self, cpu_id: usize, process: Arc<Process>) {
         let cpu = cpu_id.min(self.num_cpus() - 1);
+        
+        // Push to lock-free steal queue for efficient work stealing
+        self.steal_queues[cpu].push(process.clone());
+        
+        // Also add to priority queue for local scheduling order
         self.queues[cpu].lock().enqueue(process);
         
         // Wake target CPU if it's different from current hart
-        // Always send IPI - even if target might be running, it's cheap and ensures wake-up
-        // The previous is_idle() check failed during boot because secondary harts
-        // hadn't marked themselves online/idle yet
         let current_hart = crate::get_hart_id();
         if cpu != current_hart {
             crate::send_ipi(cpu);
@@ -297,41 +324,62 @@ impl Scheduler {
 
     /// Pick next process to run on a CPU
     pub fn pick_next(&self, cpu_id: usize) -> Option<Arc<Process>> {
-        // First try our own queue
+        // First try our own queue (priority-ordered)
         if let Some(process) = self.queues[cpu_id].lock().dequeue() {
+            // Also pop from steal queue to keep them in sync
+            let _ = self.steal_queues[cpu_id].pop();
             return Some(process);
         }
         
-        // Try work stealing from other CPUs
-        // IMPORTANT: Skip Hart 0's queue - critical services (shelld, netd) are pinned there
-        // and we don't want to cause lock contention with the BSP
+        // Work stealing with randomized victim selection
+        // This reduces contention by avoiding all harts targeting the same victim
         let num_cpus = self.num_cpus();
-        for other_cpu in 0..num_cpus {
-            // Skip our own queue and Hart 0's queue (to avoid BSP contention)
-            if other_cpu == cpu_id || other_cpu == 0 {
+        if num_cpus <= 1 {
+            return None;
+        }
+        
+        // Random starting point for victim selection
+        let start = next_random() % num_cpus;
+        
+        for i in 0..num_cpus {
+            let victim = (start + i) % num_cpus;
+            
+            // Skip our own queue and Hart 0's queue (BSP runs critical services)
+            if victim == cpu_id || victim == 0 {
                 continue;
             }
             
-            // Use try_lock to avoid blocking if another hart is accessing this queue
-            if let Some(mut guard) = self.queues[other_cpu].try_lock() {
-                if let Some(process) = guard.steal() {
-                    // Check if process can run on this CPU
+            // Try lock-free stealing first (no spinlock contention!)
+            match self.steal_queues[victim].steal() {
+                StealResult::Success(process) => {
+                    // Verify the process can run on this CPU
                     if process.can_run_on_cpu(cpu_id) {
+                        // Remove from victim's priority queue to keep in sync
+                        self.queues[victim].lock().remove(process.pid);
+                        
                         klog_trace(
                             "sched",
                             &alloc::format!(
-                                "CPU {} stole '{}' from CPU {}",
-                                cpu_id, process.name, other_cpu
+                                "CPU {} stole '{}' from CPU {} (lock-free)",
+                                cpu_id, process.name, victim
                             ),
                         );
                         return Some(process);
                     } else {
-                        // Put it back, wrong affinity
-                        guard.enqueue(process);
+                        // Wrong affinity - put it back
+                        self.steal_queues[victim].push(process.clone());
+                        self.queues[victim].lock().enqueue(process);
                     }
                 }
+                StealResult::Retry => {
+                    // CAS failed - another thief got it, try next victim
+                    continue;
+                }
+                StealResult::Empty => {
+                    // Nothing to steal from this queue
+                    continue;
+                }
             }
-            // If try_lock fails, just skip this queue and try the next
         }
         
         None

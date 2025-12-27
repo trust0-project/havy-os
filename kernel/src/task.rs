@@ -281,6 +281,28 @@ pub fn wake_io() -> usize {
     }
 }
 
+/// Helper to add a task to the I/O wait queue for a specific request ID
+/// 
+/// The task will be woken when `wake_io_request(request_id)` is called
+/// (typically by `io_router::complete_request`).
+pub fn wait_io_request(pid: Pid, request_id: u64, timeout: Option<u64>) {
+    if let Some(ref wq) = *IO_WAITQ.lock() {
+        wq.wait(pid, WaitEvent::IoReady, timeout, request_id);
+    }
+}
+
+/// Helper to wake tasks waiting for a specific I/O request ID
+///
+/// Called by `io_router::complete_request` when an async I/O completes.
+/// Returns true if any task was woken.
+pub fn wake_io_request(request_id: u64) -> bool {
+    if let Some(ref wq) = *IO_WAITQ.lock() {
+        wq.wake_by_data(request_id) > 0
+    } else {
+        false
+    }
+}
+
 /// Helper to add a task to the IPC wait queue
 pub fn wait_ipc(pid: Pid, channel_id: u64, timeout: Option<u64>) {
     if let Some(ref wq) = *IPC_WAITQ.lock() {
