@@ -57,17 +57,23 @@ pub struct MemoryStats {
     pub heap_total: usize,
     /// Per-hart stack memory (HART_STACK_SIZE × active harts)
     pub stack_size: usize,
-    /// Total memory consumed (static + heap_used + stacks)
+    /// GPU framebuffer memory (front + back buffers, 0 if GPU disabled)
+    pub framebuffer_size: usize,
+    /// Total memory consumed (static + heap_used + stacks + framebuffers)
     pub total_used: usize,
     /// Total RAM available
     pub total_available: usize,
 }
 
+/// Framebuffer size: 1024 × 768 × 4 bytes × 2 buffers (front + back)
+const FRAMEBUFFER_TOTAL: usize = 1024 * 768 * 4 * 2;
+
 /// Get comprehensive memory statistics.
 /// 
-/// `active_harts` is the number of harts currently online, used to calculate
-/// stack memory consumption (128KB per hart as defined in link.x).
-pub fn memory_stats(active_harts: usize) -> MemoryStats {
+/// # Arguments
+/// * `active_harts` - Number of harts currently online (for stack calculation)
+/// * `gpu_enabled` - Whether GPU display is active (for framebuffer calculation)
+pub fn memory_stats(active_harts: usize, gpu_enabled: bool) -> MemoryStats {
     // Calculate static section size (from kernel start to heap start)
     let static_size = unsafe {
         let text_start = &raw const _stext as usize;
@@ -82,8 +88,11 @@ pub fn memory_stats(active_harts: usize) -> MemoryStats {
     // Calculate stack memory for all active harts
     let stack_size = active_harts * HART_STACK_SIZE;
     
+    // Framebuffer memory (only when GPU is enabled)
+    let framebuffer_size = if gpu_enabled { FRAMEBUFFER_TOTAL } else { 0 };
+    
     // Total memory used
-    let total_used = static_size + heap_used + stack_size;
+    let total_used = static_size + heap_used + stack_size + framebuffer_size;
     
     MemoryStats {
         static_size,
@@ -91,7 +100,9 @@ pub fn memory_stats(active_harts: usize) -> MemoryStats {
         heap_free,
         heap_total,
         stack_size,
+        framebuffer_size,
         total_used,
         total_available: RAM_SIZE,
     }
 }
+

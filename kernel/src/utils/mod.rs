@@ -149,8 +149,9 @@ pub(crate) fn update_sysinfo() {
     // Get CPU count first (needed for memory stats calculation)
     let cpu_count = HARTS_ONLINE.load(Ordering::Relaxed);
     
-    // Get comprehensive memory stats (includes kernel code, stacks, heap)
-    let mem_stats = allocator::memory_stats(cpu_count);
+    // Get comprehensive memory stats (includes kernel, stacks, heap, framebuffers)
+    let gpu_enabled = crate::platform::d1_display::is_available();
+    let mem_stats = allocator::memory_stats(cpu_count, gpu_enabled);
     
     // Get disk stats (if filesystem available)
     let (disk_used, disk_total) = {

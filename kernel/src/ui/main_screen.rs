@@ -50,8 +50,9 @@ pub fn get_hardware_info() -> HardwareInfo {
     // Get CPU count from HARTS_ONLINE
     let cpu_count = crate::HARTS_ONLINE.load(Ordering::Relaxed);
     
-    // Get comprehensive memory stats (includes kernel, stacks, heap)
-    let stats = crate::allocator::memory_stats(cpu_count);
+    // Get comprehensive memory stats (includes kernel, stacks, heap, framebuffers)
+    // GPU is always enabled when we're in the main screen UI
+    let stats = crate::allocator::memory_stats(cpu_count, true);
     let memory_used_kb = stats.total_used / 1024;
     let memory_total_kb = stats.total_available / 1024;
     
