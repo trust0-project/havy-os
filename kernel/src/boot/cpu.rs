@@ -23,9 +23,16 @@ pub fn init_cpu() {
     print_info("Primary hart", "online");
 
     if expected_harts > 1 {
-        print_info("Sending IPIs to", &format!("{} secondary harts", expected_harts - 1));
+        print_info("Starting secondary harts", &format!("{} via SBI HSM", expected_harts - 1));
         for hart in 1..expected_harts {
-            send_ipi(hart);
+            // Use SBI HSM hart_start for OpenSBI-compliant hart lifecycle
+            // Pass 0 as address to use PRESERVE_BOOT_PC (harts start at same entry as hart 0)
+            // Pass 0 as opaque (we don't use it - DTB is in global)
+            let ret = crate::sbi::hart_start(hart, 0, 0);
+            if !ret.is_ok() {
+                // Fallback to IPI if HSM not supported (won't happen in our VM)
+                send_ipi(hart);
+            }
         }
     }
     

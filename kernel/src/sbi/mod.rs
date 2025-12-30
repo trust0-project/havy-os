@@ -35,6 +35,8 @@ const EID_TIMER: u64 = 0x54494D45;
 const EID_IPI: u64 = 0x735049;
 /// System Reset Extension ("SRST" = 0x53525354)
 const EID_SRST: u64 = 0x53525354;
+/// Hart State Management Extension ("HSM" = 0x48534D)
+const EID_HSM: u64 = 0x48534D;
 
 // ============================================================================
 // SBI Return Value
@@ -191,4 +193,47 @@ pub fn reboot() -> ! {
             asm!("wfi", options(nomem, nostack));
         }
     }
+}
+
+// ============================================================================
+// Hart State Management Extension (HSM)
+// ============================================================================
+
+/// Start a hart (secondary CPU).
+///
+/// This is the OpenSBI-compliant way to start secondary harts during boot.
+/// The started hart will begin executing at `start_addr` with:
+/// - a0 = hart_id
+/// - a1 = opaque value (typically DTB address)
+///
+/// # Arguments
+/// * `hartid` - ID of the hart to start
+/// * `start_addr` - Physical address where the hart should start executing
+/// * `opaque` - Opaque value to pass in a1 register (typically DTB pointer)
+///
+/// # Returns
+/// * SbiRet with error code (0 = success)
+#[inline]
+pub fn hart_start(hartid: usize, start_addr: u64, opaque: u64) -> SbiRet {
+    sbi_call(EID_HSM, 0, hartid as u64, start_addr, opaque)
+}
+
+/// Get hart status.
+///
+/// # Arguments
+/// * `hartid` - ID of the hart to query
+///
+/// # Returns
+/// * SbiRet with status in value field:
+///   - 0 = STARTED
+///   - 1 = STOPPED
+///   - 2 = START_PENDING
+///   - 3 = STOP_PENDING
+///   - 4 = SUSPENDED
+///   - 5 = SUSPEND_PENDING
+///   - 6 = RESUME_PENDING
+#[inline]
+#[allow(dead_code)]
+pub fn hart_get_status(hartid: usize) -> SbiRet {
+    sbi_call_1(EID_HSM, 2, hartid as u64)
 }
