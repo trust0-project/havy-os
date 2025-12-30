@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.59](https://github.com/trust0-project/havy-os/compare/v0.1.58...v0.1.59) (2025-12-30)
+
+
+### Bug Fixes
+
+* improve memory usage ([b248f61](https://github.com/trust0-project/havy-os/commit/b248f618eb903aae8ad08341347f68284dbaed81))
+* multi hart improvement ([ba05b85](https://github.com/trust0-project/havy-os/commit/ba05b85a1ce7825d9c275ea4bb70e0f05ae2217b))
+
 ## [0.1.58](https://github.com/trust0-project/havy-os/compare/v0.1.57...v0.1.58) (2025-12-27)
 
 
