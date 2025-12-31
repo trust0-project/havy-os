@@ -1332,17 +1332,6 @@ fn draw_main_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
 /// Handle input for main_screen screen (keyboard navigation and mouse)
 /// Returns Some(button_index) if Enter was pressed on a button
 pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
-    // Debug: log all non-ABS events (ABS events are too spammy)
-    if event.event_type != EV_ABS && event.event_type != d1_touch::EV_SYN {
-        use crate::device::uart::{write_str, write_line};
-        let mut buf = [0u8; 8];
-        write_str(format_u16(event.event_type, &mut buf));
-        write_str(" code=");
-        let mut buf2 = [0u8; 8];
-        write_str(format_u16(event.code, &mut buf2));
-        write_line("");
-    }
-    
     // Check if a child window is open
     let open_window = unsafe { MAIN_SCREEN_OPEN_WINDOW };
     
