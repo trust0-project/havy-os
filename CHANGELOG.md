@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.60](https://github.com/trust0-project/havy-os/compare/v0.1.59...v0.1.60) (2025-12-31)
+
+
+### Bug Fixes
+
+* improve scripting ([1c4dfab](https://github.com/trust0-project/havy-os/commit/1c4dfabcdaa1534509bcb8e1d49e3ea8cca01fdc))
+
 ## [0.1.59](https://github.com/trust0-project/havy-os/compare/v0.1.58...v0.1.59) (2025-12-30)
 
 
