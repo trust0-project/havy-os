@@ -622,8 +622,6 @@ impl FileSystemState {
     }
 
     fn find_free_dir_entry(&self, dev: &mut BlockDev) -> Option<(u64, usize)> {
-        use crate::device::uart::{write_str, write_line, write_hex};
-        
         let mut buf = [0u8; 512];
         let mut entries_checked = 0u64;
         let mut non_empty_count = 0u64;
@@ -631,33 +629,18 @@ impl FileSystemState {
         for i in 0..SEC_DIR_COUNT {
             let sector = SEC_DIR_START + i;
             if dev.read_sector(sector, &mut buf).is_err() {
-                write_str("find_free_dir_entry: read_sector failed for sector ");
-                write_hex(sector);
-                write_line("");
                 return None;
             }
             for j in 0..ENTRIES_PER_SECTOR {
                 entries_checked += 1;
                 let first_byte = buf[j * DIR_ENTRY_SIZE];
                 if first_byte == 0 {
-                    write_str("find_free_dir_entry: Found free at sector=");
-                    write_hex(sector);
-                    write_str(" entry=");
-                    write_hex(j as u64);
-                    write_str(" (checked ");
-                    write_hex(entries_checked);
-                    write_line(" entries)");
                     return Some((sector, j));
                 }
                 non_empty_count += 1;
             }
         }
         
-        write_str("find_free_dir_entry: FULL - checked ");
-        write_hex(entries_checked);
-        write_str(" entries, ");
-        write_hex(non_empty_count);
-        write_line(" non-empty");
         None
     }
 
