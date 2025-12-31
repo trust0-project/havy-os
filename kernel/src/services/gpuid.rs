@@ -83,6 +83,9 @@ pub fn gpuid_service() {
         // No VM cursor rendering - using browser's native cursor
         // Position is updated for click hit-testing only
         
+        // Check for GUI command completion (async polling)
+        ui::main_screen::check_gui_command_completion();
+        
         // Periodically update hardware stats (no input needed)
         if !had_input {
             ui::update_main_screen_hardware_stats();
@@ -169,6 +172,9 @@ pub fn gpuid_tick() {
     
     // Render (no cursor - using browser's native cursor)
     if is_main_screen {
+        // Check for GUI command completion (async polling)
+        ui::main_screen::check_gui_command_completion();
+        
         // Periodically update hardware stats (no input needed)
         if !had_input {
             ui::update_main_screen_hardware_stats();

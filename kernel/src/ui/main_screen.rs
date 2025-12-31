@@ -749,9 +749,18 @@ fn draw_terminal_button_only() {
 }
 
 /// Execute a command in the terminal window and capture output
+/// 
+/// This initiates command execution. For U-mode ELFs (the normal case),
+/// execute_command does not return - control flow goes through:
+/// sret -> U-mode -> SYS_EXIT -> trap -> restore_kernel_context -> signal_completion -> hart_loop
+/// 
+/// The result is later picked up by check_gui_command_completion() in gpuid_tick().
 fn terminal_execute_command() {
+    use crate::device::uart::write_line;
     use crate::lock::utils::OUTPUT_CAPTURE;
-    use crate::lock::state::output::OUTPUT_BUFFER_SIZE;
+    use crate::services::gui_cmd::GUI_CMD_RUNNING;
+    use core::sync::atomic::Ordering;
+    
     
     let cmd_len = unsafe { TERMINAL_INPUT_LEN };
     if cmd_len == 0 {
@@ -769,51 +778,73 @@ fn terminal_execute_command() {
         return;
     }
     
+    // Check if already running
+    if GUI_CMD_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    
+    
     // Split into command and arguments
     let mut parts = cmd_str.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let args = parts.next().unwrap_or("");
     
-    // Mark command as running and update UI to show Cancel button (partial redraw - just the button)
+    // Mark command as running in GUI (so Cancel button shows)
     unsafe { TERMINAL_COMMAND_RUNNING = true; }
     draw_terminal_button_only();
     d1_display::flush();
     
-    // Start capturing output
+    // Clear input immediately
+    unsafe {
+        TERMINAL_INPUT_LEN = 0;
+    }
+    draw_terminal_input_only();
+    
+    // Set up for U-mode execution with GUI return path:
+    // 1. Set GUI context so restore_kernel_context takes the GUI path
+    crate::scripting::set_gui_context(true);
+    
+    // 2. Mark GUI_CMD as running so signal_completion stores the result properly
+    GUI_CMD_RUNNING.store(true, Ordering::SeqCst);
+    
+    // 3. Start output capture (signal_completion will stop and capture it)
     {
         let mut cap = OUTPUT_CAPTURE.lock();
         cap.capturing = true;
         cap.len = 0;
     }
     
-    // Execute the command using scripting module
+    
+    // Execute command - for U-mode ELFs this does NOT return!
+    // Control goes: sret -> U-mode -> SYS_EXIT -> trap -> restore_kernel_context 
+    //            -> signal_completion -> hart_loop
+    // check_gui_command_completion() in gpuid_tick will poll for the result.
     crate::scripting::execute_command(cmd.as_bytes(), args.as_bytes());
-    
-    // Mark command as finished
-    unsafe { TERMINAL_COMMAND_RUNNING = false; }
-    
-    // Stop capturing and get output  
+  
+    // Stop output capture
     let output = {
         let mut cap = OUTPUT_CAPTURE.lock();
         cap.capturing = false;
-        let len = cap.len.min(OUTPUT_BUFFER_SIZE);
+        let len = cap.len.min(crate::lock::state::output::OUTPUT_BUFFER_SIZE);
         alloc::vec::Vec::from(&cap.buffer[..len])
     };
     
-    // Copy output to terminal buffer (strip ANSI escape codes for cleaner display)
+    // Clear GUI context
+    crate::scripting::set_gui_context(false);
+    GUI_CMD_RUNNING.store(false, Ordering::SeqCst);
+    
+    // Update terminal output buffer with result
     unsafe {
         TERMINAL_OUTPUT_LEN = 0;
         let mut i = 0;
         while i < output.len() && TERMINAL_OUTPUT_LEN < TERMINAL_OUTPUT_MAX {
-            // Skip ANSI escape sequences
             if output[i] == 0x1b && i + 1 < output.len() && output[i + 1] == b'[' {
-                // Find the end of the escape sequence (letter)
                 i += 2;
                 while i < output.len() && !output[i].is_ascii_alphabetic() {
                     i += 1;
                 }
                 if i < output.len() {
-                    i += 1; // Skip the letter
+                    i += 1;
                 }
                 continue;
             }
@@ -821,18 +852,61 @@ fn terminal_execute_command() {
             TERMINAL_OUTPUT_LEN += 1;
             i += 1;
         }
+        TERMINAL_COMMAND_RUNNING = false;
     }
     
-    // Clear input after execution
-    unsafe {
-        TERMINAL_INPUT_LEN = 0;
-    }
-    
-    // Partial redraws: clear input, update output, restore button to Run state
-    draw_terminal_input_only();
     draw_terminal_output_only();
     draw_terminal_button_only();
-    // Flush deferred to end of gpuid tick
+    d1_display::flush();
+}
+
+/// Check for GUI command completion and update terminal output
+/// Called from gpuid tick to poll for results
+pub fn check_gui_command_completion() {
+    use crate::device::uart::{write_str, write_line};
+    
+    // Only check if a command is running
+    if !unsafe { TERMINAL_COMMAND_RUNNING } {
+        return;
+    }
+    
+    
+    // Poll for result
+    if let Some(result) = crate::services::gui_cmd::poll_result() {
+        let mut buf = [0u8; 8];
+        
+        // Command completed - update output display
+        unsafe {
+            TERMINAL_OUTPUT_LEN = 0;
+            let mut i = 0;
+            while i < result.output.len() && TERMINAL_OUTPUT_LEN < TERMINAL_OUTPUT_MAX {
+                // Skip ANSI escape sequences
+                if result.output[i] == 0x1b && i + 1 < result.output.len() && result.output[i + 1] == b'[' {
+                    // Find the end of the escape sequence (letter)
+                    i += 2;
+                    while i < result.output.len() && !result.output[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    if i < result.output.len() {
+                        i += 1; // Skip the letter
+                    }
+                    continue;
+                }
+                TERMINAL_OUTPUT_BUFFER[TERMINAL_OUTPUT_LEN] = result.output[i];
+                TERMINAL_OUTPUT_LEN += 1;
+                i += 1;
+            }
+        }
+
+        
+        // Mark command as finished
+        unsafe { TERMINAL_COMMAND_RUNNING = false; }
+        
+        // Update UI
+        draw_terminal_output_only();
+        draw_terminal_button_only();
+        d1_display::flush();
+    }
 }
 
 /// Refresh terminal output during WASM execution (called by terminal_refresh syscall)
@@ -919,7 +993,7 @@ fn clear_cancel() {
 /// Handle terminal window input (keyboard chars)
 fn handle_terminal_input(key_code: u16, _key_value: i32) -> bool {
     use crate::platform::d1_touch::{KEY_BACKSPACE, KEY_ENTER};
-    
+    use crate::device::uart::{write_str, write_line};
     match key_code {
         KEY_ENTER => {
             terminal_execute_command();
@@ -938,6 +1012,22 @@ fn handle_terminal_input(key_code: u16, _key_value: i32) -> bool {
         }
         _ => false,
     }
+}
+
+/// Helper to format u16 as string
+fn format_u16(n: u16, buf: &mut [u8; 8]) -> &str {
+    let mut i = buf.len();
+    let mut n = n;
+    if n == 0 {
+        buf[7] = b'0';
+        return core::str::from_utf8(&buf[7..]).unwrap();
+    }
+    while n > 0 && i > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    core::str::from_utf8(&buf[i..]).unwrap()
 }
 
 /// Handle character input for terminal (from ASCII key events)
@@ -1242,6 +1332,17 @@ fn draw_main_screen_content_inner(hw: &HardwareInfo, selected_button: usize) {
 /// Handle input for main_screen screen (keyboard navigation and mouse)
 /// Returns Some(button_index) if Enter was pressed on a button
 pub fn handle_main_screen_input(event: d1_touch::InputEvent) -> Option<usize> {
+    // Debug: log all non-ABS events (ABS events are too spammy)
+    if event.event_type != EV_ABS && event.event_type != d1_touch::EV_SYN {
+        use crate::device::uart::{write_str, write_line};
+        let mut buf = [0u8; 8];
+        write_str(format_u16(event.event_type, &mut buf));
+        write_str(" code=");
+        let mut buf2 = [0u8; 8];
+        write_str(format_u16(event.code, &mut buf2));
+        write_line("");
+    }
+    
     // Check if a child window is open
     let open_window = unsafe { MAIN_SCREEN_OPEN_WINDOW };
     

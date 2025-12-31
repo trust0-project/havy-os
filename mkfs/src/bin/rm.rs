@@ -1,224 +1,203 @@
-// rm - Remove files or directories
+// rm - Remove files and directories
 //
 // Usage:
 //   rm <file>            Remove a file
-//   rm -r <dir>          Remove directory and contents recursively
-//   rm -f <file>         Force removal (no error if not exists)
+//   rm -r <dir>          Remove a directory recursively
 //   rm -v <file>         Verbose output
 
-#![cfg_attr(target_arch = "wasm32", no_std)]
-#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg_attr(target_arch = "riscv64", no_std)]
+#![cfg_attr(target_arch = "riscv64", no_main)]
 
-#[cfg(target_arch = "wasm32")]
-extern crate mkfs;
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+pub fn main() {
+    use mkfs::{console_log, argc, argv, get_cwd, print, remove_file, is_dir, file_exists, list_dir};
 
-#[cfg(target_arch = "wasm32")]
-mod wasm {
-    use core::ptr::{addr_of, addr_of_mut};
-    use mkfs::{console_log, argc, argv, get_cwd, remove_file, is_dir, list_dir};
-
-    // Static buffers
     static mut ARG_BUF: [u8; 256] = [0u8; 256];
     static mut CWD_BUF: [u8; 256] = [0u8; 256];
     static mut PATH_BUF: [u8; 512] = [0u8; 512];
-    static mut LIST_BUF: [u8; 8192] = [0u8; 8192];
-    static mut CHILD_BUF: [u8; 512] = [0u8; 512];
+    static mut LIST_BUF: [u8; 2048] = [0u8; 2048];
+    static mut SUB_PATH: [u8; 512] = [0u8; 512];
 
-    #[no_mangle]
-    pub extern "C" fn _start() {
-        let arg_count = argc();
-        
-        // Note: command name is not passed, arg 0 is first real argument
-        if arg_count < 1 {
-            console_log("Usage: rm [-rfv] <file...>\n");
-            return;
-        }
-
-        let mut recursive = false;
-        let mut force = false;
-        let mut verbose = false;
-        let mut files_start = 0;
-
-        // Parse flags (starting from arg 0)
-        for i in 0..arg_count {
-            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
-            if let Some(len) = len {
-                let arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
-                if arg.starts_with(b"-") {
-                    for &ch in &arg[1..] {
-                        match ch {
-                            b'r' | b'R' => recursive = true,
-                            b'f' => force = true,
-                            b'v' => verbose = true,
-                            _ => {}
-                        }
-                    }
-                    files_start = i + 1;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        if files_start >= arg_count {
-            console_log("Usage: rm [-rfv] <file...>\n");
-            return;
-        }
-
-        // Get current working directory
-        let cwd_len = unsafe { get_cwd(&mut *addr_of_mut!(CWD_BUF)).unwrap_or(1) };
-        let cwd = unsafe { &(*addr_of!(CWD_BUF))[..cwd_len] };
-
-        // Process each file argument
-        for i in files_start..arg_count {
-            let len = unsafe { argv(i, &mut *addr_of_mut!(ARG_BUF)) };
-            if let Some(len) = len {
-                let file_arg = unsafe { &(*addr_of!(ARG_BUF))[..len] };
+    fn remove_recursive(path: &str, verbose: bool) -> bool {
+        // Check if it's a directory
+        if is_dir(path) {
+            // List directory contents
+            let mut list_buf = [0u8; 2048];
+            if let Some(len) = list_dir(path, &mut list_buf) {
+                let data = &list_buf[..len];
+                let mut pos = 0;
                 
-                // Resolve path
-                let path_len = if file_arg.starts_with(b"/") {
-                    // Absolute path
-                    unsafe {
-                        PATH_BUF[..len].copy_from_slice(file_arg);
-                    }
-                    len
-                } else {
-                    // Relative path
-                    unsafe {
-                        let mut pos = 0;
-                        PATH_BUF[..cwd_len].copy_from_slice(cwd);
-                        pos = cwd_len;
-                        if cwd_len > 1 || cwd[0] != b'/' {
-                            PATH_BUF[pos] = b'/';
-                            pos += 1;
-                        }
-                        PATH_BUF[pos..pos + len].copy_from_slice(file_arg);
-                        pos + len
-                    }
-                };
-
-                let path = unsafe { &PATH_BUF[..path_len] };
-                let path_str = unsafe { core::str::from_utf8_unchecked(path) };
-
-                let is_directory = is_dir(path_str);
-
-                if is_directory && !recursive {
-                    console_log("\x1b[1;31mrm:\x1b[0m cannot remove '");
-                    print_bytes(path);
-                    console_log("': Is a directory (use -r)\n");
-                    continue;
-                }
-
-                if is_directory {
-                    // Remove directory contents first
-                    remove_dir_contents(path, verbose);
+                // Parse each entry and remove
+                while pos < len {
+                    let line_start = pos;
+                    while pos < len && data[pos] != b'\n' { pos += 1; }
+                    let line_end = pos;
+                    pos += 1;
                     
-                    // Remove directory marker
-                    let mut dir_path_len = path_len;
-                    unsafe {
-                        PATH_BUF[dir_path_len] = b'/';
-                        dir_path_len += 1;
-                    }
-                    let dir_path = unsafe { &PATH_BUF[..dir_path_len] };
-                    let dir_path_str = unsafe { core::str::from_utf8_unchecked(dir_path) };
+                    if line_start >= line_end { continue; }
+                    let line = &data[line_start..line_end];
                     
-                    if remove_file(dir_path_str) {
-                        if verbose {
-                            console_log("\x1b[1;32mremoved directory\x1b[0m '");
-                            print_bytes(path);
-                            console_log("'\n");
-                        }
+                    // Find the colon separator (name:size format)
+                    let mut colon = line.len();
+                    for (i, &c) in line.iter().enumerate() {
+                        if c == b':' { colon = i; break; }
                     }
-                } else {
-                    if remove_file(path_str) {
-                        if verbose {
-                            console_log("\x1b[1;32mremoved\x1b[0m '");
-                            print_bytes(path);
-                            console_log("'\n");
-                        }
-                    } else if !force {
-                        console_log("\x1b[1;31mrm:\x1b[0m cannot remove '");
-                        print_bytes(path);
-                        console_log("': No such file\n");
+                    if colon == 0 { continue; }
+                    
+                    let entry_name = &line[..colon];
+                    
+                    // Build full path for entry
+                    let mut sub_path_buf = [0u8; 512];
+                    let mut sub_len = 0;
+                    for (i, &b) in path.as_bytes().iter().enumerate() {
+                        if i < 512 { sub_path_buf[i] = b; sub_len += 1; }
                     }
+                    if sub_len < 512 && sub_len > 0 && sub_path_buf[sub_len - 1] != b'/' {
+                        sub_path_buf[sub_len] = b'/';
+                        sub_len += 1;
+                    }
+                    for &b in entry_name {
+                        if sub_len < 512 { sub_path_buf[sub_len] = b; sub_len += 1; }
+                    }
+                    
+                    let sub_path_str = unsafe { core::str::from_utf8_unchecked(&sub_path_buf[..sub_len]) };
+                    
+                    // Recursively remove
+                    let _ = remove_recursive(sub_path_str, verbose);
                 }
             }
-        }
-    }
-
-    fn remove_dir_contents(path: &[u8], verbose: bool) {
-        let path_str = unsafe { core::str::from_utf8_unchecked(path) };
-        
-        // List all files
-        let list_len = unsafe { list_dir("/", &mut *addr_of_mut!(LIST_BUF)) };
-        let Some(list_len) = list_len else { return };
-        
-        // Build prefix for matching
-        let prefix_len = path.len() + 1; // path + "/"
-        
-        // Collect children matching this prefix
-        let list_data = unsafe { &(*addr_of!(LIST_BUF))[..list_len] };
-        let mut children: [([u8; 512], usize); 64] = [([0u8; 512], 0); 64];
-        let mut child_count = 0;
-        
-        let mut start = 0;
-        for i in 0..list_len {
-            if list_data[i] == b'\n' {
-                if i > start {
-                    let line = &list_data[start..i];
-                    // Parse "name:size"
-                    if let Some(colon) = line.iter().position(|&b| b == b':') {
-                        let name = &line[..colon];
-                        // Check if this file is under our directory
-                        if name.len() > path.len() && name.starts_with(path) && name[path.len()] == b'/' {
-                            if child_count < 64 {
-                                let entry_len = name.len();
-                                children[child_count].0[..entry_len].copy_from_slice(name);
-                                children[child_count].1 = entry_len;
-                                child_count += 1;
-                            }
-                        }
-                    }
+            
+            // Now remove the empty directory
+            if remove_file(path) {
+                if verbose {
+                    console_log("\x1b[1;32mrm:\x1b[0m removed '");
+                    console_log(path);
+                    console_log("'\n");
                 }
-                start = i + 1;
+                true
+            } else {
+                false
             }
-        }
-        
-        // Sort by depth (deepest first) - simple bubble sort
-        for i in 0..child_count {
-            for j in 0..child_count - 1 - i {
-                let depth_j = count_slashes(&children[j].0[..children[j].1]);
-                let depth_j1 = count_slashes(&children[j + 1].0[..children[j + 1].1]);
-                if depth_j < depth_j1 {
-                    // Swap
-                    let tmp = children[j];
-                    children[j] = children[j + 1];
-                    children[j + 1] = tmp;
+        } else {
+            // It's a file, just remove it
+            if remove_file(path) {
+                if verbose {
+                    console_log("\x1b[1;32mrm:\x1b[0m removed '");
+                    console_log(path);
+                    console_log("'\n");
                 }
-            }
-        }
-        
-        // Remove children
-        for i in 0..child_count {
-            let child = &children[i].0[..children[i].1];
-            let child_str = unsafe { core::str::from_utf8_unchecked(child) };
-            if remove_file(child_str) && verbose {
-                console_log("\x1b[1;32mremoved\x1b[0m '");
-                print_bytes(child);
+                true
+            } else {
+                console_log("\x1b[1;31mrm:\x1b[0m cannot remove '");
+                console_log(path);
                 console_log("'\n");
+                false
             }
         }
     }
 
-    fn count_slashes(s: &[u8]) -> usize {
-        s.iter().filter(|&&b| b == b'/').count()
+    let arg_count = argc();
+    
+    if arg_count < 1 {
+        console_log("Usage: rm [-rv] <file...>\n");
+        return;
     }
 
-    fn print_bytes(bytes: &[u8]) {
-        unsafe { mkfs::print(bytes.as_ptr(), bytes.len()) };
+    let mut verbose = false;
+    let mut recursive = false;
+    let mut files_start = 0;
+
+    // Parse flags
+    for i in 0..arg_count {
+        let len = unsafe { argv(i, &mut *core::ptr::addr_of_mut!(ARG_BUF)) };
+        if let Some(len) = len {
+            let arg = unsafe { &(*core::ptr::addr_of!(ARG_BUF))[..len] };
+            if arg.starts_with(b"-") {
+                for &ch in &arg[1..] {
+                    match ch {
+                        b'v' => verbose = true,
+                        b'r' | b'R' => recursive = true,
+                        b'f' => {} // force - ignored
+                        _ => {}
+                    }
+                }
+                files_start = i + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    if files_start >= arg_count {
+        console_log("Usage: rm [-rv] <file...>\n");
+        return;
+    }
+
+    // Get CWD
+    let cwd_len = unsafe { get_cwd(&mut *core::ptr::addr_of_mut!(CWD_BUF)).unwrap_or(1) };
+    let cwd = unsafe { &(*core::ptr::addr_of!(CWD_BUF))[..cwd_len] };
+
+    // Process each file
+    for i in files_start..arg_count {
+        let len = unsafe { argv(i, &mut *core::ptr::addr_of_mut!(ARG_BUF)) };
+        if let Some(len) = len {
+            let file_arg = unsafe { &(*core::ptr::addr_of!(ARG_BUF))[..len] };
+            
+            let path_len = if file_arg.starts_with(b"/") {
+                unsafe {
+                    (*core::ptr::addr_of_mut!(PATH_BUF))[..len].copy_from_slice(file_arg);
+                }
+                len
+            } else {
+                unsafe {
+                    let mut pos = 0;
+                    (*core::ptr::addr_of_mut!(PATH_BUF))[..cwd_len].copy_from_slice(cwd);
+                    pos = cwd_len;
+                    if cwd_len > 1 || cwd[0] != b'/' {
+                        (*core::ptr::addr_of_mut!(PATH_BUF))[pos] = b'/';
+                        pos += 1;
+                    }
+                    (*core::ptr::addr_of_mut!(PATH_BUF))[pos..pos + len].copy_from_slice(file_arg);
+                    pos + len
+                }
+            };
+
+            let path = unsafe { &(*core::ptr::addr_of!(PATH_BUF))[..path_len] };
+            let path_str = unsafe { core::str::from_utf8_unchecked(path) };
+
+            if !file_exists(path_str) {
+                console_log("\x1b[1;31mrm:\x1b[0m cannot remove '");
+                print(path.as_ptr(), path.len());
+                console_log("': No such file or directory\n");
+                continue;
+            }
+
+            if is_dir(path_str) && !recursive {
+                console_log("\x1b[1;31mrm:\x1b[0m cannot remove '");
+                print(path.as_ptr(), path.len());
+                console_log("': Is a directory (use -r)\n");
+                continue;
+            }
+
+            if recursive && is_dir(path_str) {
+                remove_recursive(path_str, verbose);
+            } else {
+                if remove_file(path_str) {
+                    if verbose {
+                        console_log("\x1b[1;32mrm:\x1b[0m removed '");
+                        print(path.as_ptr(), path.len());
+                        console_log("'\n");
+                    }
+                } else {
+                    console_log("\x1b[1;31mrm:\x1b[0m cannot remove '");
+                    print(path.as_ptr(), path.len());
+                    console_log("'\n");
+                }
+            }
+        }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "riscv64"))]
 fn main() {}
-

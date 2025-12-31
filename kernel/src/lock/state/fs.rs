@@ -440,9 +440,16 @@ impl FileSystemState {
     }
 
     pub fn read_file(&self, dev: &mut BlockDev, filename: &str) -> Option<Vec<u8>> {
+        use crate::device::uart::{write_str, write_line};
+   
+        
         let entry = match self.find_entry(dev, filename) {
-            Some(e) => e,
-            None => return None,
+            Some(e) => {
+                e
+            },
+            None => {
+                return None;
+            },
         };
         
         let mut data = Vec::with_capacity(entry.size as usize);
@@ -471,10 +478,18 @@ impl FileSystemState {
         filename: &str,
         data: &[u8],
     ) -> Result<(), &'static str> {
+        use crate::device::uart::{write_str, write_line};
+        
+      
+        
         // Simple implementation: Overwrite existing or Create new
         let (sector, index) = match self.find_entry_pos(dev, filename) {
-            Some(pos) => pos,
-            None => self.find_free_dir_entry(dev).ok_or("Root dir full")?,
+            Some(pos) => {
+                pos
+            },
+            None => {
+                self.find_free_dir_entry(dev).ok_or("Root dir full")?
+            },
         };
 
         // Note: This implementation leaks old blocks if overwriting (simplification)
@@ -488,6 +503,7 @@ impl FileSystemState {
         if data.is_empty() {
             // head stays 0
         } else {
+            let mut blocks_written = 0u32;
             while !remaining.is_empty() {
                 let current = self.alloc_block(dev).ok_or("Disk full")?;
                 if head == 0 {
@@ -509,6 +525,7 @@ impl FileSystemState {
 
                 remaining = &remaining[len..];
                 prev = current;
+                blocks_written += 1;
             }
         }
 
@@ -605,16 +622,42 @@ impl FileSystemState {
     }
 
     fn find_free_dir_entry(&self, dev: &mut BlockDev) -> Option<(u64, usize)> {
+        use crate::device::uart::{write_str, write_line, write_hex};
+        
         let mut buf = [0u8; 512];
+        let mut entries_checked = 0u64;
+        let mut non_empty_count = 0u64;
+        
         for i in 0..SEC_DIR_COUNT {
             let sector = SEC_DIR_START + i;
-            dev.read_sector(sector, &mut buf).ok()?;
+            if dev.read_sector(sector, &mut buf).is_err() {
+                write_str("find_free_dir_entry: read_sector failed for sector ");
+                write_hex(sector);
+                write_line("");
+                return None;
+            }
             for j in 0..ENTRIES_PER_SECTOR {
-                if buf[j * DIR_ENTRY_SIZE] == 0 {
+                entries_checked += 1;
+                let first_byte = buf[j * DIR_ENTRY_SIZE];
+                if first_byte == 0 {
+                    write_str("find_free_dir_entry: Found free at sector=");
+                    write_hex(sector);
+                    write_str(" entry=");
+                    write_hex(j as u64);
+                    write_str(" (checked ");
+                    write_hex(entries_checked);
+                    write_line(" entries)");
                     return Some((sector, j));
                 }
+                non_empty_count += 1;
             }
         }
+        
+        write_str("find_free_dir_entry: FULL - checked ");
+        write_hex(entries_checked);
+        write_str(" entries, ");
+        write_hex(non_empty_count);
+        write_line(" non-empty");
         None
     }
 
@@ -702,8 +745,36 @@ impl FileSystemState {
     }
 
     /// Check if a path exists
-    pub fn exists(&self, dev: &mut BlockDev, path: &str) -> bool {
-        self.find_entry_pos(dev, path).is_some()
+    pub fn exists(&mut self, dev: &mut BlockDev, path: &str) -> bool {
+        // Root always exists
+        if path == "/" {
+            return true;
+        }
+        
+        // Check exact match first
+        if self.find_entry_pos(dev, path).is_some() {
+            return true;
+        }
+        
+        // Check with trailing slash (directories in SFS end with /)
+        if !path.ends_with('/') {
+            let mut dir_path = String::from(path);
+            dir_path.push('/');
+            if self.find_entry_pos(dev, &dir_path).is_some() {
+                return true;
+            }
+            
+            // Check if any files exist under this path prefix (it's a parent directory)
+            let prefix = dir_path;
+            let files = self.list_dir(dev, "/");
+            for file in files {
+                if file.name.starts_with(&prefix) {
+                    return true;
+                }
+            }
+        }
+        
+        false
     }
 
     /// Check if a path is a directory

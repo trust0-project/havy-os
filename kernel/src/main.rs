@@ -43,6 +43,9 @@ mod clint;
 mod cpu;
 mod trap;
 mod sbi;
+mod syscall_numbers;
+mod syscall;
+mod elf_loader;
 
 pub use cpu::CPU_TABLE;
 pub use cpu::process::PROCESS_TABLE;

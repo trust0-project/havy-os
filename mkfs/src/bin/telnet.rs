@@ -1,256 +1,234 @@
-// telnet - Simple telnet client for BAVY OS
+// telnet - Simple telnet client
 //
-// Usage: telnet <host/ip> [port]
+// Usage:
+//   telnet <host> [port]      Connect to host
 
-#![cfg_attr(target_arch = "wasm32", no_std)]
-#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg_attr(target_arch = "riscv64", no_std)]
+#![cfg_attr(target_arch = "riscv64", no_main)]
 
-#[cfg(target_arch = "wasm32")]
-extern crate mkfs;
-
-#[cfg(target_arch = "wasm32")]
-mod wasm {
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+pub fn main() {
     use mkfs::{
-        console_log, argc, argv, resolve_dns, format_ipv4, sleep,
-        tcp_connect_ip, tcp_send_data, tcp_recv_data, tcp_disconnect, tcp_get_status,
-        is_console_available, read_console, TcpStatus,
+        console_log, is_net_available, argc, argv, print, print_int,
+        resolve_dns, format_ipv4, tcp_connect_ip, tcp_send_data, 
+        tcp_recv_data, tcp_disconnect, tcp_get_status, TcpStatus,
+        should_cancel, get_time, console_available, read_console, sleep
     };
 
-    #[no_mangle]
-    pub extern "C" fn _start() {
-        // Parse arguments: argv(0) = host, argv(1) = port
-        if argc() < 1 {
-            console_log("Usage: telnet <host/ip> [port]\n");
-            console_log("Example: telnet 10.0.2.253 30\n");
+    if argc() < 1 {
+        console_log("Usage: telnet <host> [port]\n");
+        console_log("Example: telnet towel.blinkenlights.nl 23\n");
+        return;
+    }
+
+    if !is_net_available() {
+        console_log("\x1b[1;31m[X]\x1b[0m Network not available\n");
+        return;
+    }
+
+    // Parse host
+    let mut host_buf = [0u8; 256];
+    let host_len = match argv(0, &mut host_buf) {
+        Some(len) => len,
+        None => {
+            console_log("Error: Could not read hostname\n");
             return;
         }
+    };
+    let hostname = unsafe { core::str::from_utf8_unchecked(&host_buf[..host_len]) };
 
-        let mut host_buf = [0u8; 128];
-        let host_len = argv(0, &mut host_buf).unwrap_or(0);
-        if host_len == 0 {
-            console_log("Error: Invalid host\n");
-            return;
-        }
-
-        // Parse port (default 23)
-        let port: u16 = if argc() >= 2 {
-            let mut port_buf = [0u8; 16];
-            if let Some(len) = argv(1, &mut port_buf) {
-                parse_u16(&port_buf[..len]).unwrap_or(23)
-            } else {
-                23
-            }
+    // Parse port (default 23)
+    let port: u16 = if argc() >= 2 {
+        let mut port_buf = [0u8; 16];
+        if let Some(len) = argv(1, &mut port_buf) {
+            parse_u16(&port_buf[..len]).unwrap_or(23)
         } else {
             23
-        };
+        }
+    } else {
+        23
+    };
 
-        // Resolve host to IP
-        let ip = if is_ip_address(&host_buf[..host_len]) {
-            parse_ip(&host_buf[..host_len])
-        } else {
-            // DNS lookup
-            let mut ip_buf = [0u8; 4];
-            let host = unsafe { core::str::from_utf8_unchecked(&host_buf[..host_len]) };
-            if resolve_dns(host, &mut ip_buf) {
-                ip_buf
-            } else {
-                console_log("Error: Could not resolve host\n");
+    // Resolve hostname
+    console_log("Resolving ");
+    print(host_buf.as_ptr(), host_len);
+    console_log("... ");
+    
+    let mut ip = [0u8; 4];
+    if !resolve_dns(hostname, &mut ip) {
+        console_log("\x1b[1;31mfailed\x1b[0m\n");
+        console_log("Could not resolve hostname\n");
+        return;
+    }
+    
+    let mut ip_buf = [0u8; 16];
+    let ip_len = format_ipv4(&ip, &mut ip_buf);
+    console_log("\x1b[1;32m");
+    print(ip_buf.as_ptr(), ip_len);
+    console_log("\x1b[0m\n");
+
+    // Connect
+    console_log("Trying ");
+    print(ip_buf.as_ptr(), ip_len);
+    console_log(":");
+    print_int(port as i64);
+    console_log("...\n");
+
+    if !tcp_connect_ip(&ip, port) {
+        console_log("\x1b[1;31mConnection failed\x1b[0m\n");
+        return;
+    }
+
+    // Wait for connection
+    let start = get_time();
+    let timeout = 10000; // 10 seconds
+    
+    loop {
+        let status = tcp_get_status();
+        match status {
+            TcpStatus::Connected => {
+                console_log("Connected to ");
+                print(host_buf.as_ptr(), host_len);
+                console_log(".\n");
+                console_log("Escape character is '^]'.\n");
+                console_log("(Press ESC or q to quit)\n\n");
+                break;
+            }
+            TcpStatus::Failed => {
+                console_log("\x1b[1;31mConnection refused\x1b[0m\n");
+                tcp_disconnect();
                 return;
             }
-        };
+            TcpStatus::Closed => {
+                console_log("\x1b[1;31mConnection closed\x1b[0m\n");
+                return;
+            }
+            TcpStatus::Connecting => {
+                if get_time() - start > timeout {
+                    console_log("\x1b[1;31mConnection timeout\x1b[0m\n");
+                    tcp_disconnect();
+                    return;
+                }
+                sleep(50);
+            }
+        }
+    }
 
-        // Show connection attempt
-        console_log("Trying ");
-        let mut ip_str = [0u8; 16];
-        let ip_len = format_ipv4(&ip, &mut ip_str);
-        console_log(unsafe { core::str::from_utf8_unchecked(&ip_str[..ip_len]) });
-        console_log(":");
-        print_u16(port);
-        console_log("...\n");
-
-        // Connect
-        if !tcp_connect_ip(&ip, port) {
-            console_log("Error: Connection failed\n");
-            return;
+    // Main loop - receive and display data, send user input
+    let mut recv_buf = [0u8; 4096];
+    let mut input_buf = [0u8; 256];
+    let mut input_len = 0usize;
+    
+    loop {
+        // Check for cancel
+        if should_cancel() != 0 {
+            break;
         }
 
-        // Wait for connection (up to 5 seconds)
-        // Poll frequently (every 10ms) to catch SYN-ACK packets quickly
-        let mut connected = false;
-        for _ in 0..500 {
-            match tcp_get_status() {
-                TcpStatus::Connected => {
-                    connected = true;
+        // Check connection status
+        let status = tcp_get_status();
+        if status == TcpStatus::Closed || status == TcpStatus::Failed {
+            console_log("\n\x1b[33mConnection closed by remote host.\x1b[0m\n");
+            break;
+        }
+
+        // Try to receive data
+        if let Some(len) = tcp_recv_data(&mut recv_buf, 0) {
+            if len > 0 {
+                // Filter and print received data (handle telnet control sequences)
+                print_telnet_data(&recv_buf[..len]);
+            }
+        }
+
+        // Check for user input
+        if console_available() > 0 {
+            let mut ch_buf = [0u8; 1];
+            if read_console(&mut ch_buf) > 0 {
+                let ch = ch_buf[0];
+                
+                // ESC or 'q' to quit
+                if ch == 0x1B || ch == b'q' {
+                    console_log("\n\x1b[33mConnection closed.\x1b[0m\n");
                     break;
                 }
-                TcpStatus::Failed => {
-                    console_log("Error: Connection refused\n");
-                    return;
-                }
-                TcpStatus::Closed => {
-                    console_log("Error: Connection closed\n");
-                    return;
-                }
-                TcpStatus::Connecting => {
-                    sleep(10);  // Poll every 10ms during handshake
+                
+                // Handle enter
+                if ch == b'\r' || ch == b'\n' {
+                    input_buf[input_len] = b'\r';
+                    input_len += 1;
+                    if input_len < input_buf.len() {
+                        input_buf[input_len] = b'\n';
+                        input_len += 1;
+                    }
+                    let _ = tcp_send_data(&input_buf[..input_len]);
+                    input_len = 0;
+                    console_log("\n");
+                } else if ch == 0x7F || ch == 0x08 {
+                    // Backspace
+                    if input_len > 0 {
+                        input_len -= 1;
+                        console_log("\x08 \x08"); // Move back, erase, move back
+                    }
+                } else if ch >= 0x20 && ch < 0x7F {
+                    // Printable character
+                    if input_len < input_buf.len() - 2 {
+                        input_buf[input_len] = ch;
+                        input_len += 1;
+                        print(&ch_buf as *const u8, 1);
+                    }
                 }
             }
         }
-
-        if !connected {
-            console_log("Error: Connection timeout\n");
-            tcp_disconnect();
-            return;
-        }
-
-        console_log("Connected to ");
-        console_log(unsafe { core::str::from_utf8_unchecked(&ip_str[..ip_len]) });
-        console_log(".\n");
-        console_log("Type your input. Press Ctrl+C to quit.\n\n");
-
-        let mut recv_buf = [0u8; 512];
-        let mut send_buf = [0u8; 256];
-        let mut send_len = 0usize;
-
-        // Main loop
-        loop {
-            // Receive data FIRST (before checking connection status)
-            // This ensures we get any pending data before the connection closes
-            let mut got_data = false;
-            if let Some(len) = tcp_recv_data(&mut recv_buf, 0) {
-                if len > 0 {
-                    got_data = true;
-                    // Print received data
-                    console_log(unsafe { core::str::from_utf8_unchecked(&recv_buf[..len]) });
-                }
-            }
-
-            // Check connection status - but allow one more receive if we just got data
-            let status = tcp_get_status();
-            if status != TcpStatus::Connected && !got_data {
-                // Try one final receive before giving up
-                if let Some(len) = tcp_recv_data(&mut recv_buf, 0) {
-                    if len > 0 {
-                        console_log(unsafe { core::str::from_utf8_unchecked(&recv_buf[..len]) });
-                    }
-                }
-                break;
-            }
-
-            // Check for console input
-            let mut ch = [0u8; 1];
-            if is_console_available() {
-                let n = read_console(&mut ch);
-                if n > 0 {
-                    // Check for Ctrl+C
-                    if ch[0] == 3 {
-                        console_log("\n^C\n");
-                        break;
-                    }
-
-                    // Echo character
-                    console_log(unsafe { core::str::from_utf8_unchecked(&ch[..1]) });
-
-                    // Buffer the character
-                    if send_len < send_buf.len() - 1 {
-                        send_buf[send_len] = ch[0];
-                        send_len += 1;
-                    }
-
-                    // Send on Enter
-                    if ch[0] == b'\r' || ch[0] == b'\n' {
-                        if send_len > 0 {
-                            // Add newline if not present
-                            if send_buf[send_len - 1] != b'\n' {
-                                if send_len < send_buf.len() {
-                                    send_buf[send_len] = b'\n';
-                                    send_len += 1;
-                                }
-                            }
-
-                            let _ = tcp_send_data(&send_buf[..send_len]);
-                            send_len = 0;
-                        }
-                    }
-                }
-            }
-
-            // Small delay to avoid busy loop
-            sleep(10);
-        }
-
-        tcp_disconnect();
+        
+        // Small delay to prevent busy-waiting
+        sleep(10);
     }
 
-    /// Check if string looks like an IP address
-    fn is_ip_address(s: &[u8]) -> bool {
-        let mut dots = 0;
-        let mut has_digit = false;
-        for &b in s {
-            match b {
-                b'.' => dots += 1,
-                b'0'..=b'9' => has_digit = true,
-                // Ignore trailing whitespace/newlines
-                b' ' | b'\n' | b'\r' | b'\t' | 0 => break,
-                _ => return false,
-            }
-        }
-        dots == 3 && has_digit
-    }
+    tcp_disconnect();
 
-    /// Parse IP address from string
-    fn parse_ip(s: &[u8]) -> [u8; 4] {
-        let mut ip = [0u8; 4];
-        let mut idx = 0;
-        let mut num: u16 = 0;
-
-        for &b in s {
-            if b == b'.' {
-                if idx < 4 {
-                    ip[idx] = num as u8;
-                    idx += 1;
-                    num = 0;
-                }
-            } else if b >= b'0' && b <= b'9' {
-                num = num * 10 + (b - b'0') as u16;
-            }
-        }
-        if idx < 4 {
-            ip[idx] = num as u8;
-        }
-        ip
-    }
-
-    /// Parse u16 from string
-    fn parse_u16(s: &[u8]) -> Option<u16> {
-        let mut result: u16 = 0;
-        for &b in s {
-            if b >= b'0' && b <= b'9' {
-                result = result.checked_mul(10)?.checked_add((b - b'0') as u16)?;
+    fn parse_u16(buf: &[u8]) -> Option<u16> {
+        let mut n: u16 = 0;
+        for &c in buf {
+            if c >= b'0' && c <= b'9' {
+                n = n.checked_mul(10)?.checked_add((c - b'0') as u16)?;
             } else {
                 break;
             }
         }
-        Some(result)
+        if n > 0 { Some(n) } else { None }
     }
 
-    /// Print u16
-    fn print_u16(n: u16) {
-        let mut buf = [0u8; 6];
-        let mut i = buf.len();
-        let mut num = n;
-        if num == 0 {
-            console_log("0");
-            return;
+    fn print_telnet_data(data: &[u8]) {
+        let mut i = 0;
+        while i < data.len() {
+            let c = data[i];
+            
+            // Handle telnet commands (IAC = 0xFF)
+            if c == 0xFF && i + 2 < data.len() {
+                // Skip telnet negotiation sequences (IAC + cmd + option)
+                i += 3;
+                continue;
+            }
+            
+            // Skip other control characters except CR, LF, tab
+            if c < 0x20 && c != b'\r' && c != b'\n' && c != b'\t' {
+                i += 1;
+                continue;
+            }
+            
+            // Print the character
+            if c == b'\r' {
+                // Skip CR, we'll handle LF
+                i += 1;
+                continue;
+            }
+            
+            mkfs::print(&data[i] as *const u8, 1);
+            i += 1;
         }
-        while num > 0 && i > 0 {
-            i -= 1;
-            buf[i] = b'0' + (num % 10) as u8;
-            num /= 10;
-        }
-        console_log(unsafe { core::str::from_utf8_unchecked(&buf[i..]) });
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "riscv64"))]
 fn main() {}

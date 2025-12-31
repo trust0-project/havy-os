@@ -385,6 +385,7 @@ pub fn shell_service() {
 /// Polls UART for input and processes any available bytes.
 /// Returns quickly to allow other processes to run.
 pub fn shell_tick() {
+    
     // Poll for input (non-blocking)
     // Process up to 64 bytes per tick for faster input response
     for _ in 0..64 {
@@ -832,4 +833,12 @@ pub fn get_shell_pid() -> Option<u32> {
 /// Check if shell is running
 pub fn is_shell_running() -> bool {
     SHELL_STATE.lock().initialized
+}
+
+/// Clear the shell input buffer
+/// Called after ELF binary exits to prevent leftover input from previous command
+pub fn clear_buffer() {
+    let mut state = SHELL_STATE.lock();
+    state.len = 0;
+    state.buffer[0] = 0;
 }

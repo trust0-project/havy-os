@@ -24,7 +24,7 @@ use crate::cpu::io_router::{
 use crate::lock::utils::{VFS_STATE, FS_STATE, BLK_DEV};
 
 // Timeout for I/O requests (10 seconds)
-const IO_TIMEOUT_MS: u64 = 10000;
+const IO_TIMEOUT_MS: u64 = 30000;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Async I/O Future Type
@@ -134,21 +134,57 @@ fn read_with_vfs_or_legacy(path: &str) -> Option<Vec<u8>> {
 }
 
 /// Write using VFS if available, otherwise fall back to legacy FS_STATE
+/// Uses non-blocking try_write to avoid deadlocks across harts
 fn write_with_vfs_or_legacy(path: &str, data: &[u8]) -> Result<(), &'static str> {
-    // Try VFS first
-    let mut vfs = VFS_STATE.write();
-    if let Some(vfs) = vfs.as_mut() {
-        return vfs.write_file(path, data);
-    }
-    drop(vfs);
+    use crate::device::uart::{write_str, write_line};
+    use core::arch::asm;
     
-    // Fall back to legacy FS_STATE
-    let mut fs = FS_STATE.write();
-    let mut blk = BLK_DEV.write();
-    if let (Some(fs), Some(dev)) = (fs.as_mut(), blk.as_mut()) {
-        fs.write_file(dev, path, data)
-    } else {
-        Err("Filesystem not available")
+    let start = crate::get_time_ms();
+    let timeout_ms = 5000; // 5 second timeout
+    
+    loop {
+        // Try VFS first with non-blocking lock
+        if let Some(mut vfs_guard) = VFS_STATE.try_write() {
+            write_line("Got VFS lock");
+            if let Some(vfs) = vfs_guard.as_mut() {
+                write_line("Calling vfs.write_file...");
+                let result = vfs.write_file(path, data);
+                write_line("vfs.write_file returned");
+                if result.is_err() {
+                    write_str("VFS write_file error for: ");
+                    write_line(path);
+                }
+                return result;
+            }
+            drop(vfs_guard);
+            
+            // VFS not initialized, try legacy FS_STATE
+            if let Some(mut fs_guard) = FS_STATE.try_write() {
+                if let Some(mut blk_guard) = BLK_DEV.try_write() {
+                    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
+                        let result = fs.write_file(dev, path, data);
+                        if result.is_err() {
+                            write_str("Legacy FS write_file error for: ");
+                            write_line(path);
+                        }
+                        return result;
+                    }
+                }
+            }
+            
+            write_line("FS not available for write");
+            return Err("Filesystem not available");
+        }
+        
+        // Check timeout
+        let elapsed = crate::get_time_ms() - start;
+        if elapsed >= timeout_ms as i64 {
+            write_line("fs_write: lock timeout");
+            return Err("Lock timeout");
+        }
+        
+        // Yield CPU briefly
+        unsafe { asm!("wfi", options(nomem, nostack)); }
     }
 }
 
@@ -252,13 +288,21 @@ pub fn fs_read(path: &str) -> Option<Vec<u8>> {
 ///
 /// On Hart 0: Direct access via VFS_STATE (or legacy FS_STATE)
 /// On secondary harts: Delegates to Hart 0 via io_router
+/// (Secondary harts in WASM don't have access to D1 MMC device)
 pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    use crate::device::uart::{write_str, write_line};
+    
     let hart_id = crate::get_hart_id();
+    
+    write_str("fs_write on hart ");
+    write_hex(hart_id as u64);
+    write_line("");
     
     if hart_id == 0 {
         write_with_vfs_or_legacy(path, data)
     } else {
-        // Delegate to Hart 0
+        // Delegate to Hart 0 via io_router - secondary harts don't have D1 MMC
+        write_line("fs_write: delegating to hart 0");
         let op = IoOp::FsWrite { 
             path: String::from(path), 
             data: data.to_vec() 
@@ -266,9 +310,31 @@ pub fn fs_write(path: &str, data: &[u8]) -> Result<(), &'static str> {
         let result = request_io_blocking(DeviceType::Mmc, op);
         
         match result {
-            IoResult::Ok(_) => Ok(()),
-            IoResult::Err(e) => Err(e),
+            IoResult::Ok(_) => {
+                write_line("fs_write: delegation success");
+                Ok(())
+            }
+            IoResult::Err(e) => {
+                write_str("fs_write: delegation failed - ");
+                write_line(e);
+                Err(e)
+            }
         }
+    }
+}
+
+fn write_hex(val: u64) {
+    use crate::device::uart::write_str;
+    let mut buf = [0u8; 18];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    let hex_chars = b"0123456789abcdef";
+    for i in 0..16 {
+        let nibble = ((val >> (60 - i * 4)) & 0xF) as usize;
+        buf[2 + i] = hex_chars[nibble];
+    }
+    if let Ok(s) = core::str::from_utf8(&buf[..18]) {
+        write_str(s);
     }
 }
 

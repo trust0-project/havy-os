@@ -1,14 +1,28 @@
 // kernel/src/scripting.rs
-//! Script discovery for WASM binaries in /usr/bin/
+//! Script discovery for native RISC-V binaries in /usr/bin/
 //!
 //! This module provides script lookup functionality for the shell.
-//! Scripts are WASM binaries located in /usr/bin/ directory.
+//! Scripts are native ELF binaries located in /usr/bin/ directory.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{   clint::get_time_ms, device::uart, lock::utils::{OUTPUT_BUFFER_SIZE, OUTPUT_CAPTURE, SHELL_CMD_STATE}, scripting, wasm};
+use crate::{clint::get_time_ms, device::uart, lock::utils::{OUTPUT_BUFFER_SIZE, OUTPUT_CAPTURE, SHELL_CMD_STATE}, scripting, wasm};
+
+/// Flag indicating we're running from GUI context (need S-mode execution)
+static GUI_CONTEXT: AtomicBool = AtomicBool::new(false);
+
+/// Set GUI context mode - commands will use S-mode execution that returns normally
+pub fn set_gui_context(enabled: bool) {
+    GUI_CONTEXT.store(enabled, Ordering::SeqCst);
+}
+
+/// Check if we're in GUI context
+pub fn is_gui_context() -> bool {
+    GUI_CONTEXT.load(Ordering::SeqCst)
+}
 /// Initialize shell command tracking
 fn shell_cmd_init() {
     let mut state = SHELL_CMD_STATE.lock();
@@ -85,9 +99,52 @@ pub fn find_script(cmd: &str) -> Option<Vec<u8>> {
 }
 
 
-/// Run a script from its bytes (WASM only)
+/// Run a script from its bytes
+/// 
+/// Supports both native RISC-V ELF binaries (preferred) and WASM binaries (legacy).
 pub fn run_script_bytes(bytes: &[u8], args: &str) {
-    // Detect \0asm magic header for WASM binaries
+    use core::arch::asm;
+    
+    // CRITICAL: Capture return frame at ABSOLUTE FUNCTION START
+    // before ANY function calls (is_elf, load_elf, split, collect, etc.)
+    let caller_ra: u64;
+    let caller_sp: u64;
+    unsafe {
+        asm!(
+            "mv {ra}, ra",
+            "mv {sp}, sp",
+            ra = out(reg) caller_ra,
+            sp = out(reg) caller_sp,
+        );
+    }
+    
+    // Detect ELF magic (0x7f 'E' 'L' 'F') - native RISC-V binary (preferred)
+    if crate::elf_loader::is_elf(bytes) {
+        match crate::elf_loader::load_elf(bytes) {
+            Ok(loaded) => {
+                // Split args into vector
+                let args_vec: Vec<&str> = args.split_whitespace().collect();
+                
+                // Always use U-mode execution (proper RISC-V spec compliance)
+                // The gui_cmd process handles GUI execution, shell uses shelld
+                // Both use the same execute_elf path - the difference is in how
+                // restore_kernel_context handles the exit (via gui_mode flag)
+                let exit_code = crate::elf_loader::execute_elf(&loaded, &args_vec, caller_ra, caller_sp);
+                
+                if exit_code != 0 {
+                    out_str("\x1b[1;31mExited with code:\x1b[0m ");
+                    out_line(&alloc::format!("{}", exit_code));
+                }
+            }
+            Err(e) => {
+                out_str("\x1b[1;31mELF load error:\x1b[0m ");
+                out_line(&alloc::format!("{:?}", e));
+            }
+        }
+        return;
+    }
+    
+    // Detect WASM magic (\0asm) - legacy fallback
     if bytes.len() >= 4
         && bytes[0] == 0x00
         && bytes[1] == 0x61
@@ -102,8 +159,8 @@ pub fn run_script_bytes(bytes: &[u8], args: &str) {
         return;
     }
 
-    // Not a WASM binary
-    out_line("\x1b[1;31mError:\x1b[0m Not a valid binary");
+    // Not a recognized binary format
+    out_line("\x1b[1;31mError:\x1b[0m Not a valid binary (expected ELF or WASM)");
 }
 
 

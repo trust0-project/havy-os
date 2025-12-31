@@ -4,7 +4,7 @@ version = "0.1.59"
 edition = "2021"
 default-run = "mkfs"
 
-# The main mkfs tool binary (only for non-WASM)
+# The main mkfs tool binary (only for host)
 [[bin]]
 name = "mkfs"
 path = "src/main.rs"
@@ -22,9 +22,13 @@ host-tool = ["clap"]
 [dependencies]
 clap = { version = "4.4", features = ["derive"], optional = true }
 
-# Dependencies for the Scripts (WASM)
+# Dependencies for WASM Scripts
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Add any no_std compatible crates here if needed
+
+# Dependencies for Native RISC-V Scripts
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+# Pure no_std - no additional dependencies needed
 
 [profile.release]
 lto = true

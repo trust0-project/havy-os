@@ -526,10 +526,25 @@ fn is_http_response_complete(data: &[u8]) -> bool {
                     }
                 }
             }
-            // Check for Transfer-Encoding: chunked - harder to parse
+            // Check for Transfer-Encoding: chunked - look for terminating chunk at end
             if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
-                // For chunked, check if we have the final chunk marker
-                return data.windows(5).any(|w| w == b"0\r\n\r\n");
+                // For chunked, check if we have the final chunk marker at the end
+                let body = &data[body_start..];
+                if body.len() >= 5 {
+                    // Check for 0\r\n\r\n at the end
+                    let end = &body[body.len() - 5..];
+                    if end == b"0\r\n\r\n" {
+                        return true;
+                    }
+                }
+                if body.len() >= 7 {
+                    // Check for \r\n0\r\n\r\n at the end  
+                    let end7 = &body[body.len() - 7..];
+                    if end7 == b"\r\n0\r\n\r\n" {
+                        return true;
+                    }
+                }
+                return false;
             }
         }
     }

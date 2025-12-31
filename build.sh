@@ -4,24 +4,19 @@
 # Usage:
 #   ./build_d1.sh           - Build kernel + filesystem
 #   ./build_d1.sh sdcard    - Create complete SD card image
-
 set -e
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KERNEL_DIR="$SCRIPT_DIR/kernel"
 TARGET="riscv64gc-unknown-none-elf"
 OUTPUT_DIR="$SCRIPT_DIR/target/$TARGET/release"
-
 # Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  Building havy_os for Lichee RV 86 (Allwinner D1)  ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-
 # =============================================================================
 # Step 1: Build kernel (D1 is now the only target)
 # =============================================================================
@@ -29,7 +24,6 @@ echo -e "\n${YELLOW}[1/5] Building kernel...${NC}"
 cd "$KERNEL_DIR"
 cargo build --release --target $TARGET
 cd "$SCRIPT_DIR"
-
 # =============================================================================
 # Step 2: Create raw binary
 # =============================================================================
@@ -42,31 +36,48 @@ elif command -v llvm-objcopy &> /dev/null; then
 elif command -v riscv64-linux-gnu-objcopy &> /dev/null; then
     OBJCOPY="riscv64-linux-gnu-objcopy"
 fi
-
 if [ -n "$OBJCOPY" ]; then
     $OBJCOPY -O binary "$OUTPUT_DIR/kernel" "$OUTPUT_DIR/kernel.bin"
     echo "  ✓ Created: kernel.bin"
 else
     echo "  ⚠ No objcopy found, skipping binary"
 fi
+# =============================================================================
+# Step 3: Build WASM binaries for userspace programs (DISABLED - migrating to native RISC-V)
+# =============================================================================
+echo -e "${YELLOW}[3/5] Skipping WASM binaries (migrating to native RISC-V)...${NC}"
+# WASM build disabled - using native RISC-V binaries only
+# RUSTFLAGS="-C link-arg=--initial-memory=2097152" cargo build -p mkfs --release --target wasm32-unknown-unknown --no-default-features
+# if command -v wasm-opt &> /dev/null; then
+#     echo "  Optimizing WASM binaries..."
+#     for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
+#         if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
+#             # Use -O2 instead of -O3 to avoid aggressive optimizations that break integer handling
+#             wasm-opt -O2 --enable-bulk-memory --enable-sign-ext "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
+#         fi
+#     done
+#     echo "  ✓ WASM binaries optimized"
+# else
+#     echo "  ⚠ wasm-opt not found, skipping optimization"
+# fi
 
 # =============================================================================
-# Step 3: Build WASM binaries for userspace programs
+# Step 3b: Build native RISC-V ELF binaries for userspace programs
 # =============================================================================
-echo -e "${YELLOW}[3/5] Building WASM binaries...${NC}"
-RUSTFLAGS="-C link-arg=--initial-memory=2097152" cargo build -p mkfs --release --target wasm32-unknown-unknown --no-default-features
-if command -v wasm-opt &> /dev/null; then
-    echo "  Optimizing WASM binaries..."
-    for wasm in target/wasm32-unknown-unknown/release/*.wasm; do
-        if [[ -f "$wasm" && ! "$wasm" == *"mkfs.wasm"* && ! "$wasm" == *"riscv_vm.wasm"* ]]; then
-            # Use -O2 instead of -O3 to avoid aggressive optimizations that break integer handling
-            wasm-opt -O2 --enable-bulk-memory --enable-sign-ext "$wasm" -o "$wasm.opt" && mv "$wasm.opt" "$wasm"
-        fi
-    done
-    echo "  ✓ WASM binaries optimized"
-else
-    echo "  ⚠ wasm-opt not found, skipping optimization"
-fi
+echo -e "${YELLOW}[3b/5] Building native RISC-V binaries...${NC}"
+# Build all binaries in mkfs package for riscv64
+# Only build binaries that have RISC-V support (won't fail silently)
+cd mkfs
+NATIVE_COUNT=0
+for bin_file in src/bin/*.rs; do
+    bin_name=$(basename "$bin_file" .rs)
+    if cargo build --bin "$bin_name" --release --target riscv64gc-unknown-none-elf --no-default-features 2>/dev/null; then
+        echo "  ✓ $bin_name"
+        NATIVE_COUNT=$((NATIVE_COUNT + 1))
+    fi
+done
+cd "$SCRIPT_DIR"
+echo "  ✓ Built $NATIVE_COUNT native RISC-V binaries"
 
 # =============================================================================
 # Step 4: Create filesystem image
@@ -75,8 +86,8 @@ echo -e "${YELLOW}[4/5] Creating filesystem image...${NC}"
 cargo run -p mkfs --release -- \
     --output "$OUTPUT_DIR/fs.img" \
     --dir mkfs/root \
-    --size 2
-echo "  ✓ Created: fs.img (2MB)"
+    --size 20
+echo "  ✓ Created: fs.img (20MB)"
 
 # =============================================================================
 # Step 5: Create SD card image (if requested)
@@ -86,7 +97,7 @@ if [ "$1" = "sdcard" ]; then
     
     SDIMG="$OUTPUT_DIR/sdcard.img"
     BOOT_SIZE_MB=2
-    FS_SIZE_MB=2
+    FS_SIZE_MB=20
     TOTAL_SIZE_MB=$((BOOT_SIZE_MB + FS_SIZE_MB + 1))
     
     # Create empty image

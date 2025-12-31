@@ -132,14 +132,38 @@ impl FileSystem for GlobalSfs {
     }
 
     fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), &'static str> {
-        let mut fs_guard = FS_STATE.write();
-        let mut blk_guard = BLK_DEV.write();
+        use core::arch::asm;
         
-        if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
-            // NOTE: Don't strip leading slash - SFS stores files with full paths including /
-            return fs.write_file(dev, path, data);
+        let start = crate::get_time_ms();
+        let timeout_ms = 25000i64;
+        
+        loop {
+            // Try to acquire both locks non-blocking
+            if let Some(mut fs_guard) = FS_STATE.try_write() {
+                if let Some(mut blk_guard) = BLK_DEV.try_write() {
+                    if let (Some(fs), Some(dev)) = (fs_guard.as_mut(), blk_guard.as_mut()) {
+                        let result = fs.write_file(dev, path, data);
+                        if result.is_ok() {
+                            // Sync the cache to disk so list_dir sees the new file
+                            if let Err(e) = fs.sync(dev) {
+                                return Err(e);
+                            }
+                        }
+                        return result;
+                    }
+                    return Err("Filesystem not initialized");
+                }
+            }
+            
+            // Check timeout
+            let elapsed = crate::get_time_ms() - start;
+            if elapsed >= timeout_ms {
+                return Err("Lock timeout");
+            }
+            
+            // Yield CPU briefly
+            unsafe { asm!("wfi", options(nomem, nostack)); }
         }
-        Err("Filesystem not initialized")
     }
 
     fn list_dir(&mut self, path: &str) -> Vec<FileInfo> {

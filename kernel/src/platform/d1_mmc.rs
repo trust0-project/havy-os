@@ -417,8 +417,19 @@ impl D1Mmc {
     }
 
     /// Read a sector from the block device (fs.rs compatibility wrapper)
+    /// Includes retry logic to handle transient MMC failures (especially from secondary harts)
     pub fn read_sector(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), &'static str> {
-        self.read_block(sector, buf).map_err(|_| "IO Error")
+        // Retry up to 3 times with increasing delays
+        for attempt in 0..3 {
+            if self.read_block(sector, buf).is_ok() {
+                return Ok(());
+            }
+            // Delay before retry
+            for _ in 0..(attempt + 1) * 10000 {
+                core::hint::spin_loop();
+            }
+        }
+        Err("IO Error")
     }
 
     /// Write a sector to the block device (fs.rs compatibility wrapper)

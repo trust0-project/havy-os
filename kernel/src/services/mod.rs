@@ -6,3 +6,4 @@ pub mod tcpd;
 pub mod netd;
 pub mod gpuid;
 pub mod sysmond;
+pub mod gui_cmd;

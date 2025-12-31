@@ -645,10 +645,22 @@ fn handle_block_request(request: &IoRequest) -> IoResult {
         }
         
         IoOp::FsWrite { path, data } => {
+            use crate::device::uart::{write_str, write_line};
+            
+            write_str("io_router FsWrite: ");
+            write_str(path);
+            write_line("");
+            
             // Use VFS for mount point routing
             let mut vfs_guard = crate::lock::utils::VFS_STATE.write();
+            write_line("io_router: got VFS lock");
+            
             if let Some(vfs) = vfs_guard.as_mut() {
-                match vfs.write_file(path, data) {
+                write_line("io_router: calling vfs.write_file...");
+                let result = vfs.write_file(path, data);
+                write_line("io_router: vfs.write_file returned");
+                
+                match result {
                     Ok(()) => IoResult::Ok(Vec::new()),
                     Err(e) => IoResult::Err(e),
                 }

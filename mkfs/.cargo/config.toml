@@ -5,3 +5,11 @@
 rustflags = [
     "-C", "target-feature=-bulk-memory,-mutable-globals,-nontrapping-fptoint,-sign-ext,-reference-types,-multivalue,-simd128,-exception-handling,-tail-call,-extended-const",
 ]
+
+# Configuration for native RISC-V builds
+# Use position-independent code so binaries can be loaded at any address
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    # Position-independent executable
+    "-C", "relocation-model=pic",
+]

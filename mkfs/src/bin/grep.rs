@@ -6,23 +6,16 @@
 //   grep -n <pattern> <file>     Show line numbers
 //   grep -v <pattern> <file>     Invert match (show non-matching lines)
 
-#![cfg_attr(target_arch = "wasm32", no_std)]
-#![cfg_attr(target_arch = "wasm32", no_main)]
+#![cfg_attr(target_arch = "riscv64", no_std)]
+#![cfg_attr(target_arch = "riscv64", no_main)]
 
-#[cfg(target_arch = "wasm32")]
-extern crate mkfs;
-
-#[cfg(target_arch = "wasm32")]
-mod wasm {
-    use mkfs::{console_log, argc, argv, get_cwd, print_int};
-    use mkfs::syscalls::{print, fs_read};
+#[cfg(target_arch = "riscv64")]
+#[no_mangle]
+pub fn main() {
+    use mkfs::{console_log, argc, argv, get_cwd, print_int, print, fs_read};
 
     fn to_lower(c: u8) -> u8 {
-        if c >= b'A' && c <= b'Z' {
-            c + 32
-        } else {
-            c
-        }
+        if c >= b'A' && c <= b'Z' { c + 32 } else { c }
     }
 
     fn contains_pattern(line: &[u8], pattern: &[u8], case_insensitive: bool) -> Option<usize> {
@@ -43,10 +36,7 @@ mod wasm {
         None
     }
 
-    fn resolve_path(arg: &[u8], out: &mut [u8]) -> usize {
-        let mut cwd = [0u8; 256];
-        let cwd_len = get_cwd(&mut cwd);
-
+    fn resolve_path(arg: &[u8], out: &mut [u8], cwd: &[u8], cwd_len: Option<usize>) -> usize {
         if arg.starts_with(b"/") {
             let len = arg.len().min(out.len());
             out[..len].copy_from_slice(&arg[..len]);
@@ -66,149 +56,146 @@ mod wasm {
             out[pos..pos + copy_len].copy_from_slice(&arg[..copy_len]);
             pos + copy_len
         } else {
-            if out.len() > 0 {
-                out[0] = b'/';
-            }
+            if out.len() > 0 { out[0] = b'/'; }
             let copy_len = arg.len().min(out.len() - 1);
             out[1..1 + copy_len].copy_from_slice(&arg[..copy_len]);
             1 + copy_len
         }
     }
 
-    #[no_mangle]
-    pub extern "C" fn _start() {
-        let arg_count = argc();
+    let arg_count = argc();
 
-        if arg_count < 2 {
-            console_log("Usage: grep [OPTIONS] <pattern> [file...]\n");
-            console_log("Options: -i (case-insensitive), -n (line numbers), -v (invert)\n");
-            return;
+    if arg_count < 2 {
+        console_log("Usage: grep [OPTIONS] <pattern> [file...]\n");
+        console_log("Options: -i (case-insensitive), -n (line numbers), -v (invert)\n");
+        return;
+    }
+
+    let mut case_insensitive = false;
+    let mut show_line_numbers = false;
+    let mut invert_match = false;
+    let mut pattern_buf = [0u8; 256];
+    let mut pattern_len = 0usize;
+    let mut files: [(usize, usize); 16] = [(0, 0); 16];
+    let mut file_count = 0usize;
+    let mut args_storage = [0u8; 4096];
+    let mut storage_pos = 0usize;
+
+    // Parse arguments
+    for i in 0..arg_count {
+        let mut arg_buf = [0u8; 256];
+        let arg_len = match argv(i, &mut arg_buf) {
+            Some(len) => len,
+            None => continue,
+        };
+        let arg = &arg_buf[..arg_len];
+
+        if arg.starts_with(b"-") && pattern_len == 0 {
+            for &c in &arg[1..] {
+                match c {
+                    b'i' => case_insensitive = true,
+                    b'n' => show_line_numbers = true,
+                    b'v' => invert_match = true,
+                    _ => {}
+                }
+            }
+        } else if pattern_len == 0 {
+            let len = arg.len().min(pattern_buf.len());
+            pattern_buf[..len].copy_from_slice(&arg[..len]);
+            pattern_len = len;
+        } else if file_count < 16 {
+            let remaining = args_storage.len() - storage_pos;
+            let copy_len = arg.len().min(remaining);
+            if copy_len > 0 {
+                args_storage[storage_pos..storage_pos + copy_len].copy_from_slice(&arg[..copy_len]);
+                files[file_count] = (storage_pos, copy_len);
+                storage_pos += copy_len;
+                file_count += 1;
+            }
+        }
+    }
+
+    if pattern_len == 0 || file_count == 0 {
+        console_log("Usage: grep [OPTIONS] <pattern> <file...>\n");
+        return;
+    }
+
+    let pattern = &pattern_buf[..pattern_len];
+    let show_filename = file_count > 1;
+
+    // Get CWD
+    let mut cwd = [0u8; 256];
+    let cwd_len = get_cwd(&mut cwd);
+
+    // Process each file
+    for f in 0..file_count {
+        let (start, len) = files[f];
+        let file_arg = &args_storage[start..start + len];
+
+        // Resolve path
+        let mut path_buf = [0u8; 512];
+        let path_len = resolve_path(file_arg, &mut path_buf, &cwd, cwd_len);
+
+        // Read file
+        static mut CONTENT: [u8; 65536] = [0u8; 65536]; // 64KB max
+        let read_len = unsafe {
+            fs_read(path_buf.as_ptr(), path_len as i32, (*core::ptr::addr_of_mut!(CONTENT)).as_mut_ptr(), 65536)
+        };
+
+        if read_len < 0 {
+            console_log("\x1b[1;31mgrep:\x1b[0m ");
+            print(path_buf.as_ptr(), path_len);
+            console_log(": No such file\n");
+            continue;
         }
 
-        let mut case_insensitive = false;
-        let mut show_line_numbers = false;
-        let mut invert_match = false;
-        let mut pattern_buf = [0u8; 256];
-        let mut pattern_len = 0usize;
-        let mut files: [(usize, usize); 16] = [(0, 0); 16]; // (start_idx in args, len)
-        let mut file_count = 0usize;
-        let mut args_storage = [0u8; 4096];
-        let mut storage_pos = 0usize;
+        let content = unsafe { &(*core::ptr::addr_of!(CONTENT))[..read_len as usize] };
+        let mut line_num = 1usize;
+        let mut line_start = 0;
 
-        // Parse arguments
-        for i in 0..arg_count {
-            let mut arg_buf = [0u8; 256];
-            let arg_len = match argv(i, &mut arg_buf) {
-                Some(len) => len,
-                None => continue,
-            };
-            let arg = &arg_buf[..arg_len];
+        for (i, &c) in content.iter().enumerate() {
+            if c == b'\n' || i == content.len() - 1 {
+                let end = if c == b'\n' { i } else { i + 1 };
+                let line = &content[line_start..end];
 
-            if arg.starts_with(b"-") && pattern_len == 0 {
-                for &c in &arg[1..] {
-                    match c {
-                        b'i' => case_insensitive = true,
-                        b'n' => show_line_numbers = true,
-                        b'v' => invert_match = true,
-                        _ => {}
+                let match_pos = contains_pattern(line, pattern, case_insensitive);
+                let matches = match_pos.is_some();
+                let should_print = if invert_match { !matches } else { matches };
+
+                if should_print {
+                    if show_filename {
+                        console_log("\x1b[1;35m");
+                        print(path_buf.as_ptr(), path_len);
+                        console_log("\x1b[0m:");
                     }
-                }
-            } else if pattern_len == 0 {
-                let len = arg.len().min(pattern_buf.len());
-                pattern_buf[..len].copy_from_slice(&arg[..len]);
-                pattern_len = len;
-            } else if file_count < 16 {
-                // Store file path
-                let remaining = args_storage.len() - storage_pos;
-                let copy_len = arg.len().min(remaining);
-                if copy_len > 0 {
-                    args_storage[storage_pos..storage_pos + copy_len].copy_from_slice(&arg[..copy_len]);
-                    files[file_count] = (storage_pos, copy_len);
-                    storage_pos += copy_len;
-                    file_count += 1;
-                }
-            }
-        }
+                    if show_line_numbers {
+                        console_log("\x1b[1;32m");
+                        print_int(line_num as i64);
+                        console_log("\x1b[0m:");
+                    }
 
-        if pattern_len == 0 || file_count == 0 {
-            console_log("Usage: grep [OPTIONS] <pattern> <file...>\n");
-            return;
-        }
-
-        let pattern = &pattern_buf[..pattern_len];
-        let show_filename = file_count > 1;
-
-        // Process each file
-        for f in 0..file_count {
-            let (start, len) = files[f];
-            let file_arg = &args_storage[start..start + len];
-
-            // Resolve path
-            let mut path_buf = [0u8; 512];
-            let path_len = resolve_path(file_arg, &mut path_buf);
-
-            // Read file
-            let mut content = [0u8; 1048576]; // 1MB max file size
-            let read_len = unsafe {
-                fs_read(path_buf.as_ptr(), path_len as i32, content.as_mut_ptr(), content.len() as i32)
-            };
-
-            if read_len < 0 {
-                console_log("\x1b[1;31mgrep:\x1b[0m ");
-                unsafe { print(path_buf.as_ptr(), path_len) };
-                console_log(": No such file\n");
-                continue;
-            }
-
-            let content = &content[..read_len as usize];
-            let mut line_num = 1usize;
-            let mut line_start = 0;
-
-            for (i, &c) in content.iter().enumerate() {
-                if c == b'\n' || i == content.len() - 1 {
-                    let end = if c == b'\n' { i } else { i + 1 };
-                    let line = &content[line_start..end];
-
-                    let match_pos = contains_pattern(line, pattern, case_insensitive);
-                    let matches = match_pos.is_some();
-                    let should_print = if invert_match { !matches } else { matches };
-
-                    if should_print {
-                        if show_filename {
-                            console_log("\x1b[1;35m");
-                            unsafe { print(path_buf.as_ptr(), path_len) };
-                            console_log("\x1b[0m:");
-                        }
-                        if show_line_numbers {
-                            console_log("\x1b[1;32m");
-                            print_int(line_num as i64);
-                            console_log("\x1b[0m:");
-                        }
-
-                        if !invert_match {
-                            if let Some(pos) = match_pos {
-                                // Highlight match
-                                unsafe { print(line[..pos].as_ptr(), pos) };
-                                console_log("\x1b[1;31m");
-                                unsafe { print(line[pos..pos + pattern_len].as_ptr(), pattern_len) };
-                                console_log("\x1b[0m");
-                                unsafe { print(line[pos + pattern_len..].as_ptr(), line.len() - pos - pattern_len) };
-                            } else {
-                                unsafe { print(line.as_ptr(), line.len()) };
-                            }
+                    if !invert_match {
+                        if let Some(pos) = match_pos {
+                            print(line[..pos].as_ptr(), pos);
+                            console_log("\x1b[1;31m");
+                            print(line[pos..pos + pattern_len].as_ptr(), pattern_len);
+                            console_log("\x1b[0m");
+                            print(line[pos + pattern_len..].as_ptr(), line.len() - pos - pattern_len);
                         } else {
-                            unsafe { print(line.as_ptr(), line.len()) };
+                            print(line.as_ptr(), line.len());
                         }
-                        console_log("\n");
+                    } else {
+                        print(line.as_ptr(), line.len());
                     }
-
-                    line_num += 1;
-                    line_start = i + 1;
+                    console_log("\n");
                 }
+
+                line_num += 1;
+                line_start = i + 1;
             }
         }
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "riscv64"))]
 fn main() {}

@@ -999,21 +999,57 @@ fn is_http_response_complete(data: &[u8]) -> bool {
         {
             let body_start = i + 4;
 
-            // Check Content-Length
+            // Check Content-Length and Transfer-Encoding
             if let Ok(headers) = core::str::from_utf8(&data[..i]) {
+                let mut content_length: Option<usize> = None;
+                let mut is_chunked = false;
+                
                 for line in headers.lines() {
-                    if line.to_lowercase().starts_with("content-length:") {
+                    let lower = line.to_lowercase();
+                    if lower.starts_with("content-length:") {
                         if let Some(len_str) = line.split(':').nth(1) {
-                            if let Ok(content_len) = len_str.trim().parse::<usize>() {
-                                return data.len() >= body_start + content_len;
+                            content_length = len_str.trim().parse().ok();
+                        }
+                    }
+                    if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+                        is_chunked = true;
+                    }
+                }
+                
+                // For Content-Length, check if we have all bytes
+                if let Some(len) = content_length {
+                    return data.len() >= body_start + len;
+                }
+                
+                // For chunked encoding, look for final terminating chunk
+                // The terminator is "\r\n0\r\n\r\n" or just "0\r\n\r\n" at the very end
+                if is_chunked {
+                    let body = &data[body_start..];
+                    // The terminator sequence is at the very end: 0\r\n\r\n (5 bytes)
+                    // But it must appear after a \r\n from the previous chunk
+                    // So we look for \r\n0\r\n\r\n (7 bytes) or 0\r\n\r\n at start
+                    if body.len() >= 5 {
+                        // Check if the body ends with 0\r\n\r\n
+                        let end = &body[body.len().saturating_sub(5)..];
+                        if end == b"0\r\n\r\n" {
+                            return true;
+                        }
+                        // Also check for \r\n0\r\n\r\n pattern
+                        if body.len() >= 7 {
+                            let end7 = &body[body.len().saturating_sub(7)..];
+                            if end7 == b"\r\n0\r\n\r\n" {
+                                return true;
                             }
                         }
                     }
+                    // Not complete yet - keep reading
+                    return false;
                 }
             }
 
-            // No Content-Length, assume complete if we have headers
-            return data.len() > body_start;
+            // No Content-Length or chunked, wait for connection close
+            // But give a minimum amount of time by checking if we have reasonable data
+            return false;
         }
     }
     false

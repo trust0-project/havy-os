@@ -96,7 +96,7 @@ pub fn enable_interrupts() {
         asm!(
             "li t0, 0x222",
             "csrs sie, t0",
-            out("t0") _,
+            out("x5") _,
             options(nomem, nostack)
         );
     }
@@ -182,8 +182,11 @@ pub fn read_stval() -> usize {
 }
 
 /// The main trap handler called from assembly
+/// 
+/// # Arguments
+/// * `frame` - Pointer to saved register context on stack
 #[no_mangle]
-pub extern "C" fn trap_handler() {
+pub extern "C" fn trap_handler(frame: *mut u64) {
     let scause = read_scause();
     let hart_id = crate::get_hart_id();
     
@@ -209,7 +212,7 @@ pub extern "C" fn trap_handler() {
             }
         }
     } else {
-        handle_exception(hart_id, cause_code);
+        handle_exception(hart_id, cause_code, frame);
     }
 }
 
@@ -252,19 +255,51 @@ fn handle_external_interrupt(hart_id: usize) {
 }
 
 /// Handle exception (synchronous trap)
-fn handle_exception(hart_id: usize, cause: usize) {
+/// 
+/// Stack frame layout (offsets from frame pointer):
+/// - a0 at offset 64 (8 bytes each: 64/8 = index 8)
+/// - a1 at offset 72 (index 9)
+/// - a2 at offset 80 (index 10)
+/// - a3 at offset 88 (index 11)
+/// - a4 at offset 96 (index 12)
+/// - a5 at offset 104 (index 13)
+/// - a6 at offset 112 (index 14)
+/// - a7 at offset 120 (index 15)
+fn handle_exception(hart_id: usize, cause: usize, frame: *mut u64) {
     let sepc = read_sepc();
     let stval = read_stval();
     
     match cause {
         cause::ECALL_FROM_U_MODE | cause::ECALL_FROM_S_MODE => {
-            // Advance PC past ecall
+            // Read syscall arguments from saved stack frame
+            // Stack layout: a0 at offset 64, a7 at offset 120
+            let a0 = unsafe { *frame.add(8) };  // offset 64
+            let a1 = unsafe { *frame.add(9) };  // offset 72
+            let a2 = unsafe { *frame.add(10) }; // offset 80
+            let a3 = unsafe { *frame.add(11) }; // offset 88
+            let a4 = unsafe { *frame.add(12) }; // offset 96
+            let a5 = unsafe { *frame.add(13) }; // offset 104
+            let syscall_num = unsafe { *frame.add(15) }; // offset 120 (a7)
+            
+            // Call syscall handler
+            let result = crate::syscall::handle_syscall(syscall_num, a0, a1, a2, a3, a4, a5);
+            
+            // Check if binary exited - if so, restore kernel context
+            if crate::elf_loader::has_exited().is_some() {
+                // This function never returns - it jumps back to execute_elf's caller
+                crate::elf_loader::restore_kernel_context();
+            }
+            
+            // Store result in saved a0 (will be restored on return)
+            unsafe { *frame.add(8) = result as u64; }
+            
+            // Advance PC past ecall instruction (4 bytes)
             unsafe {
                 asm!(
                     "csrr t0, sepc",
                     "addi t0, t0, 4",
                     "csrw sepc, t0",
-                    out("t0") _,
+                    out("x5") _,
                     options(nomem, nostack)
                 );
             }
@@ -279,7 +314,7 @@ fn handle_exception(hart_id: usize, cause: usize) {
                     "csrr t0, sepc",
                     "addi t0, t0, 2",
                     "csrw sepc, t0",
-                    out("t0") _,
+                    out("x5") _,
                     options(nomem, nostack)
                 );
             }
@@ -332,6 +367,7 @@ trap_vector_entry:
     sd gp, 224(sp)
     sd tp, 232(sp)
     
+    mv a0, sp           # Pass trap frame pointer as first argument
     call trap_handler
     
     ld ra, 0(sp)

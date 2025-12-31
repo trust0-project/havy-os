@@ -210,6 +210,15 @@ pub fn init_services() {
             Priority::High,
             None,  // Can run on any hart (touch driver is thread-safe)
         );
+        
+        // GUI command process - executes terminal commands in U-mode
+        schedule_service(
+            "gui_cmd",
+            "GUI command executor - runs terminal commands in user mode",
+            crate::services::gui_cmd::gui_cmd_service,
+            Priority::Normal,
+            None,
+        );
     }
 
 

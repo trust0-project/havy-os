@@ -295,16 +295,28 @@ pub fn parse_response(data: &[u8]) -> Result<HttpResponse, &'static str> {
 
     // Parse headers
     let mut headers = BTreeMap::new();
+    let mut is_chunked = false;
     for line in lines {
         if let Some(colon_idx) = line.find(':') {
             let key = line[..colon_idx].trim().to_string();
             let value = line[colon_idx + 1..].trim().to_string();
+            
+            // Check for chunked transfer encoding
+            if key.to_lowercase() == "transfer-encoding" && value.to_lowercase().contains("chunked") {
+                is_chunked = true;
+            }
+            
             headers.insert(key, value);
         }
     }
 
-    // Extract body
-    let body = data[body_start..].to_vec();
+    // Extract body - decode chunked if needed
+    let raw_body = &data[body_start..];
+    let body = if is_chunked {
+        decode_chunked(raw_body).unwrap_or_else(|| raw_body.to_vec())
+    } else {
+        raw_body.to_vec()
+    };
 
     Ok(HttpResponse {
         status_code,
@@ -312,6 +324,58 @@ pub fn parse_response(data: &[u8]) -> Result<HttpResponse, &'static str> {
         headers,
         body,
     })
+}
+
+/// Decode chunked transfer encoding
+fn decode_chunked(data: &[u8]) -> Option<Vec<u8>> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    
+    while pos < data.len() {
+        // Find the end of the chunk size line
+        let mut line_end = pos;
+        while line_end + 1 < data.len() {
+            if data[line_end] == b'\r' && data[line_end + 1] == b'\n' {
+                break;
+            }
+            line_end += 1;
+        }
+        
+        if line_end + 1 >= data.len() {
+            break; // Incomplete chunk
+        }
+        
+        // Parse chunk size (hex)
+        let size_str = core::str::from_utf8(&data[pos..line_end]).ok()?;
+        // Handle chunk extensions (size;ext=value)
+        let size_part = size_str.split(';').next().unwrap_or(size_str).trim();
+        let chunk_size = usize::from_str_radix(size_part, 16).ok()?;
+        
+        // Skip the size line
+        pos = line_end + 2;
+        
+        // End of chunks
+        if chunk_size == 0 {
+            break;
+        }
+        
+        // Read chunk data
+        if pos + chunk_size > data.len() {
+            // Chunk extends beyond available data, take what we have
+            result.extend_from_slice(&data[pos..]);
+            break;
+        }
+        
+        result.extend_from_slice(&data[pos..pos + chunk_size]);
+        pos += chunk_size;
+        
+        // Skip trailing CRLF after chunk data
+        if pos + 2 <= data.len() && data[pos] == b'\r' && data[pos + 1] == b'\n' {
+            pos += 2;
+        }
+    }
+    
+    Some(result)
 }
 
 /// Perform an HTTP request using the network stack
