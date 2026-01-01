@@ -202,7 +202,7 @@ pub fn update_touch_debug(x: i32, y: i32) {
 }
 
 /// Update just the dynamic hardware stats section of the main_screen screen
-/// This is much more efficient than redrawing the entire screen
+/// OPTIMIZED: Uses direct gpu.fill_rect() for clearing instead of embedded-graphics
 pub fn update_main_screen_hardware_stats() {
     // Don't update hardware stats if a child window is open (it would draw over the window)
     if unsafe { MAIN_SCREEN_OPEN_WINDOW.is_some() } {
@@ -232,21 +232,12 @@ pub fn update_main_screen_hardware_stats() {
         let col1_x = 30;
         let text_style = MonoTextStyle::new(&FONT_7X14, Rgb888::new(200, 200, 210));
         
-        // Clear just the dynamic hardware stats (NOT the static Display line at y=240)
-        // Lines to clear: CPU (y=210), Memory (y=225), Disk (y=255), Network (y=270)
-        // FONT_7X14 means text extends ~10px above baseline
-        let clear_color = Rgb888::new(28, 28, 38); // Window background color
-        
-        // Clear top section: CPU (y=210) and Memory (y=225) only
-        // Stop at y=228 to avoid Display line (baseline y=240, text starts ~y=230)
-        let _ = Rectangle::new(Point::new(col1_x, 200), Size::new(300, 28))
-            .into_styled(PrimitiveStyle::with_fill(clear_color))
-            .draw(gpu);
-        // Clear bottom section: Disk (y=255) and Network (y=270) only
-        // Start at y=245 to avoid Display line
-        let _ = Rectangle::new(Point::new(col1_x, 245), Size::new(300, 37))
-            .into_styled(PrimitiveStyle::with_fill(clear_color))
-            .draw(gpu);
+        // OPTIMIZATION: Use direct fill_rect for clearing instead of Rectangle::with_fill()
+        // This bypasses embedded_graphics overhead and uses our fast fill_hline internally
+        // Clear top section: CPU (y=210) and Memory (y=225) - window background color (28, 28, 38)
+        gpu.fill_rect(col1_x as u32, 200, 300, 28, 28, 28, 38);
+        // Clear bottom section: Disk (y=255) and Network (y=270)
+        gpu.fill_rect(col1_x as u32, 245, 300, 37, 28, 28, 38);
         
         // Redraw dynamic values
         let mut cpu_buf = [0u8; 32];
@@ -266,11 +257,8 @@ pub fn update_main_screen_hardware_stats() {
         let _ = Text::new(net_str, Point::new(col1_x, 270), text_style).draw(gpu);
         
         // Update date/time or uptime in status bar
-        let status_bar_bg = Rgb888::new(25, 25, 35);
-        // Clear the time display area on the right side
-        let _ = Rectangle::new(Point::new(400, 742), Size::new(150, 26))
-            .into_styled(PrimitiveStyle::with_fill(status_bar_bg))
-            .draw(gpu);
+        // OPTIMIZATION: Use direct fill_rect for status bar time clearing
+        gpu.fill_rect(400, 742, 150, 26, 25, 25, 35);
         
         // Try to get host date/time from RTC, fall back to uptime
         let time_str = if let Some(dt) = crate::device::rtc::get_datetime() {

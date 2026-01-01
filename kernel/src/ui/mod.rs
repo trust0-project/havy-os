@@ -65,3 +65,4 @@ pub(crate) fn draw_image(gpu: &mut d1_display::GpuDriver, x: u32, y: u32, width:
         }
     }
 }
+

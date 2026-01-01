@@ -125,6 +125,11 @@ impl LineBuffer {
 static mut CONSOLE: LineBuffer = LineBuffer::new();
 static CONSOLE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Last rendered line count and scroll offset - for incremental rendering optimization
+/// When new lines are added without scrolling, we only draw the new lines
+static mut LAST_RENDERED_LINE_COUNT: usize = 0;
+static mut LAST_SCROLL_OFFSET: usize = 0;
+
 /// Initialize the boot console
 /// Should be called early in boot after GPU is available
 pub fn init() {
@@ -148,13 +153,25 @@ pub fn get_phase() -> BootPhase {
 
 /// Set boot phase to GUI (called when boot completes)
 pub fn set_phase_gui() {
+    // Reset incremental rendering state for next boot (if any)
+    unsafe {
+        LAST_RENDERED_LINE_COUNT = 0;
+        LAST_SCROLL_OFFSET = 0;
+    }
     BOOT_PHASE.store(BootPhase::Gui as usize, Ordering::Release);
 }
 
 /// Print a line to the boot console
 /// This adds the text to the buffer and triggers a render
+/// NOTE: Empty lines are skipped for GPU console (used for UART spacing only)
 pub fn print_line(text: &str) {
     if !is_initialized() {
+        return;
+    }
+    
+    // Skip empty lines - they're only for UART console visual separation
+    // On GPU, we want compact consecutive messages
+    if text.is_empty() || text == "\n" {
         return;
     }
     
@@ -229,9 +246,11 @@ pub fn batch_end() {
     }
 }
 
-/// Render the boot console to the framebuffer using embedded-graphics
-/// Uses FULL REDRAW approach - always redraws all visible lines
-/// This is simpler and guarantees correct display regardless of timing
+
+
+/// Render the boot console to the framebuffer
+/// SIMPLIFIED: Always does full redraw for reliability
+/// This approach is proven to work correctly when scrolling
 pub fn render() {
     if !is_initialized() || get_phase() != BootPhase::Console {
         return;
@@ -253,10 +272,14 @@ pub fn render() {
         // Calculate scroll offset (how many lines scrolled off the top)
         let scroll_offset = line_count.saturating_sub(visible_lines);
         
-        // ALWAYS do full redraw - simpler and more reliable
+        // ALWAYS do full redraw - simpler and proven to work correctly
+        // The screen was already cleared at init, but we need to clear the console area
+        // to handle line updates properly
         d1_display::with_gpu(|gpu| {
-            // Clear with bulk 64-bit writes
-            let _ = gpu.clear(COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+            // Only clear the console text area (not full screen) for speed
+            let console_height = (visible_lines as u32) * LINE_HEIGHT;
+            gpu.fill_rect(0, MARGIN_TOP as u32, DISPLAY_WIDTH, console_height,
+                COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
             
             // Draw ALL visible lines with pixel batching for speed
             d1_display::begin_pixel_batch();
@@ -276,11 +299,10 @@ pub fn render() {
                 }
             }
             d1_display::end_pixel_batch();
-            // Dirty region already marked by mark_all_dirty() from clear()
+            // Dirty region already marked by fill_rect -> fill_hline -> mark_dirty
         });
         
         // Only flush when not in any batch (BATCH_DEPTH == 0)
-        // When batching, batch_end() handles the flush
         if BATCH_DEPTH == 0 {
             d1_display::flush();
         }

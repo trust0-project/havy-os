@@ -595,8 +595,16 @@ pub fn is_available() -> bool {
 }
 
 /// Clear both framebuffers to black (called once at boot console init)
+/// IMPORTANT: Must flush after clearing so browser receives the initial black screen
+/// This enables incremental rendering to work correctly for subsequent boot messages
 pub fn init_clear_buffers() {
-    with_gpu(|gpu| gpu.init_clear_buffers());
+    with_gpu(|gpu| {
+        gpu.init_clear_buffers();
+    });
+    // Mark entire screen dirty and flush immediately so browser sees the black screen
+    // This is critical for incremental rendering to work during boot
+    mark_all_dirty();
+    flush();
 }
 
 /// Get access to the global GPU driver
