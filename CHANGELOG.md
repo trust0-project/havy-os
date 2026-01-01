@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.62](https://github.com/trust0-project/havy-os/compare/v0.1.61...v0.1.62) (2025-12-31)
+
+
+### Bug Fixes
+
+* remove verbose log ([3eca168](https://github.com/trust0-project/havy-os/commit/3eca168c552f74fac7f8541f9377d9610fce257e))
+
 ## [0.1.61](https://github.com/trust0-project/havy-os/compare/v0.1.60...v0.1.61) (2025-12-31)
 
 
