@@ -345,10 +345,12 @@ pub fn klogd_service() {
     let last = KLOGD_LAST_RUN.load(Ordering::Relaxed);
     
     if KLOGD_INITIALIZED.load(Ordering::Relaxed) && (now - last) < 4000 {
-        // Not time yet - sleep longer to save CPU
+        // Not time yet - park until roughly the next flush window.
+        crate::cpu::sched::sleep_current_ms(1000);
         return;
     }
     
     // Time to potentially do work
     klogd_tick();
+    crate::cpu::sched::sleep_current_ms(1000);
 }

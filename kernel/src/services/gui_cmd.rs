@@ -175,7 +175,10 @@ pub fn gui_cmd_service() {
     
     // Check if work is available
     if !GUI_CMD_WORK_AVAILABLE.load(Ordering::SeqCst) {
-        return; // No work - yield to scheduler
+        // No work - park briefly; command submission latency of a few ms
+        // is invisible next to command execution time.
+        crate::cpu::sched::sleep_current_ms(5);
+        return;
     }
     
     write_line("[GUI_CMD] work available - processing");

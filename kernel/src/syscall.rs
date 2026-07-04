@@ -86,6 +86,7 @@ pub fn handle_syscall(
     a4: u64,
     _a5: u64,
 ) -> i64 {
+    crate::perfstat::inc(crate::perfstat::id::SYSCALLS);
     match syscall_num {
         // Core
         SYS_PRINT => sys_print(a0 as *const u8, a1 as usize),
@@ -146,10 +147,34 @@ pub fn handle_syscall(
         SYS_NET_INFO => sys_net_info(a0 as *mut u8, a1 as usize),
         SYS_HEAP_STATS => sys_heap_stats(a0 as *mut u8),
         SYS_SLEEP => sys_sleep(a0 as u64),
+        SYS_PERFSTAT => sys_perfstat(a0 as *mut u8, a1 as usize, a2),
 
         // Unknown syscall
         _ => -1, // ENOSYS
     }
+}
+
+/// SYS_PERFSTAT: copy kernel performance counters to userspace.
+///
+/// * `out_ptr` - buffer for `max_counters` u64 values (little-endian)
+/// * `max_counters` - capacity of the buffer in u64 slots
+/// * `reset` - non-zero resets all counters after the snapshot
+///
+/// Returns the number of counters written.
+fn sys_perfstat(out_ptr: *mut u8, max_counters: usize, reset: u64) -> i64 {
+    if out_ptr.is_null() || max_counters == 0 {
+        return -1;
+    }
+    let mut snapshot = [0u64; crate::perfstat::id::COUNT];
+    let available = crate::perfstat::snapshot(&mut snapshot);
+    let n = available.min(max_counters);
+    unsafe {
+        core::ptr::copy_nonoverlapping(snapshot.as_ptr() as *const u8, out_ptr, n * 8);
+    }
+    if reset != 0 {
+        crate::perfstat::reset();
+    }
+    n as i64
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -278,33 +303,17 @@ fn sys_fs_read(path_ptr: *const u8, path_len: usize, buf_ptr: *mut u8, buf_len: 
 }
 
 fn sys_fs_write(path_ptr: *const u8, path_len: usize, data_ptr: *const u8, data_len: usize) -> i64 {
-    use crate::device::uart::{write_str, write_line};
-    
     unsafe {
         if let Some(path) = read_str(path_ptr, path_len) {
-            write_str("fs_write syscall: ");
-            write_str(path);
-            write_str(" (");
-            write_str(&alloc::format!("{}", data_len));
-            write_line(" bytes)");
-            
             if !data_ptr.is_null() {
                 let data = slice::from_raw_parts(data_ptr, data_len);
                 match fs_proxy::fs_write(path, data) {
-                    Ok(()) => {
-                        write_line("fs_write: OK");
-                        return data_len as i64;
-                    }
+                    Ok(()) => return data_len as i64,
                     Err(e) => {
-                        write_str("fs_write: ERROR - ");
-                        write_line(e);
+                        crate::services::klogd::klog_debug("fs", e);
                     }
                 }
-            } else {
-                write_line("fs_write: data_ptr is null");
             }
-        } else {
-            write_line("fs_write: path read failed");
         }
     }
     -1

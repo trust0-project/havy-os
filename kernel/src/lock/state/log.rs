@@ -194,6 +194,7 @@ impl LogBufferState {
         buffer.push_back(entry);
 
         self.sequence.fetch_add(1, Ordering::Relaxed);
+        crate::perfstat::inc(crate::perfstat::id::LOG_LINES);
     }
 
     /// Drain all entries for writing to log file
@@ -241,6 +242,8 @@ impl LogBufferState {
 
 // Type alias for backwards compatibility
 pub type LogBuffer = LogBufferState;
+
+
 
 
 

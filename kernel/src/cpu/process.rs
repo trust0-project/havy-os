@@ -286,6 +286,15 @@ pub struct Process {
     pub cpu_time_ms: AtomicU64,
     /// Number of times scheduled
     pub schedule_count: AtomicU64,
+
+    // ─── Scheduler bookkeeping ───────────────────────────────────────────────
+    /// Hart whose parked list holds this process while it is blocked
+    /// (usize::MAX = not parked). Used by wakers to IPI the right hart.
+    park_hart: AtomicUsize,
+    /// Earliest time (ms since boot) this process wants to run again.
+    /// Daemons set this via sched::sleep_current_ms() to stop burning CPU
+    /// between periodic ticks; the scheduler parks them until the deadline.
+    next_run_at: AtomicU64,
 }
 
 // SAFETY: Process uses UnsafeCell for context, but context is only accessed
@@ -333,6 +342,8 @@ impl Process {
             created_at: crate::get_time_ms() as u64,
             cpu_time_ms: AtomicU64::new(0),
             schedule_count: AtomicU64::new(0),
+            park_hart: AtomicUsize::new(usize::MAX),
+            next_run_at: AtomicU64::new(0),
         }
     }
 
@@ -358,6 +369,38 @@ impl Process {
     #[inline]
     pub fn state(&self) -> ProcessState {
         ProcessState::from_u8(self.state.load(Ordering::Acquire) as u8)
+    }
+
+    /// Record which hart's parked list holds this blocked process.
+    #[inline]
+    pub fn set_park_hart(&self, hart: usize) {
+        self.park_hart.store(hart, Ordering::Release);
+    }
+
+    /// Clear the parked-hart marker (process re-admitted to a run queue).
+    #[inline]
+    pub fn clear_park_hart(&self) {
+        self.park_hart.store(usize::MAX, Ordering::Release);
+    }
+
+    /// Hart whose parked list holds this process, if any.
+    #[inline]
+    pub fn get_park_hart(&self) -> Option<usize> {
+        let hart = self.park_hart.load(Ordering::Acquire);
+        if hart == usize::MAX { None } else { Some(hart) }
+    }
+
+    /// Request that this process not run again before `time_ms` (ms since
+    /// boot). The scheduler parks it until then.
+    #[inline]
+    pub fn set_next_run_at(&self, time_ms: u64) {
+        self.next_run_at.store(time_ms, Ordering::Release);
+    }
+
+    /// Earliest time this process wants to run (0 = immediately).
+    #[inline]
+    pub fn next_run_at(&self) -> u64 {
+        self.next_run_at.load(Ordering::Acquire)
     }
 
     /// Set process state

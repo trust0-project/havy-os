@@ -197,4 +197,6 @@ fn tick_impl(now: i64) {
 /// tcpd service entry point (for scheduler)
 pub fn tcpd_service() {
     tick();
+    // TCP retransmit/keepalive housekeeping needs only coarse timing.
+    crate::cpu::sched::sleep_current_ms(10);
 }

@@ -316,6 +316,17 @@ static IO_COMPLETIONS: [CompletionSlot; MAX_PENDING_REQUESTS] = {
 static REQUESTS_SUBMITTED: AtomicU64 = AtomicU64::new(0);
 static REQUESTS_COMPLETED: AtomicU64 = AtomicU64::new(0);
 
+/// Number of I/O requests submitted but not yet dispatched. Lets hart 0's
+/// loop skip `dispatch_io()` (which otherwise locks every hart's queue every
+/// iteration) with a single relaxed load when there is nothing pending.
+static PENDING_IO: AtomicUsize = AtomicUsize::new(0);
+
+/// True if any secondary hart has submitted I/O awaiting dispatch.
+#[inline]
+pub fn has_pending_io() -> bool {
+    PENDING_IO.load(Ordering::Acquire) != 0
+}
+
 /// Callback registry for async I/O completion notifications
 /// Indexed by (request_id % MAX_PENDING_REQUESTS)
 static IO_CALLBACKS: Spinlock<[Option<IoCallback>; MAX_PENDING_REQUESTS]> = Spinlock::new([None; MAX_PENDING_REQUESTS]);
@@ -347,6 +358,8 @@ pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
     let hart_id = get_hart_id();
     IO_QUEUES[hart_id].lock().push_back(request);
     REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    PENDING_IO.fetch_add(1, Ordering::Release);
+    crate::perfstat::inc(crate::perfstat::id::IO_REQUESTS);
     
     // Send IPI to Hart 0 to wake it up
     if get_hart_id() != 0 {
@@ -368,7 +381,13 @@ pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
                 return IoResult::Err("I/O request timeout");
             }
         }
-        
+
+        // Cooperative checkpoint: the timer IRQ sets yield_pending. Consuming
+        // it here keeps the flag from lingering into the next scheduled slice;
+        // we still WFI (the request must complete before we can return), but
+        // the hart wakes on the completion IPI from hart 0's dispatcher.
+        let _ = crate::cpu::sched::yield_pending(hart_id);
+
         // Yield CPU (use WFI to save power)
         unsafe {
             core::arch::asm!("wfi");
@@ -393,6 +412,8 @@ pub fn request_io_async(request: IoRequest) -> RequestId {
     let hart_id = get_hart_id();
     IO_QUEUES[hart_id].lock().push_back(request);
     REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    PENDING_IO.fetch_add(1, Ordering::Release);
+    crate::perfstat::inc(crate::perfstat::id::IO_REQUESTS);
     
     // Send IPI to Hart 0
     if get_hart_id() != 0 {
@@ -449,6 +470,8 @@ pub fn submit_async_io_with_callback(
     let hart_id = get_hart_id();
     IO_QUEUES[hart_id].lock().push_back(request);
     REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
+    PENDING_IO.fetch_add(1, Ordering::Release);
+    crate::perfstat::inc(crate::perfstat::id::IO_REQUESTS);
     
     // Send IPI to Hart 0
     if get_hart_id() != 0 {
@@ -537,6 +560,7 @@ pub fn dispatch_io() -> usize {
     
     // Process up to one request per hart per dispatch cycle for fairness
     while let Some(request) = dequeue_request_round_robin(num_harts) {
+        PENDING_IO.fetch_sub(1, Ordering::Release);
         let result = handle_request(&request);
         complete_request(request.request_id, result);
         
@@ -548,6 +572,9 @@ pub fn dispatch_io() -> usize {
         processed += 1;
     }
     
+    if processed > 0 {
+        crate::perfstat::add(crate::perfstat::id::IO_DISPATCHED, processed as u64);
+    }
     processed
 }
 

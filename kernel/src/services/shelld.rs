@@ -378,6 +378,10 @@ pub fn shell_service() {
     
     // Do one iteration of shell work
     shell_tick();
+
+    // Poll UART input at 2 ms cadence: imperceptible typing latency while
+    // cutting the tick rate ~1000x versus running every hart-loop pass.
+    crate::cpu::sched::sleep_current_ms(2);
 }
 
 /// One iteration of shell work

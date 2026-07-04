@@ -845,7 +845,8 @@ fn terminal_execute_command() {
     
     draw_terminal_output_only();
     draw_terminal_button_only();
-    d1_display::flush();
+    // No explicit flush: gpuid's deferred end-of-tick flush presents this
+    // frame (avoids a redundant second dirty-rect copy).
 }
 
 /// Check for GUI command completion and update terminal output
@@ -890,10 +891,9 @@ pub fn check_gui_command_completion() {
         // Mark command as finished
         unsafe { TERMINAL_COMMAND_RUNNING = false; }
         
-        // Update UI
+        // Update UI (gpuid's deferred flush presents it - no explicit flush)
         draw_terminal_output_only();
         draw_terminal_button_only();
-        d1_display::flush();
     }
 }
 

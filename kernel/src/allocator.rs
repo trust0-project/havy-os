@@ -1,4 +1,7 @@
+use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
+
+use crate::perfstat;
 
 unsafe extern "C" {
     // Linker symbols for section boundaries
@@ -16,8 +19,29 @@ const RAM_BASE: usize = 0x8000_0000;
 /// Total RAM size (must match link.x: LENGTH = 512M)
 const RAM_SIZE: usize = 512 * 1024 * 1024;
 
+/// Global allocator wrapper that maintains perfstat counters around the
+/// underlying heap implementation.
+struct CountingAllocator {
+    inner: LockedHeap,
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        perfstat::inc(perfstat::id::HEAP_ALLOCS);
+        perfstat::add(perfstat::id::HEAP_ALLOC_BYTES, layout.size() as u64);
+        unsafe { self.inner.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        perfstat::inc(perfstat::id::HEAP_FREES);
+        unsafe { self.inner.dealloc(ptr, layout) }
+    }
+}
+
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: CountingAllocator = CountingAllocator {
+    inner: LockedHeap::empty(),
+};
 
 /// Initialize the heap allocator.
 /// Must be called before any heap allocations occur.
@@ -26,13 +50,13 @@ pub fn init() {
         let heap_start = &raw mut _sheap as *mut u8;
         let heap_end = &raw const _eheap as usize;
         let heap_size = heap_end - (heap_start as usize);
-        ALLOCATOR.lock().init(heap_start, heap_size);
+        ALLOCATOR.inner.lock().init(heap_start, heap_size);
     }
 }
 
 /// Returns (used, free) bytes in the heap, if the allocator supports introspection.
 pub fn heap_stats() -> (usize, usize) {
-    let allocator = ALLOCATOR.lock();
+    let allocator = ALLOCATOR.inner.lock();
     let used = allocator.used();
     let free = allocator.free();
     (used, free)

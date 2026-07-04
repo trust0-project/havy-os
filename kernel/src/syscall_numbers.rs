@@ -141,3 +141,8 @@ pub const SYS_HEAP_STATS: u64 = 81;
 /// Sleep: sleep_ms(milliseconds) -> i32
 pub const SYS_SLEEP: u64 = 82;
 
+/// Get kernel performance counters: perfstat(out_ptr, max_counters, reset) -> i32
+/// Writes up to max_counters u64 values; returns count written.
+/// Counter order is defined in kernel/src/perfstat.rs (module `id`).
+pub const SYS_PERFSTAT: u64 = 83;
+

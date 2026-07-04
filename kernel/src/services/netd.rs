@@ -184,4 +184,8 @@ pub fn netd_service() {
     
     // Check for IP assignment from relay
     tick();
+
+    // smoltcp needs periodic polling; 2 ms keeps latency low while cutting
+    // the poll rate ~1000x versus running every hart-loop iteration.
+    crate::cpu::sched::sleep_current_ms(2);
 }

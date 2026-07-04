@@ -51,6 +51,7 @@ pub fn init_cpu() {
     print_status("Process scheduler initialized", true);
    
     trap::init(0);
+    crate::plic::init(0);
     fence_memory();
 
 

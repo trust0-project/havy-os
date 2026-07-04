@@ -92,6 +92,7 @@ impl WaitQueueState {
         // Mark the process as ready (using new process system)
         if let Some(process) = crate::cpu::process::PROCESS_TABLE.get(waiter.pid) {
             process.mark_ready();
+            crate::cpu::sched::notify_woken(&process);
         }
 
         Some(waiter.pid)
@@ -114,6 +115,7 @@ impl WaitQueueState {
             );
             if let Some(process) = crate::cpu::process::PROCESS_TABLE.get(waiter.pid) {
                 process.mark_ready();
+                crate::cpu::sched::notify_woken(&process);
             }
             count += 1;
         }
@@ -139,6 +141,7 @@ impl WaitQueueState {
                 );
                 if let Some(process) = crate::cpu::process::PROCESS_TABLE.get(waiter.pid) {
                     process.mark_ready();
+                    crate::cpu::sched::notify_woken(&process);
                 }
                 count += 1;
             } else {
@@ -171,6 +174,7 @@ impl WaitQueueState {
                     );
                     if let Some(process) = crate::cpu::process::PROCESS_TABLE.get(waiter.pid) {
                         process.mark_ready();
+                        crate::cpu::sched::notify_woken(&process);
                     }
                     timed_out.push(waiter.pid);
                     continue;
@@ -213,6 +217,7 @@ impl WaitQueueState {
                 );
                 if let Some(process) = crate::cpu::process::PROCESS_TABLE.get(waiter.pid) {
                     process.mark_ready();
+                    crate::cpu::sched::notify_woken(&process);
                 }
                 count += 1;
             } else {
@@ -232,6 +237,8 @@ impl WaitQueueState {
 
 // Type alias for backwards compatibility
 pub type WaitQueue = WaitQueueState;
+
+
 
 
 

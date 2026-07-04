@@ -36,6 +36,13 @@ pub fn is_hart_ready(hart_id: usize) -> bool {
     hart_id < MAX_HARTS && HART_READY[hart_id].load(Ordering::Acquire)
 }
 
+/// Timestamp (ms) of hart 0's last log/sysinfo housekeeping pass.
+static HART0_HOUSEKEEP_LAST: AtomicU64 = AtomicU64::new(0);
+/// How often hart 0 runs log flush / sysinfo update (ms). The daemons these
+/// call already early-return sooner, but this avoids the lock traffic of
+/// attempting them on every idle loop iteration.
+const HART0_HOUSEKEEP_INTERVAL_MS: u64 = 50;
+
 /// Read the hart count from the CLINT register (set by emulator)
 pub(crate) fn get_expected_harts() -> usize {
     let count = unsafe { core::ptr::read_volatile(CLINT_HART_COUNT as *const u32) } as usize;
@@ -134,28 +141,47 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
             }
         }
 
-        // Hart 0 runs periodic tasks (log buffer flush, sysinfo update, etc.)
+        // Hart 0 runs periodic housekeeping. I/O dispatch is latency-critical
+        // (secondary harts block on it) so it runs whenever work is pending;
+        // the log/sysinfo tasks are time-gated to ~50 ms so they don't lock
+        // subsystem state on every idle loop iteration.
         if hart_id == 0 {
-            klogd::flush_log_buffer();
-            klogd::klogd_tick();
-            sysmond::sysmond_tick();
-            // Update system info MMIO device (for emulator UI)
-            update_sysinfo();
-            // Process I/O requests from secondary harts
-            io_router::dispatch_io();
+            // Process I/O requests from secondary harts (only if any pending).
+            if io_router::has_pending_io() {
+                io_router::dispatch_io();
+            }
+
+            let now = get_time_ms() as u64;
+            let last = HART0_HOUSEKEEP_LAST.load(Ordering::Relaxed);
+            if now.wrapping_sub(last) >= HART0_HOUSEKEEP_INTERVAL_MS {
+                HART0_HOUSEKEEP_LAST.store(now, Ordering::Relaxed);
+                klogd::flush_log_buffer();
+                klogd::klogd_tick();
+                sysmond::sysmond_tick();
+                // Update system info MMIO device (for emulator UI)
+                update_sysinfo();
+            }
         }
 
         // If no work was done, sleep immediately via WFI
         // This saves host CPU cycles - the hart will wake on:
-        // - Timer interrupt (every ~10ms via SBI)
-        // - IPI (when new work is queued for this hart)
+        // - Timer interrupt (programmed below to the next parked deadline)
+        // - IPI (when new work is queued for this hart or a wait completes)
         // - External interrupt
         if !did_work {
             // Check for pending IPI first
             if is_my_msip_pending() {
                 clear_my_msip();
             } else {
-                // Sleep until interrupt - saves CPU power
+                // Idle timer backoff: instead of waking at the fixed 1 ms
+                // tick, sleep until the earliest parked-daemon deadline
+                // (capped at 50 ms). IPIs still wake us immediately for new
+                // work, so only the timer cadence changes while idle.
+                let delta = sched::idle_timer_delta_ms(hart_id, 50);
+                if delta > 1 {
+                    crate::trap::schedule_timer_interrupt_in_ms(hart_id, delta);
+                }
+                crate::perfstat::inc(crate::perfstat::id::IDLE_WFI);
                 unsafe {
                     core::arch::asm!("wfi", options(nomem, nostack));
                 }
@@ -179,6 +205,7 @@ pub fn send_ipi(hart_id: usize) {
         return; // Invalid hart ID, silently ignore
     }
 
+    crate::perfstat::inc(crate::perfstat::id::IPIS_SENT);
     // Use SBI to send IPI - hart_mask has bit N set for the target hart
     sbi::send_ipi(1u64 << hart_id, 0);
 }
@@ -277,6 +304,7 @@ fn secondary_hart_entry(hart_id: usize) -> ! {
 
     // Initialize trap handlers for this hart
     trap::init(hart_id);
+    crate::plic::init(hart_id);
 
     // Enter the hart loop (same loop used by all harts)
     hart_loop(hart_id);

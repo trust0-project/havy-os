@@ -72,10 +72,12 @@ pub fn sysmond_service() {
     let last = SYSMOND_LAST_RUN.load(Ordering::Relaxed);
     
     if SYSMOND_INITIALIZED.load(Ordering::Relaxed) && (now - last) < 9000 {
-        // Not time yet - sleep longer to save CPU
+        // Not time yet - park until roughly the next window.
+        crate::cpu::sched::sleep_current_ms(2000);
         return;
     }
     
     // Time to potentially do work
     sysmond_tick();
+    crate::cpu::sched::sleep_current_ms(2000);
 }

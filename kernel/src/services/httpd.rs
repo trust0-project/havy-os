@@ -385,4 +385,6 @@ fn handle_connection(net: &mut crate::net::NetState, socket_id: crate::net::TcpS
 /// httpd service entry point (for scheduler)
 pub fn httpd_service() {
     tick();
+    // Poll for new HTTP work at coarse cadence.
+    crate::cpu::sched::sleep_current_ms(10);
 }

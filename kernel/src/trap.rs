@@ -82,6 +82,17 @@ pub fn schedule_timer_interrupt(_hart_id: usize) {
     crate::sbi::set_timer(current.wrapping_add(TIMER_INTERVAL));
 }
 
+/// Schedule the next timer interrupt `ms` milliseconds from now.
+///
+/// Used by the idle path to sleep longer than the 1 ms busy tick: an idle
+/// hart with no due deadlines wakes on IPI (new work / parked wake) and
+/// only needs the timer as a deadline backstop.
+pub fn schedule_timer_interrupt_in_ms(_hart_id: usize, ms: u64) {
+    let current = read_mtime();
+    // 10 MHz mtime: 10_000 ticks per millisecond.
+    crate::sbi::set_timer(current.wrapping_add(ms.max(1) * 10_000));
+}
+
 /// Enable supervisor-mode interrupts
 pub fn enable_interrupts() {
     unsafe {
@@ -218,6 +229,7 @@ pub extern "C" fn trap_handler(frame: *mut u64) {
 
 /// Handle timer interrupt - triggers preemptive scheduling
 fn handle_timer_interrupt(hart_id: usize) {
+    crate::perfstat::inc(crate::perfstat::id::TIMER_IRQS);
     if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
         cpu.enter_interrupt();
     }
@@ -247,11 +259,64 @@ fn handle_software_interrupt(hart_id: usize) {
 }
 
 /// Handle external interrupt (PLIC)
+///
+/// PLIC Hardware Flow:
+/// 1. Device raises IRQ line → PLIC marks source as pending
+/// 2. CPU takes interrupt → trap handler runs this function
+/// 3. We CLAIM the interrupt (PLIC returns IRQ number, clears pending)
+/// 4. We handle the device-specific work
+/// 5. We COMPLETE the interrupt (tells PLIC we're done)
 fn handle_external_interrupt(hart_id: usize) {
+    use crate::plic;
+    
+    // Claim the highest priority pending interrupt
+    // This atomically returns the IRQ ID and marks it "in service"
+    let irq = plic::claim(hart_id);
+    
+    if irq == 0 {
+        // No interrupt pending (spurious)
+        return;
+    }
+    
     klog_trace(
-        "trap",
-        &alloc::format!("External interrupt on hart {}", hart_id),
+        "plic",
+        &alloc::format!("Hart {} claimed IRQ {}", hart_id, irq),
     );
+    
+    // Dispatch based on IRQ number
+    match irq {
+        plic::VIRTIO_INPUT_IRQ => {
+            // VirtIO Input device has events ready
+            handle_input_interrupt();
+        }
+        plic::D1_TOUCH_IRQ => {
+            // D1 Touch device has events ready
+            handle_input_interrupt();
+        }
+        plic::UART_IRQ => {
+            // UART has received data
+            // Shell currently polls UART, so just acknowledge
+        }
+        _ => {
+            klog_warning(
+                "plic",
+                &alloc::format!("Unknown IRQ {} on hart {}", irq, hart_id),
+            );
+        }
+    }
+    
+    // Complete the interrupt (allow new interrupts from this source)
+    plic::complete(hart_id, irq);
+}
+
+/// Handle input device interrupt.
+/// Called when VirtIO Input or D1 Touch has pending events.
+fn handle_input_interrupt() {
+    // Poll the device to transfer events from hardware to software queue
+    crate::cpu::display_proxy::touch_poll();
+    
+    // Signal gpuid that input is ready
+    crate::services::gpuid::signal_input_ready();
 }
 
 /// Handle exception (synchronous trap)

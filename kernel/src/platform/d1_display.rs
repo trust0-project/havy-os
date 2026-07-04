@@ -17,8 +17,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use embedded_graphics::{
     draw_target::DrawTarget,
-    geometry::{OriginDimensions, Size},
+    geometry::{Dimensions, OriginDimensions, Size},
     pixelcolor::{Rgb888, RgbColor},
+    primitives::Rectangle,
     Pixel,
 };
 
@@ -533,9 +534,101 @@ impl DrawTarget for GpuDriver {
         Ok(())
     }
 
+    /// Fill a solid-color rectangle. Routed to the row-wise `fill_rect`
+    /// (64-bit bulk stores + one dirty-rect mark) instead of the default
+    /// per-pixel `draw_iter`. This is the hot path for widget backgrounds,
+    /// panels, text-cell clears and window chrome.
+    fn fill_solid(
+        &mut self,
+        area: &Rectangle,
+        color: Self::Color,
+    ) -> Result<(), Self::Error> {
+        // Clip to the visible framebuffer.
+        let clipped = area.intersection(&self.bounding_box());
+        if let Some(br) = clipped.bottom_right() {
+            let x = clipped.top_left.x.max(0) as u32;
+            let y = clipped.top_left.y.max(0) as u32;
+            let w = (br.x as u32).saturating_sub(x) + 1;
+            let h = (br.y as u32).saturating_sub(y) + 1;
+            if w > 0 && h > 0 {
+                // fill_rect handles its own bulk stores; mark the whole
+                // region dirty once rather than per pixel.
+                begin_pixel_batch();
+                self.fill_rect(x, y, w, h, color.r(), color.g(), color.b());
+                end_pixel_batch();
+                mark_dirty(x, y, w, h);
+            }
+        }
+        Ok(())
+    }
+
+    /// Fill a rectangle from a color iterator (row-major). Used by glyph and
+    /// image blits. Writes each row with per-pixel stores but batches the
+    /// dirty-rect mark to one call for the whole area.
+    fn fill_contiguous<I>(
+        &mut self,
+        area: &Rectangle,
+        colors: I,
+    ) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Self::Color>,
+    {
+        let fb = self.bounding_box();
+        let mut colors = colors.into_iter();
+        let area_w = area.size.width as i32;
+        let area_h = area.size.height as i32;
+        if area_w == 0 || area_h == 0 {
+            return Ok(());
+        }
+
+        begin_pixel_batch();
+        for row in 0..area_h {
+            let py = area.top_left.y + row;
+            for col in 0..area_w {
+                let color = match colors.next() {
+                    Some(c) => c,
+                    None => {
+                        end_pixel_batch();
+                        // Mark whatever we drew.
+                        self.mark_area_dirty(area, &fb);
+                        return Ok(());
+                    }
+                };
+                let px = area.top_left.x + col;
+                if px >= 0 && py >= 0 {
+                    let x = px as u32;
+                    let y = py as u32;
+                    if x < self.width && y < self.height {
+                        self.set_pixel(x, y, color.r(), color.g(), color.b());
+                    }
+                }
+            }
+        }
+        end_pixel_batch();
+        self.mark_area_dirty(area, &fb);
+        Ok(())
+    }
+
     fn clear(&mut self, color: Self::Color) -> Result<(), Self::Error> {
         GpuDriver::clear(self, color.r(), color.g(), color.b());
         Ok(())
+    }
+}
+
+impl GpuDriver {
+    /// Mark the intersection of `area` with the framebuffer as dirty.
+    #[inline]
+    fn mark_area_dirty(&self, area: &Rectangle, fb: &Rectangle) {
+        let clipped = area.intersection(fb);
+        if let Some(br) = clipped.bottom_right() {
+            let x = clipped.top_left.x.max(0) as u32;
+            let y = clipped.top_left.y.max(0) as u32;
+            let w = (br.x as u32).saturating_sub(x) + 1;
+            let h = (br.y as u32).saturating_sub(y) + 1;
+            if w > 0 && h > 0 {
+                mark_dirty(x, y, w, h);
+            }
+        }
     }
 }
 
@@ -651,6 +744,12 @@ pub fn flush() {
             let dst_row = dst_base.add(row_offset);
             core::ptr::copy_nonoverlapping(src_row, dst_row, dirty_width * 4);
         }
+        
+        crate::perfstat::inc(crate::perfstat::id::FRAMES_FLUSHED);
+        crate::perfstat::add(
+            crate::perfstat::id::DIRTY_PIXELS,
+            (dirty_width as u64) * ((max_y - min_y) as u64),
+        );
         
         // Increment frame version so browser knows to fetch new frame
         FRAME_VERSION = FRAME_VERSION.wrapping_add(1);

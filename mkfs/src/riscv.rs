@@ -57,6 +57,7 @@ const SYS_SERVICE_RUNNING: u64 = 73;
 const SYS_NET_INFO: u64 = 80;
 const SYS_HEAP_STATS: u64 = 81;
 const SYS_SLEEP: u64 = 82;
+const SYS_PERFSTAT: u64 = 83;
 
 
 
@@ -241,6 +242,19 @@ pub fn fs_remove(path_ptr: *const u8, path_len: i32) -> i32 {
 #[inline]
 pub fn fs_is_dir(path_ptr: *const u8, path_len: i32) -> i32 {
     syscall2(SYS_FS_IS_DIR, path_ptr as u64, path_len as u64) as i32
+}
+
+/// Read kernel performance counters into `out` (u64 slots).
+/// Pass reset=true to zero all counters after the snapshot.
+/// Returns the number of counters written.
+#[inline]
+pub fn perfstat(out: &mut [u64], reset: bool) -> i32 {
+    syscall3(
+        SYS_PERFSTAT,
+        out.as_mut_ptr() as u64,
+        out.len() as u64,
+        reset as u64,
+    ) as i32
 }
 
 

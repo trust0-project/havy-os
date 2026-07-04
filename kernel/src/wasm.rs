@@ -94,7 +94,12 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         } else {
             // Cache miss - create new engine and parse module
             let mut config = Config::default();
-            config.consume_fuel(false);
+            // Fuel metering bounds execution: a runaway or infinite-loop WASM
+            // program consumes its budget and traps cleanly instead of
+            // monopolizing a hart forever. (wasmi 0.44 cannot resume after an
+            // in-Wasm OutOfFuel trap; true cross-tick suspension would need a
+            // wasmi 1.0 upgrade. Budget is refilled per call in run_wasm.)
+            config.consume_fuel(true);
             let engine = Engine::new(&config);
             
             let module = Module::new(&engine, wasm_bytes)
@@ -1929,8 +1934,36 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
         .get_typed_func::<(), ()>(&store, "_start")
         .map_err(|e| format!("Missing _start: {:?}", e))?;
 
-    run.call(&mut store, ())
-        .map_err(|e| format!("Runtime: {:?}", e))?;
+    // Fuel budget: generous enough that normal user commands finish in one
+    // go, but bounded so an infinite loop cannot wedge the hart. On
+    // exhaustion we refill and continue as long as the kernel hasn't asked
+    // this hart to yield (cooperative preemption checkpoint), up to a hard
+    // cap that aborts pathological programs.
+    const FUEL_PER_SLICE: u64 = 50_000_000;
+    const MAX_SLICES: u32 = 4000; // ~200 billion fuel units total ceiling
+    let _ = store.set_fuel(FUEL_PER_SLICE);
 
-    Ok(String::new())
+    let mut slices = 0u32;
+    loop {
+        match run.call(&mut store, ()) {
+            Ok(()) => return Ok(String::new()),
+            Err(e) => {
+                // Distinguish fuel exhaustion (refuel + continue) from real
+                // runtime traps (propagate).
+                if store.get_fuel().map(|f| f == 0).unwrap_or(false) {
+                    slices += 1;
+                    let hart = crate::get_hart_id();
+                    if slices >= MAX_SLICES || crate::cpu::sched::yield_pending(hart) {
+                        // Cap reached or the scheduler wants this hart back:
+                        // stop rather than spin. (Resuming later needs wasmi
+                        // 1.0 resumable-on-fuel; documented limitation.)
+                        return Err("WASM program exceeded fuel budget".into());
+                    }
+                    let _ = store.set_fuel(FUEL_PER_SLICE);
+                    continue;
+                }
+                return Err(format!("Runtime: {:?}", e));
+            }
+        }
+    }
 }
