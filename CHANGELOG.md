@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.64](https://github.com/trust0-project/havy-os/compare/v0.1.63...v0.1.64) (2026-07-04)
+
+
+### Bug Fixes
+
+* improve kernel performance ([8caeaa9](https://github.com/trust0-project/havy-os/commit/8caeaa9afec82a56b45e6c1467a3304c88708838))
+
 ## [0.1.63](https://github.com/trust0-project/havy-os/compare/v0.1.62...v0.1.63) (2026-07-04)
 
 
