@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.63](https://github.com/trust0-project/havy-os/compare/v0.1.62...v0.1.63) (2026-07-04)
+
+
+### Bug Fixes
+
+* improve GUI performance ([64f2547](https://github.com/trust0-project/havy-os/commit/64f2547f59af36661e67568737a08b2b08305110))
+* kernel improvements ([a2d1991](https://github.com/trust0-project/havy-os/commit/a2d19919ae97a9702cc826866636a55e4cd4944c))
+
 ## [0.1.62](https://github.com/trust0-project/havy-os/compare/v0.1.61...v0.1.62) (2025-12-31)
 
 
