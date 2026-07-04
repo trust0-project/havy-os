@@ -248,9 +248,14 @@ pub fn batch_end() {
 
 
 
-/// Render the boot console to the framebuffer
-/// SIMPLIFIED: Always does full redraw for reliability
-/// This approach is proven to work correctly when scrolling
+/// Render the boot console to the framebuffer.
+///
+/// Incremental: while the console has not started scrolling (the common case
+/// during boot), only the newly appended lines are drawn. A full redraw is
+/// only done when the scroll offset changes, the buffer wrapped, or on the
+/// first render. This matters enormously in multi-hart (SharedArrayBuffer)
+/// mode where every framebuffer store is an atomic host call: a full-console
+/// redraw per boot line made boot appear to hang at the SERVICES stage.
 pub fn render() {
     if !is_initialized() || get_phase() != BootPhase::Console {
         return;
@@ -272,21 +277,43 @@ pub fn render() {
         // Calculate scroll offset (how many lines scrolled off the top)
         let scroll_offset = line_count.saturating_sub(visible_lines);
         
-        // ALWAYS do full redraw - simpler and proven to work correctly
-        // The screen was already cleared at init, but we need to clear the console area
-        // to handle line updates properly
+        // Incremental append is safe only when nothing above the new lines
+        // moved: same scroll offset, strictly more lines than last render,
+        // and not the first render. Once the ring buffer is full
+        // (line_count stays at MAX_LINES) content shifts every push, so
+        // line_count > LAST_RENDERED_LINE_COUNT no longer holds and we fall
+        // back to a full redraw - which is correct.
+        let incremental = LAST_RENDERED_LINE_COUNT > 0
+            && scroll_offset == LAST_SCROLL_OFFSET
+            && line_count > LAST_RENDERED_LINE_COUNT;
+        
+        let num_to_show = line_count.min(visible_lines);
+        let first_row = if incremental {
+            LAST_RENDERED_LINE_COUNT.saturating_sub(scroll_offset)
+        } else {
+            0
+        };
+        
         d1_display::with_gpu(|gpu| {
-            // Only clear the console text area (not full screen) for speed
-            let console_height = (visible_lines as u32) * LINE_HEIGHT;
-            gpu.fill_rect(0, MARGIN_TOP as u32, DISPLAY_WIDTH, console_height,
-                COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+            if !incremental {
+                // Full redraw: clear the whole console text area
+                let console_height = (visible_lines as u32) * LINE_HEIGHT;
+                gpu.fill_rect(0, MARGIN_TOP as u32, DISPLAY_WIDTH, console_height,
+                    COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+            }
             
-            // Draw ALL visible lines with pixel batching for speed
+            // Draw lines (all of them on full redraw, only the new ones on append)
             d1_display::begin_pixel_batch();
-            let num_to_show = line_count.min(visible_lines);
-            for i in 0..num_to_show {
+            for i in first_row..num_to_show {
                 let buffer_idx = scroll_offset + i;
-                let y = MARGIN_TOP + (i as i32 * LINE_HEIGHT as i32) + FONT_HEIGHT as i32;
+                let y_top = MARGIN_TOP + (i as i32 * LINE_HEIGHT as i32);
+                if incremental {
+                    // Clear just this line's band (plus a few rows for glyph
+                    // descenders) before drawing it
+                    gpu.fill_rect(0, y_top as u32, DISPLAY_WIDTH, LINE_HEIGHT + 4,
+                        COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+                }
+                let y = y_top + FONT_HEIGHT as i32;
                 if let Some(text) = CONSOLE.get_line(buffer_idx) {
                     let _ = FONT.render_aligned(
                         text,
@@ -301,6 +328,9 @@ pub fn render() {
             d1_display::end_pixel_batch();
             // Dirty region already marked by fill_rect -> fill_hline -> mark_dirty
         });
+        
+        LAST_RENDERED_LINE_COUNT = line_count;
+        LAST_SCROLL_OFFSET = scroll_offset;
         
         // Only flush when not in any batch (BATCH_DEPTH == 0)
         if BATCH_DEPTH == 0 {

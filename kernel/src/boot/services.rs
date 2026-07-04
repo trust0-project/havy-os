@@ -126,22 +126,22 @@ fn schedule_service(
     };
     print_status(&format!("Scheduling service: {} ({})", name, affinity_str), true);
     print_info("Registering service definition", &format!("{}", name));
-    let hart = if let Some(hart) = cpu_affinity {
-        hart
-    } else {
-        sched::SCHEDULER.find_least_loaded_cpu()
-    };
+    // Preserve the requested affinity: `None` means a floating daemon that
+    // the scheduler may run on (and steal to) any hart. Resolving it to a
+    // fixed hart here would permanently pin every boot service to whichever
+    // hart looked least loaded during boot (secondary harts aren't even
+    // scheduling yet at this point).
     init::register_service_def(
         name,
         description,
         entry,
         priority,
-        Some(hart),
+        cpu_affinity,
     );
    
-    let pid = sched::SCHEDULER.spawn_daemon_on_cpu(name, entry, priority, Some(hart));
-    print_info("Started service", &format!("{} (PID {}, {})", name, pid, hart));
-    init::register_service(name, pid, Some(hart));
+    let pid = sched::SCHEDULER.spawn_daemon_on_cpu(name, entry, priority, cpu_affinity);
+    print_info("Started service", &format!("{} (PID {}, {})", name, pid, affinity_str));
+    init::register_service(name, pid, cpu_affinity);
 }
 
 pub fn init_services() {

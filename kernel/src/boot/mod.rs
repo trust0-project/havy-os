@@ -40,4 +40,7 @@ pub fn init_boot() {
     init_audio();
     init_services();
     BOOT_READY.store(true, Ordering::Release);
+    // Secondary harts sleep in WFI while waiting for BOOT_READY; wake them
+    // now so they enter their scheduling loops promptly.
+    crate::cpu::send_ipi_all_others();
 }

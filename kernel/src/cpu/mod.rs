@@ -274,9 +274,25 @@ pub fn is_my_msip_pending() -> bool {
 /// # Arguments
 /// * `hart_id` - This hart's ID (1, 2, 3, ...)
 fn secondary_hart_entry(hart_id: usize) -> ! {
-    // Wait for primary boot to complete (double-check after WFI wake)
+    // Wait for primary boot to complete.
+    //
+    // Sleep in WFI instead of busy-spinning: with many harts a hot spin here
+    // means N-1 host threads hammering shared memory at full speed for the
+    // entire boot, starving hart 0 (especially in SharedArrayBuffer mode
+    // where every guest load is a host atomic op). The emulator turns WFI
+    // into a real host sleep. Hart 0 broadcasts an IPI right after setting
+    // BOOT_READY, so we wake promptly; the WFI timeout bounds the latency
+    // even if that IPI is missed.
     while !BOOT_READY.load(Ordering::Acquire) {
-        core::hint::spin_loop();
+        // Consume any stray IPI (e.g. from an early daemon enqueue) so the
+        // next WFI can actually sleep instead of returning immediately.
+        sbi::clear_ipi();
+        if BOOT_READY.load(Ordering::Acquire) {
+            break;
+        }
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
     }
 
     // Memory fence ensures we see all init writes from primary hart
