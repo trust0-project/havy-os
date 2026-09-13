@@ -3,7 +3,7 @@
 use alloc::string::String;
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
-    pixelcolor::Rgb888,
+    pixelcolor::{Rgb888, RgbColor},
     prelude::*,
     primitives::{Circle, PrimitiveStyle},
     text::Text,
@@ -31,7 +31,7 @@ impl RadioButton {
 
     pub fn draw<D: DrawTarget<Color = Rgb888>>(&self, target: &mut D) -> Result<(), D::Error> {
         let radius = 7u32;
-        
+
         // Outer circle (border)
         Circle::new(Point::new(self.x, self.y), radius * 2)
             .into_styled(PrimitiveStyle::with_stroke(colors::ACCENT, 2))
@@ -54,5 +54,39 @@ impl RadioButton {
         .draw(target)?;
 
         Ok(())
+    }
+
+    /// Emit HDL nodes. Circles are `FillRect` with radius (v0 has no circle op).
+    /// `hole` is the panel behind the ring.
+    pub fn emit(&self, b: &mut crate::ui::scene::Builder<'_>, hole: (u8, u8, u8)) {
+        let d = 14u32;
+        b.dot(
+            self.x,
+            self.y,
+            d,
+            colors::ACCENT.r(),
+            colors::ACCENT.g(),
+            colors::ACCENT.b(),
+        );
+        b.dot(self.x + 2, self.y + 2, 10, hole.0, hole.1, hole.2);
+        if self.selected {
+            b.dot(
+                self.x + 4,
+                self.y + 4,
+                6,
+                colors::ACCENT.r(),
+                colors::ACCENT.g(),
+                colors::ACCENT.b(),
+            );
+        }
+        b.label_str(
+            self.x + 20,
+            self.y + 10,
+            colors::FOREGROUND.r(),
+            colors::FOREGROUND.g(),
+            colors::FOREGROUND.b(),
+            crate::ui::scene::ATLAS_UI,
+            &self.label,
+        );
     }
 }

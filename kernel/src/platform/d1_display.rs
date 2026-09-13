@@ -1,16 +1,10 @@
-//! Unified Display Driver for HAVY OS
+//! Guest-owned scanout (reserved DRAM, stride padded to 256 bytes).
 //!
-//! This driver provides framebuffer rendering for both:
-//! - D1 SoC Display Engine (DE2 + TCON + MIPI DSI)
-//! - Emulator mode (direct framebuffer access)
+//! Virt: 1024×768 at DRAM+16 MiB, doorbell at DRAM+0x00FF_F000.
+//! D1:   480×480 ST7701 at DRAM+16 MiB (inside `0x4000_0000–0x6000_0000`).
 //!
-//! # Display Pipeline (D1 Hardware)
-//! ```text
-//! Framebuffer → DE2 Mixer → TCON LCD → MIPI DSI → Panel
-//! ```
-//!
-//! # Display Resolution
-//! 1024x768 pixels, XRGB8888 format (32-bit BGRA)
+//! Pixels are ordinary DRAM stores. The host scrapes this one buffer;
+//! flush fences and publishes version + dirty rect. No back→front copy.
 
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -23,59 +17,43 @@ use embedded_graphics::{
     Pixel,
 };
 
-// =============================================================================
-// Constants
-// =============================================================================
+use crate::platform::current;
 
-/// Display dimensions (1024x768)
-pub const DISPLAY_WIDTH: u32 = 1024;
-pub const DISPLAY_HEIGHT: u32 = 768;
-const FRAMEBUFFER_SIZE: usize = (DISPLAY_WIDTH * DISPLAY_HEIGHT * 4) as usize;
+pub const DISPLAY_WIDTH: u32 = current::DISPLAY_WIDTH;
+pub const DISPLAY_HEIGHT: u32 = current::DISPLAY_HEIGHT;
+pub const FB_STRIDE: usize = current::FB_STRIDE;
+pub const FRAMEBUFFER_ADDR: usize = current::FB_ADDR;
+pub const FB_META_ADDR: usize = current::FB_META_ADDR;
 
-/// Fixed framebuffer physical address (FRONT BUFFER)
-/// This is what the emulator reads for display
-pub const FRAMEBUFFER_ADDR: usize = 0x8100_0000;
+/// Historical doorbell offsets inside the reserved meta page (host scrape).
+pub const DIRTY_RECT_ADDR: usize = FB_META_ADDR + 0xFE0;
+pub const FRAME_VERSION_ADDR: usize = FB_META_ADDR + 0xFFC;
 
-/// Back buffer address for double-buffering
-/// All rendering happens here, then copied to front buffer on flush
-/// NOTE: Front buffer (1024*768*4 = 3.1MB) ends at 0x8130_0000
-///       So back buffer must be at or after 0x8130_0000
-pub const BACK_BUFFER_ADDR: usize = 0x8140_0000;
+const FB_MAGIC: u32 = 0x4856_4642; // "HVFB"
+const FB_PROTO: u32 = 1;
+const PIXELS_PER_ROW: usize = FB_STRIDE / 4;
 
-/// Frame version address - VM reads this u32 to detect new frames
-/// Located just before framebuffer for easy access
-pub const FRAME_VERSION_ADDR: usize = 0x80FF_FFFC;
-
-/// Dirty rectangle address - VM reads 4 x u32 (min_x, min_y, max_x, max_y)
-/// Located at 0x80FF_FFF0 (16 bytes before FRAME_VERSION_ADDR)
-/// This allows the frontend to upload only dirty regions to WebGPU
-pub const DIRTY_RECT_ADDR: usize = 0x80FF_FFE0;
-
-/// Global flag to track if display was initialized
 static D1_DISPLAY_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-// =============================================================================
-// Dirty Rectangle Tracking
-// =============================================================================
-
-/// Dirty rectangle bounds for partial flush optimization
-/// Only the dirty region is copied from back buffer to front buffer
 static mut DIRTY_MIN_X: u32 = DISPLAY_WIDTH;
 static mut DIRTY_MIN_Y: u32 = DISPLAY_HEIGHT;
 static mut DIRTY_MAX_X: u32 = 0;
 static mut DIRTY_MAX_Y: u32 = 0;
 static mut FRAME_DIRTY: bool = false;
-
-/// Frame version counter - increments each time flush() actually copies data
-/// Browser can compare this to skip fetching unchanged frames
 static mut FRAME_VERSION: u32 = 0;
-
-/// Pixel batch mode - when true, set_pixel() skips per-pixel mark_dirty() calls.
-/// Caller is responsible for calling mark_dirty() once for the entire region.
-/// This provides ~100x speedup for text rendering (3000+ calls -> ~1 call per line).
 static mut PIXEL_BATCH_MODE: bool = false;
 
-/// Mark a rectangular region as dirty
+#[inline]
+fn pixel_ptr(x: u32, y: u32) -> *mut u32 {
+    let idx = (y as usize) * PIXELS_PER_ROW + (x as usize);
+    (FRAMEBUFFER_ADDR as *mut u32).wrapping_add(idx)
+}
+
+#[inline]
+fn pack_pixel(r: u8, g: u8, b: u8) -> u32 {
+    (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF00_0000
+}
+
 #[inline(always)]
 pub fn mark_dirty(x: u32, y: u32, width: u32, height: u32) {
     unsafe {
@@ -87,7 +65,6 @@ pub fn mark_dirty(x: u32, y: u32, width: u32, height: u32) {
     }
 }
 
-/// Mark entire screen as dirty (for clear operations or external draws)
 #[inline(always)]
 pub fn mark_all_dirty() {
     unsafe {
@@ -99,7 +76,6 @@ pub fn mark_all_dirty() {
     }
 }
 
-/// Reset dirty tracking after flush
 #[inline(always)]
 fn reset_dirty() {
     unsafe {
@@ -111,38 +87,45 @@ fn reset_dirty() {
     }
 }
 
-/// Check if frame has any dirty pixels
 #[inline(always)]
 pub fn is_frame_dirty() -> bool {
     unsafe { FRAME_DIRTY }
 }
 
-/// Get the current frame version (increments each flush that copies data)
-/// Browser uses this to skip fetching unchanged frames
 #[inline(always)]
 pub fn get_frame_version() -> u32 {
     unsafe { FRAME_VERSION }
 }
 
-/// Enable pixel batch mode (skip per-pixel dirty tracking)
-/// Call mark_dirty() manually for the region after drawing
 #[inline(always)]
 pub fn begin_pixel_batch() {
     unsafe { PIXEL_BATCH_MODE = true; }
 }
 
-/// Disable pixel batch mode
 #[inline(always)]
 pub fn end_pixel_batch() {
     unsafe { PIXEL_BATCH_MODE = false; }
 }
 
-// =============================================================================
-// GpuDriver - Main rendering interface
-// =============================================================================
+/// Publish FB identity + heap stats into the reserved doorbell page.
+pub fn publish_meta() {
+    let (used, _free) = crate::allocator::heap_stats();
+    let total = crate::allocator::heap_size();
+    unsafe {
+        let base = FB_META_ADDR as *mut u32;
+        core::ptr::write(base, FB_MAGIC);
+        core::ptr::write(base.add(1), FB_PROTO);
+        let fb = FRAMEBUFFER_ADDR as u64;
+        core::ptr::write(base.add(2) as *mut u64, fb);
+        core::ptr::write(base.add(4), DISPLAY_WIDTH);
+        core::ptr::write(base.add(5), DISPLAY_HEIGHT);
+        core::ptr::write(base.add(6), FB_STRIDE as u32);
+        core::ptr::write(base.add(7), 0u32); // XRGB8888
+        core::ptr::write(base.add(8) as *mut u64, used as u64);
+        core::ptr::write(base.add(10) as *mut u64, total as u64);
+    }
+}
 
-/// GPU Driver for framebuffer rendering
-/// Provides pixel operations, drawing primitives, and embedded-graphics support
 pub struct GpuDriver {
     width: u32,
     height: u32,
@@ -150,7 +133,6 @@ pub struct GpuDriver {
 }
 
 impl GpuDriver {
-    /// Create a new GPU driver
     pub const fn new() -> Self {
         Self {
             width: DISPLAY_WIDTH,
@@ -159,66 +141,41 @@ impl GpuDriver {
         }
     }
 
-    /// Initialize the GPU driver
-    /// Note: Framebuffer clearing is deferred to first use (boot::init() or clear())
-    /// This makes init() nearly instant instead of clearing 6MB of memory
     pub fn init(&mut self) -> Result<(), &'static str> {
         self.initialized.store(true, Ordering::Release);
         Ok(())
     }
-    
-    /// Clear both framebuffers (front and back) to opaque black
-    /// Called lazily on first boot console init
-    /// Uses 64-bit writes for speed while ensuring proper alpha channel
+
     pub fn init_clear_buffers(&mut self) {
-        let total_pixels = (self.width * self.height) as usize;
-        let total_pairs = total_pixels / 2;
-        
-        // Opaque black: 0xFF000000 duplicated for 64-bit writes
         let pixel64: u64 = 0xFF000000_FF000000;
-        
+        let words = (FB_STRIDE / 8) * (self.height as usize);
         unsafe {
-            // Front buffer - fill with opaque black
-            let front_ptr64 = FRAMEBUFFER_ADDR as *mut u64;
-            for i in 0..total_pairs {
-                core::ptr::write_volatile(front_ptr64.add(i), pixel64);
-            }
-            
-            // Back buffer - fill with opaque black
-            let back_ptr64 = BACK_BUFFER_ADDR as *mut u64;
-            for i in 0..total_pairs {
-                core::ptr::write_volatile(back_ptr64.add(i), pixel64);
+            let ptr64 = FRAMEBUFFER_ADDR as *mut u64;
+            for i in 0..words {
+                core::ptr::write(ptr64.add(i), pixel64);
             }
         }
+        core::sync::atomic::fence(Ordering::Release);
     }
 
-    /// Get display width
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// Get display height
     pub fn height(&self) -> u32 {
         self.height
     }
 
-    /// Check if GPU is initialized
     pub fn is_initialized(&self) -> bool {
         self.initialized.load(Ordering::Acquire)
     }
 
-    /// Set a pixel in the back buffer (RGBA format)
-    /// When PIXEL_BATCH_MODE is active, skips per-pixel dirty tracking for speed.
     #[inline(always)]
     pub fn set_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) {
         if x < self.width && y < self.height {
-            let idx = (y * self.width + x) as usize;
-            // BGRA format: 0xAABBGGRR (little-endian)
-            let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
+            let pixel = pack_pixel(r, g, b);
             unsafe {
-                let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-                core::ptr::write_volatile(fb_ptr.add(idx), pixel);
-                // Skip per-pixel dirty tracking in batch mode (caller marks region)
+                core::ptr::write(pixel_ptr(x, y), pixel);
                 if !PIXEL_BATCH_MODE {
                     mark_dirty(x, y, 1, 1);
                 }
@@ -226,66 +183,47 @@ impl GpuDriver {
         }
     }
 
-    /// Clear the back buffer - OPTIMIZED to avoid blocking scheduler
-    /// Uses bulk 64-bit writes for speed while ensuring proper alpha channel
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
-        let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
-        
+        let pixel = pack_pixel(r, g, b);
+        let pixel64 = (pixel as u64) | ((pixel as u64) << 32);
+        let words = (FB_STRIDE / 8) * (self.height as usize);
         unsafe {
-            // Use 64-bit writes for maximum speed (2 pixels per write)
-            // This is faster than memset because we need to set alpha=0xFF for all pixels
-            let pixel64 = (pixel as u64) | ((pixel as u64) << 32);
-            let ptr64 = BACK_BUFFER_ADDR as *mut u64;
-            let total_pairs = (self.width * self.height / 2) as usize;
-            
-            // Write 2 pixels at a time using 64-bit stores
-            for i in 0..total_pairs {
-                core::ptr::write_volatile(ptr64.add(i), pixel64);
-            }
-            
-            // Handle odd pixel count (shouldn't happen for 1024x768 but be safe)
-            if (self.width * self.height) % 2 != 0 {
-                let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-                let last_idx = (self.width * self.height - 1) as usize;
-                core::ptr::write_volatile(fb_ptr.add(last_idx), pixel);
+            let ptr64 = FRAMEBUFFER_ADDR as *mut u64;
+            for i in 0..words {
+                core::ptr::write(ptr64.add(i), pixel64);
             }
         }
         mark_all_dirty();
     }
 
-    /// Fast horizontal line fill (much faster than pixel-by-pixel for rectangles)
     #[inline]
     pub fn fill_hline(&mut self, x: u32, y: u32, width: u32, r: u8, g: u8, b: u8) {
         if y >= self.height || x >= self.width || width == 0 {
             return;
         }
         let w = width.min(self.width - x) as usize;
-        let pixel = ((r as u32) << 0) | ((g as u32) << 8) | ((b as u32) << 16) | 0xFF000000;
-        let start_idx = (y * self.width + x) as usize;
+        let pixel = pack_pixel(r, g, b);
         unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-            // Use 64-bit writes for longer lines
-            if w >= 4 {
+            let row = pixel_ptr(x, y);
+            if w >= 2 {
                 let pixel64 = (pixel as u64) | ((pixel as u64) << 32);
-                let ptr64 = fb_ptr.add(start_idx) as *mut u64;
+                let ptr64 = row as *mut u64;
                 let pairs = w / 2;
                 for i in 0..pairs {
-                    core::ptr::write_volatile(ptr64.add(i), pixel64);
+                    core::ptr::write(ptr64.add(i), pixel64);
                 }
-                // Handle remaining pixels
-                for i in (pairs * 2)..w {
-                    core::ptr::write_volatile(fb_ptr.add(start_idx + i), pixel);
+                if w % 2 == 1 {
+                    core::ptr::write(row.add(w - 1), pixel);
                 }
             } else {
                 for i in 0..w {
-                    core::ptr::write_volatile(fb_ptr.add(start_idx + i), pixel);
+                    core::ptr::write(row.add(i), pixel);
                 }
             }
         }
         mark_dirty(x, y, w as u32, 1);
     }
 
-    /// Fast filled rectangle using horizontal line fills
     #[inline]
     pub fn fill_rect(&mut self, x: u32, y: u32, width: u32, height: u32, r: u8, g: u8, b: u8) {
         if y >= self.height || x >= self.width || width == 0 || height == 0 {
@@ -297,60 +235,42 @@ impl GpuDriver {
         }
     }
 
-    /// Read a pixel from the back buffer (returns RGBA as u32)
     #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> u32 {
         if x >= self.width || y >= self.height {
             return 0;
         }
-        let idx = (y * self.width + x) as usize;
-        unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *const u32;
-            core::ptr::read_volatile(fb_ptr.add(idx))
-        }
+        unsafe { core::ptr::read(pixel_ptr(x, y) as *const u32) }
     }
 
-    /// Set a pixel in the back buffer directly (for cursor restore)
     #[inline]
     pub fn put_pixel(&mut self, x: u32, y: u32, pixel: u32) {
         if x >= self.width || y >= self.height {
             return;
         }
-        let idx = (y * self.width + x) as usize;
-        unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-            core::ptr::write_volatile(fb_ptr.add(idx), pixel);
-        }
+        unsafe { core::ptr::write(pixel_ptr(x, y), pixel); }
         mark_dirty(x, y, 1, 1);
     }
 
-    /// Read a rectangle of pixels into a buffer (for cursor backup)
-    /// Returns number of pixels read
     #[inline]
     pub fn read_rect(&self, x: u32, y: u32, w: usize, h: usize, buf: &mut [u32]) -> usize {
         let mut count = 0;
-        unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *const u32;
-            for row in 0..h {
-                let cy = y + row as u32;
-                if cy >= self.height { break; }
-                let row_start = (cy * self.width) as usize;
-                for col in 0..w {
-                    let cx = x + col as u32;
-                    if cx >= self.width { continue; }
-                    let idx = row * w + col;
-                    if idx < buf.len() {
-                        buf[idx] = core::ptr::read_volatile(fb_ptr.add(row_start + cx as usize));
-                        count += 1;
-                    }
+        for row in 0..h {
+            let cy = y + row as u32;
+            if cy >= self.height { break; }
+            for col in 0..w {
+                let cx = x + col as u32;
+                if cx >= self.width { continue; }
+                let idx = row * w + col;
+                if idx < buf.len() {
+                    buf[idx] = self.get_pixel(cx, cy);
+                    count += 1;
                 }
             }
         }
         count
     }
 
-    /// Fast read a rectangle of pixels into a buffer - copies entire rows at once
-    /// This is much faster than read_rect for large regions
     #[inline]
     pub fn read_rect_fast(&self, x: u32, y: u32, w: usize, h: usize, buf: &mut [u32]) -> usize {
         if w == 0 || h == 0 || buf.len() < w * h {
@@ -358,29 +278,19 @@ impl GpuDriver {
         }
         let mut count = 0;
         unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *const u32;
-            let screen_width = self.width as usize;
-            
             for row in 0..h {
                 let cy = y + row as u32;
                 if cy >= self.height { break; }
-                
-                // Calculate actual width to copy (clip to screen edge)
                 let actual_w = if x + w as u32 > self.width {
                     (self.width - x) as usize
                 } else {
                     w
                 };
-                
                 if actual_w > 0 && x < self.width {
-                    let fb_offset = (cy as usize * screen_width) + x as usize;
-                    let buf_offset = row * w;
-                    
-                    // Copy entire row at once - FAST
                     core::ptr::copy_nonoverlapping(
-                        fb_ptr.add(fb_offset),
-                        buf.as_mut_ptr().add(buf_offset),
-                        actual_w
+                        pixel_ptr(x, cy) as *const u32,
+                        buf.as_mut_ptr().add(row * w),
+                        actual_w,
                     );
                     count += actual_w;
                 }
@@ -389,62 +299,44 @@ impl GpuDriver {
         count
     }
 
-    /// Write a rectangle of pixels to the back buffer (for cursor restore)
-    /// Skips pixels with mask value 0
     #[inline]
     pub fn write_rect(&mut self, x: u32, y: u32, w: usize, h: usize, buf: &[u32], mask: &[u8]) {
         unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
             for row in 0..h {
                 let cy = y + row as u32;
                 if cy >= self.height { break; }
-                let row_start = (cy * self.width) as usize;
                 for col in 0..w {
                     let cx = x + col as u32;
                     if cx >= self.width { continue; }
                     let idx = row * w + col;
-                    // Only write pixels where mask is non-zero (cursor was drawn there)
                     if idx < buf.len() && idx < mask.len() && mask[idx] != 0 {
-                        core::ptr::write_volatile(fb_ptr.add(row_start + cx as usize), buf[idx]);
+                        core::ptr::write(pixel_ptr(cx, cy), buf[idx]);
                     }
                 }
             }
         }
-        // Mark the entire rect as dirty (mask means we touched this area)
         mark_dirty(x, y, w as u32, h as u32);
     }
 
-    /// Fast blit a rectangle to the back buffer - copies entire rows at once
-    /// This is much faster than write_rect for large regions (no mask checking)
     #[inline]
     pub fn blit_rect(&mut self, x: u32, y: u32, w: usize, h: usize, buf: &[u32]) {
         if w == 0 || h == 0 || buf.len() < w * h {
             return;
         }
         unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-            let screen_width = self.width as usize;
-            
             for row in 0..h {
                 let cy = y + row as u32;
                 if cy >= self.height { break; }
-                
-                // Calculate actual width to copy (clip to screen edge)
                 let actual_w = if x + w as u32 > self.width {
                     (self.width - x) as usize
                 } else {
                     w
                 };
-                
                 if actual_w > 0 && x < self.width {
-                    let fb_offset = (cy as usize * screen_width) + x as usize;
-                    let buf_offset = row * w;
-                    
-                    // Copy entire row at once - FAST
                     core::ptr::copy_nonoverlapping(
-                        buf.as_ptr().add(buf_offset),
-                        fb_ptr.add(fb_offset),
-                        actual_w
+                        buf.as_ptr().add(row * w),
+                        pixel_ptr(x, cy),
+                        actual_w,
                     );
                 }
             }
@@ -452,61 +344,60 @@ impl GpuDriver {
         mark_dirty(x, y, w as u32, h as u32);
     }
 
-    /// Draw cursor bitmap directly to framebuffer (batched write)
+    /// Row-wise blit of packed XRGB pixels (source stride = `w` pixels).
+    #[inline]
+    pub fn blit_row(&mut self, x: u32, y: u32, pixels: &[u32]) {
+        if y >= self.height || x >= self.width || pixels.is_empty() {
+            return;
+        }
+        let w = pixels.len().min((self.width - x) as usize);
+        if w == 0 {
+            return;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(pixels.as_ptr(), pixel_ptr(x, y), w);
+        }
+        mark_dirty(x, y, w as u32, 1);
+    }
+
     #[inline]
     pub fn draw_cursor_bitmap(&mut self, x: i32, y: i32, w: usize, h: usize, bitmap: &[u8]) {
-        unsafe {
-            let fb_ptr = BACK_BUFFER_ADDR as *mut u32;
-            for row in 0..h {
-                let cy = y + row as i32;
-                if cy < 0 || cy >= self.height as i32 { continue; }
-                let row_start = (cy as u32 * self.width) as usize;
-                for col in 0..w {
-                    let cx = x + col as i32;
-                    if cx < 0 || cx >= self.width as i32 { continue; }
-                    let pixel_type = bitmap[row * w + col];
-                    let color = match pixel_type {
-                        1 => 0xFF000000u32, // Black border
-                        2 => 0xFFFFFFFFu32, // White fill
-                        _ => continue,       // Transparent
-                    };
-                    core::ptr::write_volatile(fb_ptr.add(row_start + cx as usize), color);
-                }
+        for row in 0..h {
+            let cy = y + row as i32;
+            if cy < 0 || cy >= self.height as i32 { continue; }
+            for col in 0..w {
+                let cx = x + col as i32;
+                if cx < 0 || cx >= self.width as i32 { continue; }
+                let pixel_type = bitmap[row * w + col];
+                let color = match pixel_type {
+                    1 => 0xFF000000u32,
+                    2 => 0xFFFFFFFFu32,
+                    _ => continue,
+                };
+                unsafe { core::ptr::write(pixel_ptr(cx as u32, cy as u32), color); }
             }
         }
-        // Mark cursor area as dirty
         let clip_x = x.max(0) as u32;
         let clip_y = y.max(0) as u32;
         mark_dirty(clip_x, clip_y, w as u32, h as u32);
     }
 
-    /// Copy dirty region of back buffer to front buffer and flush to display
-    /// Uses the optimized dirty rect tracking for minimal memory transfers
     pub fn flush(&self) {
         if !self.is_initialized() {
             return;
         }
-        // Delegate to the module-level optimized flush
         crate::platform::d1_display::flush();
     }
 
-    /// Get raw framebuffer pointer (for direct memory access)
     pub fn framebuffer_ptr(&self) -> *const u32 {
         FRAMEBUFFER_ADDR as *const u32
     }
 
-    /// Get framebuffer as bytes
     pub fn framebuffer_bytes(&self) -> &[u8] {
-        let fb_size = (self.width * self.height * 4) as usize;
-        unsafe {
-            core::slice::from_raw_parts(FRAMEBUFFER_ADDR as *const u8, fb_size)
-        }
+        let fb_size = FB_STRIDE * self.height as usize;
+        unsafe { core::slice::from_raw_parts(FRAMEBUFFER_ADDR as *const u8, fb_size) }
     }
 }
-
-// =============================================================================
-// embedded-graphics DrawTarget implementation
-// =============================================================================
 
 impl OriginDimensions for GpuDriver {
     fn size(&self) -> Size {
@@ -534,16 +425,11 @@ impl DrawTarget for GpuDriver {
         Ok(())
     }
 
-    /// Fill a solid-color rectangle. Routed to the row-wise `fill_rect`
-    /// (64-bit bulk stores + one dirty-rect mark) instead of the default
-    /// per-pixel `draw_iter`. This is the hot path for widget backgrounds,
-    /// panels, text-cell clears and window chrome.
     fn fill_solid(
         &mut self,
         area: &Rectangle,
         color: Self::Color,
     ) -> Result<(), Self::Error> {
-        // Clip to the visible framebuffer.
         let clipped = area.intersection(&self.bounding_box());
         if let Some(br) = clipped.bottom_right() {
             let x = clipped.top_left.x.max(0) as u32;
@@ -551,8 +437,6 @@ impl DrawTarget for GpuDriver {
             let w = (br.x as u32).saturating_sub(x) + 1;
             let h = (br.y as u32).saturating_sub(y) + 1;
             if w > 0 && h > 0 {
-                // fill_rect handles its own bulk stores; mark the whole
-                // region dirty once rather than per pixel.
                 begin_pixel_batch();
                 self.fill_rect(x, y, w, h, color.r(), color.g(), color.b());
                 end_pixel_batch();
@@ -562,9 +446,7 @@ impl DrawTarget for GpuDriver {
         Ok(())
     }
 
-    /// Fill a rectangle from a color iterator (row-major). Used by glyph and
-    /// image blits. Writes each row with per-pixel stores but batches the
-    /// dirty-rect mark to one call for the whole area.
+    /// Row blit: convert each scanline to XRGB and copy it in one go.
     fn fill_contiguous<I>(
         &mut self,
         area: &Rectangle,
@@ -574,6 +456,7 @@ impl DrawTarget for GpuDriver {
         I: IntoIterator<Item = Self::Color>,
     {
         let fb = self.bounding_box();
+        let clipped = area.intersection(&fb);
         let mut colors = colors.into_iter();
         let area_w = area.size.width as i32;
         let area_h = area.size.height as i32;
@@ -581,26 +464,39 @@ impl DrawTarget for GpuDriver {
             return Ok(());
         }
 
+        let mut row_buf = [0u32; 1024];
         begin_pixel_batch();
         for row in 0..area_h {
             let py = area.top_left.y + row;
+            let mut n = 0usize;
+            let mut start_x: Option<u32> = None;
             for col in 0..area_w {
                 let color = match colors.next() {
                     Some(c) => c,
                     None => {
                         end_pixel_batch();
-                        // Mark whatever we drew.
                         self.mark_area_dirty(area, &fb);
                         return Ok(());
                     }
                 };
                 let px = area.top_left.x + col;
-                if px >= 0 && py >= 0 {
-                    let x = px as u32;
-                    let y = py as u32;
-                    if x < self.width && y < self.height {
-                        self.set_pixel(x, y, color.r(), color.g(), color.b());
+                if px >= 0
+                    && py >= 0
+                    && (px as u32) < self.width
+                    && (py as u32) < self.height
+                    && n < row_buf.len()
+                    && clipped.contains(embedded_graphics::prelude::Point::new(px, py))
+                {
+                    if start_x.is_none() {
+                        start_x = Some(px as u32);
                     }
+                    row_buf[n] = pack_pixel(color.r(), color.g(), color.b());
+                    n += 1;
+                }
+            }
+            if let Some(sx) = start_x {
+                if py >= 0 {
+                    self.blit_row(sx, py as u32, &row_buf[..n]);
                 }
             }
         }
@@ -616,7 +512,6 @@ impl DrawTarget for GpuDriver {
 }
 
 impl GpuDriver {
-    /// Mark the intersection of `area` with the framebuffer as dirty.
     #[inline]
     fn mark_area_dirty(&self, area: &Rectangle, fb: &Rectangle) {
         let clipped = area.intersection(fb);
@@ -632,168 +527,92 @@ impl GpuDriver {
     }
 }
 
-// =============================================================================
-// Global GPU driver instance and module-level functions
-// =============================================================================
-
-/// Global GPU driver instance
 static mut GPU_DRIVER: Option<GpuDriver> = None;
 
-/// Initialize the global GPU driver
-/// This should be called early in boot to enable framebuffer rendering
-/// 
-/// Returns Err if GPU/framebuffer is not available (probes memory region)
 pub fn init() -> Result<(), &'static str> {
-    // Quick probe: test if framebuffer memory is backed/fast
-    // When GPU is not available, this memory region may not be mapped
-    // or may trap writes, making boot very slow
-    if !probe_framebuffer() {
-        return Err("Framebuffer not available");
-    }
-    
     let mut gpu = GpuDriver::new();
     gpu.init()?;
     unsafe {
         GPU_DRIVER = Some(gpu);
     }
     D1_DISPLAY_AVAILABLE.store(true, Ordering::Release);
+    publish_meta();
+    #[cfg(feature = "d1")]
+    crate::platform::d1_de::init();
+    #[cfg(not(feature = "d1"))]
+    crate::device::virtio_gpu::init();
     Ok(())
 }
 
-/// Probe if the D1 Display Engine is available by checking MMIO registers
-/// When the emulator's GPU device is not enabled, DE MMIO reads return 0
-/// When enabled, GLB_SIZE returns a non-zero value (display dimensions)
-fn probe_framebuffer() -> bool {
-    // D1 Display Engine base address
-    const D1_DE_BASE: usize = 0x0510_0000;
-    // GLB_SIZE register offset - contains display dimensions when GPU is enabled
-    const GLB_SIZE_OFFSET: usize = 0x000C;
-    
-    unsafe {
-        // Read the GLB_SIZE register from the D1 Display Engine
-        // When GPU is enabled: returns ((height-1) << 16) | (width-1), a non-zero value
-        // When GPU is disabled: emulator returns 0 for all DE MMIO reads
-        let glb_size_addr = (D1_DE_BASE + GLB_SIZE_OFFSET) as *const u32;
-        let glb_size = core::ptr::read_volatile(glb_size_addr);
-        
-        // If GLB_SIZE is 0, the D1 Display Engine is not available
-        glb_size != 0
-    }
-}
-
-
-/// Check if display is available
 pub fn is_available() -> bool {
     D1_DISPLAY_AVAILABLE.load(Ordering::Relaxed)
 }
 
-/// Clear both framebuffers to black (called once at boot console init)
-/// IMPORTANT: Must flush after clearing so browser receives the initial black screen
-/// This enables incremental rendering to work correctly for subsequent boot messages
 pub fn init_clear_buffers() {
     with_gpu(|gpu| {
         gpu.init_clear_buffers();
     });
-    // Mark entire screen dirty and flush immediately so browser sees the black screen
-    // This is critical for incremental rendering to work during boot
     mark_all_dirty();
     flush();
 }
 
-/// Get access to the global GPU driver
 pub fn with_gpu<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut GpuDriver) -> R,
 {
-    unsafe {
-        (*addr_of_mut!(GPU_DRIVER)).as_mut().map(f)
-    }
+    unsafe { (*addr_of_mut!(GPU_DRIVER)).as_mut().map(f) }
 }
 
-/// Flush the display (transfer and present)
-/// Only copies the dirty rectangle region from back buffer to front buffer.
-/// Skips copy entirely if nothing has changed since last flush.
+/// Fence pixel stores, then publish dirty rect + version. Host scrapes this buffer.
 pub fn flush() {
     unsafe {
-        // Skip if nothing changed
         if !FRAME_DIRTY {
             return;
         }
-        
-        // Get dirty bounds
+
         let min_x = DIRTY_MIN_X;
         let min_y = DIRTY_MIN_Y;
         let max_x = DIRTY_MAX_X;
         let max_y = DIRTY_MAX_Y;
-        
-        // Check for valid dirty rect
+
         if min_x >= max_x || min_y >= max_y {
             reset_dirty();
             return;
         }
-        
-        // Copy only the dirty rectangle row by row
-        let dirty_width = (max_x - min_x) as usize;
-        
-        let src_base = BACK_BUFFER_ADDR as *const u8;
-        let dst_base = FRAMEBUFFER_ADDR as *mut u8;
-        
-        for y in min_y..max_y {
-            let row_offset = (y * DISPLAY_WIDTH + min_x) as usize * 4;
-            let src_row = src_base.add(row_offset);
-            let dst_row = dst_base.add(row_offset);
-            core::ptr::copy_nonoverlapping(src_row, dst_row, dirty_width * 4);
-        }
-        
+
+        core::sync::atomic::fence(Ordering::Release);
+
         crate::perfstat::inc(crate::perfstat::id::FRAMES_FLUSHED);
         crate::perfstat::add(
             crate::perfstat::id::DIRTY_PIXELS,
-            (dirty_width as u64) * ((max_y - min_y) as u64),
+            ((max_x - min_x) as u64) * ((max_y - min_y) as u64),
         );
-        
-        // Increment frame version so browser knows to fetch new frame
+
         FRAME_VERSION = FRAME_VERSION.wrapping_add(1);
-        
-        // Write version to memory so VM can read it
-        let version_ptr = FRAME_VERSION_ADDR as *mut u32;
-        core::ptr::write_volatile(version_ptr, FRAME_VERSION);
-        
-        // Write dirty rect to memory so frontend can do partial texture upload
-        // Format: 4 x u32 = [min_x, min_y, max_x, max_y]
+
         let dirty_rect_ptr = DIRTY_RECT_ADDR as *mut u32;
         core::ptr::write_volatile(dirty_rect_ptr, min_x);
         core::ptr::write_volatile(dirty_rect_ptr.add(1), min_y);
         core::ptr::write_volatile(dirty_rect_ptr.add(2), max_x);
         core::ptr::write_volatile(dirty_rect_ptr.add(3), max_y);
-        
-        // Reset dirty tracking for next frame
+        core::ptr::write_volatile(FRAME_VERSION_ADDR as *mut u32, FRAME_VERSION);
+
+        publish_meta();
+        #[cfg(not(feature = "d1"))]
+        crate::device::virtio_gpu::flush_rect(min_x, min_y, max_x.saturating_sub(min_x), max_y.saturating_sub(min_y));
+        #[cfg(feature = "d1")]
+        crate::platform::d1_de::kick();
         reset_dirty();
     }
 }
 
-/// Clear the display to black and flush
-/// Used when gpuid service is stopped to clear the framebuffer
-/// NOTE: This writes directly to both buffers for immediate effect
-/// OPTIMIZED: Uses bulk memset instead of volatile loops to avoid blocking scheduler
 pub fn clear_display() {
-    let fb_size_bytes = (DISPLAY_WIDTH * DISPLAY_HEIGHT * 4) as usize;
-
+    let fb_size_bytes = FB_STRIDE * DISPLAY_HEIGHT as usize;
     unsafe {
-        // Use bulk write_bytes (memset) - BLAZING FAST compared to volatile loop
-        // write_bytes sets all bytes to the given value, 0x00 gives 0x00000000 pixels
-        // Then we need just ONE volatile write per buffer to set proper alpha
-        
-        // Clear front buffer to all zeros
         core::ptr::write_bytes(FRAMEBUFFER_ADDR as *mut u8, 0, fb_size_bytes);
-        // Set first pixel to opaque black so frame version triggers
-        core::ptr::write_volatile(FRAMEBUFFER_ADDR as *mut u32, 0xFF000000);
-
-        // Clear back buffer to all zeros  
-        core::ptr::write_bytes(BACK_BUFFER_ADDR as *mut u8, 0, fb_size_bytes);
-        // Set first pixel to opaque black
-        core::ptr::write_volatile(BACK_BUFFER_ADDR as *mut u32, 0xFF000000);
+        // Opaque black first pixel so a version bump is visible.
+        core::ptr::write(FRAMEBUFFER_ADDR as *mut u32, 0xFF000000);
     }
-    
-    // Mark entire screen as dirty for next flush
+    core::sync::atomic::fence(Ordering::Release);
     mark_all_dirty();
 }

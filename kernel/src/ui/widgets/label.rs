@@ -3,7 +3,7 @@
 use alloc::string::String;
 use embedded_graphics::{
     mono_font::{ascii::FONT_7X14, MonoTextStyle},
-    pixelcolor::Rgb888,
+    pixelcolor::{Rgb888, RgbColor},
     prelude::*,
     text::Text,
 };
@@ -37,5 +37,18 @@ impl Label {
         let text_style = MonoTextStyle::new(&FONT_7X14, self.color);
         Text::new(&self.text, Point::new(self.x, self.y), text_style).draw(target)?;
         Ok(())
+    }
+
+    /// Emit an HDL glyph run.
+    pub fn emit(&self, b: &mut crate::ui::scene::Builder<'_>) {
+        b.label_str(
+            self.x,
+            self.y,
+            self.color.r(),
+            self.color.g(),
+            self.color.b(),
+            crate::ui::scene::ATLAS_UI,
+            &self.text,
+        );
     }
 }

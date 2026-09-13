@@ -21,6 +21,7 @@
 use alloc::vec::Vec;
 
 use crate::cpu::io_router::{DeviceType, IoOp, IoRequest, IoResult, request_io};
+#[cfg(feature = "d1")]
 use crate::platform::d1_audio;
 
 // Timeout for I/O requests (5 seconds - audio operations are fast)
@@ -55,7 +56,15 @@ pub fn write_sample(sample: u32) -> bool {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
-        d1_audio::write_sample(sample)
+        #[cfg(feature = "d1")]
+        {
+            d1_audio::write_sample(sample)
+        }
+        #[cfg(not(feature = "d1"))]
+        {
+            let _ = sample;
+            false
+        }
     } else {
         match request_io_blocking(IoOp::AudioWriteSample { sample }) {
             IoResult::Ok(data) => data.first() == Some(&1),
@@ -82,7 +91,10 @@ pub fn set_enabled(enabled: bool) {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
+        #[cfg(feature = "d1")]
         d1_audio::set_enabled(enabled);
+        #[cfg(not(feature = "d1"))]
+        let _ = enabled;
     } else {
         let _ = request_io_blocking(IoOp::AudioSetEnabled { enabled });
     }
@@ -97,7 +109,10 @@ pub fn set_sample_rate(rate: u32) {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
+        #[cfg(feature = "d1")]
         d1_audio::set_sample_rate(rate);
+        #[cfg(not(feature = "d1"))]
+        let _ = rate;
     } else {
         let _ = request_io_blocking(IoOp::AudioSetSampleRate { rate });
     }
@@ -112,7 +127,10 @@ pub fn buffer_level() -> u32 {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
-        d1_audio::buffer_level()
+        #[cfg(feature = "d1")]
+        { d1_audio::buffer_level() }
+        #[cfg(not(feature = "d1"))]
+        { 0 }
     } else {
         match request_io_blocking(IoOp::AudioGetBufferLevel) {
             IoResult::Ok(data) if data.len() >= 4 => {
@@ -132,7 +150,10 @@ pub fn is_buffer_full() -> bool {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
-        d1_audio::is_buffer_full()
+        #[cfg(feature = "d1")]
+        { d1_audio::is_buffer_full() }
+        #[cfg(not(feature = "d1"))]
+        { true }
     } else {
         match request_io_blocking(IoOp::AudioIsBufferFull) {
             IoResult::Ok(data) => data.first() == Some(&1),
@@ -150,7 +171,10 @@ pub fn is_buffer_empty() -> bool {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
-        d1_audio::is_buffer_empty()
+        #[cfg(feature = "d1")]
+        { d1_audio::is_buffer_empty() }
+        #[cfg(not(feature = "d1"))]
+        { true }
     } else {
         match request_io_blocking(IoOp::AudioIsBufferEmpty) {
             IoResult::Ok(data) => data.first() == Some(&1),
@@ -168,7 +192,10 @@ pub fn is_initialized() -> bool {
     let hart_id = crate::get_hart_id();
     
     if hart_id == 0 {
-        d1_audio::is_initialized()
+        #[cfg(feature = "d1")]
+        { d1_audio::is_initialized() }
+        #[cfg(not(feature = "d1"))]
+        { false }
     } else {
         match request_io_blocking(IoOp::Status) {
             IoResult::Ok(data) => data == b"online",

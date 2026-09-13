@@ -5,8 +5,7 @@
 //! - Dirty block tracking for efficient sync
 //! - LRU eviction for cache management
 
-// Block device type alias (D1 MMC/SD card)
-use crate::platform::d1_mmc::D1Mmc as BlockDev;
+use crate::lock::state::blk::BlockDeviceState as BlockDev;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use alloc::string::String;
@@ -19,8 +18,10 @@ const SEC_MAP_START: u64 = 1;
 pub const SEC_DIR_START: u64 = 65;
 pub const SEC_DIR_COUNT: u64 = 64;
 
-/// Maximum number of cached blocks
-const CACHE_MAX_BLOCKS: usize = 64;
+/// 4 KiB page cache (8 × 512 B sectors), ~1 MiB.
+const PAGE_SECTORS: u64 = 8;
+const PAGE_BYTES: usize = 4096;
+const CACHE_MAX_PAGES: usize = 256;
 
 /// Cache entry access counter for LRU
 static CACHE_ACCESS_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -51,18 +52,15 @@ pub struct FileInfo {
 // BUFFER CACHE - Block-level write caching
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// A cached block entry
+/// A cached 4 KiB page (8 sectors).
 struct CacheEntry {
-    /// Block data
-    data: [u8; 512],
-    /// Whether this block has been modified
+    data: [u8; PAGE_BYTES],
     dirty: bool,
-    /// Last access time (for LRU eviction)
     last_access: u64,
 }
 
 impl CacheEntry {
-    fn new(data: [u8; 512]) -> Self {
+    fn new(data: [u8; PAGE_BYTES]) -> Self {
         Self {
             data,
             dirty: false,
@@ -73,17 +71,52 @@ impl CacheEntry {
     fn touch(&mut self) {
         self.last_access = CACHE_ACCESS_COUNTER.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn sector_slice(&self, sector: u64) -> &[u8] {
+        let off = ((sector % PAGE_SECTORS) as usize) * 512;
+        &self.data[off..off + 512]
+    }
+
+    fn sector_slice_mut(&mut self, sector: u64) -> &mut [u8] {
+        let off = ((sector % PAGE_SECTORS) as usize) * 512;
+        &mut self.data[off..off + 512]
+    }
 }
 
-/// Block cache for reducing disk I/O
+fn page_of(sector: u64) -> u64 {
+    sector / PAGE_SECTORS
+}
+
+fn load_page(dev: &mut BlockDev, page: u64) -> [u8; PAGE_BYTES] {
+    let mut data = [0u8; PAGE_BYTES];
+    let start = page * PAGE_SECTORS;
+    for i in 0..PAGE_SECTORS {
+        let mut sec = [0u8; 512];
+        if dev.read_sector(start + i, &mut sec).is_ok() {
+            let off = (i as usize) * 512;
+            data[off..off + 512].copy_from_slice(&sec);
+        }
+    }
+    data
+}
+
+fn write_page(dev: &mut BlockDev, page: u64, data: &[u8; PAGE_BYTES]) -> Result<(), &'static str> {
+    let start = page * PAGE_SECTORS;
+    for i in 0..PAGE_SECTORS {
+        let off = (i as usize) * 512;
+        let mut sec = [0u8; 512];
+        sec.copy_from_slice(&data[off..off + 512]);
+        dev.write_sector(start + i, &sec)?;
+    }
+    Ok(())
+}
+
+/// Page cache for reducing disk I/O
 pub struct BufferCache {
-    /// Cached blocks: sector -> entry
+    /// Cached pages: page number -> entry
     blocks: BTreeMap<u64, CacheEntry>,
-    /// Number of cache hits
     hits: u64,
-    /// Number of cache misses
     misses: u64,
-    /// Number of writebacks
     writebacks: u64,
 }
 
@@ -97,97 +130,67 @@ impl BufferCache {
         }
     }
 
-    /// Read a block, using cache if available
-    #[allow(dead_code)]
-    pub fn read(&mut self, dev: &mut BlockDev, sector: u64) -> Result<&[u8; 512], &'static str> {
-        // Check cache first
-        if self.blocks.contains_key(&sector) {
+    fn ensure_page(&mut self, dev: &mut BlockDev, sector: u64) -> Result<(), &'static str> {
+        let page = page_of(sector);
+        if self.blocks.contains_key(&page) {
             self.hits += 1;
-            let entry = self.blocks.get_mut(&sector).unwrap();
-            entry.touch();
-            return Ok(&entry.data);
+            self.blocks.get_mut(&page).unwrap().touch();
+            return Ok(());
         }
-
-        // Cache miss - read from disk
         self.misses += 1;
-        let mut data = [0u8; 512];
-        dev.read_sector(sector, &mut data)?;
-
-        // Evict if cache is full
-        if self.blocks.len() >= CACHE_MAX_BLOCKS {
+        if self.blocks.len() >= CACHE_MAX_PAGES {
             self.evict_lru(dev)?;
         }
-
-        // Insert into cache
-        self.blocks.insert(sector, CacheEntry::new(data));
-        Ok(&self.blocks.get(&sector).unwrap().data)
+        self.blocks.insert(page, CacheEntry::new(load_page(dev, page)));
+        Ok(())
     }
 
-    /// Read a block into a mutable buffer (for modification)
+    #[allow(dead_code)]
+    pub fn read(&mut self, dev: &mut BlockDev, sector: u64) -> Result<&[u8], &'static str> {
+        self.ensure_page(dev, sector)?;
+        let page = page_of(sector);
+        let entry = self.blocks.get(&page).unwrap();
+        Ok(entry.sector_slice(sector))
+    }
+
     pub fn read_mut(
         &mut self,
         dev: &mut BlockDev,
         sector: u64,
-    ) -> Result<&mut [u8; 512], &'static str> {
-        // Ensure block is in cache
-        if !self.blocks.contains_key(&sector) {
-            self.misses += 1;
-            let mut data = [0u8; 512];
-            dev.read_sector(sector, &mut data)?;
-
-            if self.blocks.len() >= CACHE_MAX_BLOCKS {
-                self.evict_lru(dev)?;
-            }
-
-            self.blocks.insert(sector, CacheEntry::new(data));
-        } else {
-            self.hits += 1;
-        }
-
-        let entry = self.blocks.get_mut(&sector).unwrap();
-        entry.touch();
-        Ok(&mut entry.data)
+    ) -> Result<&mut [u8], &'static str> {
+        self.ensure_page(dev, sector)?;
+        let page = page_of(sector);
+        let entry = self.blocks.get_mut(&page).unwrap();
+        Ok(entry.sector_slice_mut(sector))
     }
 
-    /// Write a block (cached, not immediately flushed)
     pub fn write(
         &mut self,
         dev: &mut BlockDev,
         sector: u64,
         data: &[u8; 512],
     ) -> Result<(), &'static str> {
-        // Evict if cache is full
-        if !self.blocks.contains_key(&sector) && self.blocks.len() >= CACHE_MAX_BLOCKS {
-            self.evict_lru(dev)?;
-        }
-
-        // Insert or update in cache
-        if let Some(entry) = self.blocks.get_mut(&sector) {
-            entry.data.copy_from_slice(data);
-            entry.dirty = true;
-            entry.touch();
-        } else {
-            let mut entry = CacheEntry::new(*data);
-            entry.dirty = true;
-            self.blocks.insert(sector, entry);
-        }
-
+        self.ensure_page(dev, sector)?;
+        let page = page_of(sector);
+        let entry = self.blocks.get_mut(&page).unwrap();
+        entry.sector_slice_mut(sector).copy_from_slice(data);
+        entry.dirty = true;
+        entry.touch();
         Ok(())
     }
 
-    /// Mark a cached block as dirty
     pub fn mark_dirty(&mut self, sector: u64) {
-        if let Some(entry) = self.blocks.get_mut(&sector) {
+        let page = page_of(sector);
+        if let Some(entry) = self.blocks.get_mut(&page) {
             entry.dirty = true;
         }
     }
 
-    /// Flush all dirty blocks to disk
     pub fn sync(&mut self, dev: &mut BlockDev) -> Result<usize, &'static str> {
         let mut count = 0;
-        for (&sector, entry) in self.blocks.iter_mut() {
+        for (&page, entry) in self.blocks.iter_mut() {
             if entry.dirty {
-                dev.write_sector(sector, &entry.data)?;
+                write_page(dev, page, &entry.data)?;
                 entry.dirty = false;
                 self.writebacks += 1;
                 count += 1;
@@ -196,12 +199,13 @@ impl BufferCache {
         Ok(count)
     }
 
-    /// Flush a specific block to disk
+    /// Flush a specific sector's page to disk
     #[allow(dead_code)]
     pub fn sync_block(&mut self, dev: &mut BlockDev, sector: u64) -> Result<bool, &'static str> {
-        if let Some(entry) = self.blocks.get_mut(&sector) {
+        let page = page_of(sector);
+        if let Some(entry) = self.blocks.get_mut(&page) {
             if entry.dirty {
-                dev.write_sector(sector, &entry.data)?;
+                write_page(dev, page, &entry.data)?;
                 entry.dirty = false;
                 self.writebacks += 1;
                 return Ok(true);
@@ -210,33 +214,29 @@ impl BufferCache {
         Ok(false)
     }
 
-    /// Evict the least recently used block
     fn evict_lru(&mut self, dev: &mut BlockDev) -> Result<(), &'static str> {
-        // Find LRU entry
-        let lru_sector = self
+        let lru_page = self
             .blocks
             .iter()
             .min_by_key(|(_, e)| e.last_access)
-            .map(|(&s, _)| s);
+            .map(|(&p, _)| p);
 
-        if let Some(sector) = lru_sector {
-            // Write back if dirty
-            if let Some(entry) = self.blocks.get(&sector) {
+        if let Some(page) = lru_page {
+            if let Some(entry) = self.blocks.get(&page) {
                 if entry.dirty {
-                    dev.write_sector(sector, &entry.data)?;
+                    write_page(dev, page, &entry.data)?;
                     self.writebacks += 1;
                 }
             }
-            self.blocks.remove(&sector);
+            self.blocks.remove(&page);
         }
 
         Ok(())
     }
 
-    /// Invalidate a cached block (e.g., after external modification)
     #[allow(dead_code)]
     pub fn invalidate(&mut self, sector: u64) {
-        self.blocks.remove(&sector);
+        self.blocks.remove(&page_of(sector));
     }
 
     /// Clear the entire cache (flushes dirty blocks first)

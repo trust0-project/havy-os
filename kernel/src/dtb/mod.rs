@@ -10,7 +10,7 @@ use crate::services::klogd::{klog_info, klog_warning};
 use crate::Spinlock;
 
 // Re-export parser types
-pub use parser::DeviceNode;
+pub use parser::{DeviceNode, HdlMailbox};
 
 /// Cached device registry (parsed once at init)
 static DEVICE_REGISTRY: Spinlock<Vec<DeviceNode>> = Spinlock::new(Vec::new());
@@ -23,6 +23,12 @@ static DTB_ADDRESS: AtomicUsize = AtomicUsize::new(0);
 
 /// Stored DTB size (from header)
 static DTB_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// CPU nodes discovered in the DTB (`cpu@*` / compatible `riscv`).
+static CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Host-advertised HDL mailbox (absent unless the VM published the node).
+static HDL_MAILBOX: Spinlock<Option<parser::HdlMailbox>> = Spinlock::new(None);
 
 /// Initialize DTB support with the address passed by OpenSBI.
 ///
@@ -41,6 +47,17 @@ pub fn init(dtb_addr: usize) {
         if let Some(size) = validate_dtb(dtb_addr) {
             DTB_SIZE.store(size, Ordering::Relaxed);
             klog_info("dtb", &alloc::format!("DTB valid, size: {} bytes", size));
+            crate::device::uart::write_line(
+                &alloc::format!("[dtb] addr=0x{:x}, size={}", dtb_addr, size),
+            );
+            let header_len = size.min(64);
+            let header = unsafe {
+                core::slice::from_raw_parts(dtb_addr as *const u8, header_len)
+            };
+            crate::services::klogd::klog_debug(
+                "dtb",
+                &alloc::format!("DTB header ({} bytes): {:02x?}", header_len, header),
+            );
             
             // Parse device nodes and cache them
             let devices = parser::parse_devices(dtb_addr);
@@ -54,6 +71,23 @@ pub fn init(dtb_addr: usize) {
             }
             
             *DEVICE_REGISTRY.lock() = devices;
+
+            let ncpus = parser::count_cpus(dtb_addr);
+            CPU_COUNT.store(ncpus, Ordering::Release);
+            klog_info("dtb", &alloc::format!("{} CPU(s) in DTB", ncpus));
+
+            let hdl = parser::find_hdl_mailbox(dtb_addr);
+            match &hdl {
+                Some(m) => klog_info(
+                    "dtb",
+                    &alloc::format!(
+                        "HDL mailbox @ 0x{:x} size=0x{:x} abi={}.{}",
+                        m.base, m.size, m.abi_major, m.abi_minor
+                    ),
+                ),
+                None => klog_info("dtb", "no havy,hdl-mailbox / chosen HDL capability"),
+            }
+            *HDL_MAILBOX.lock() = hdl;
         } else {
             klog_warning("dtb", "Invalid DTB magic - ignoring");
             DTB_ADDRESS.store(0, Ordering::Release);
@@ -217,4 +251,31 @@ pub fn find_first(compat: &str) -> Option<DeviceNode> {
         .iter()
         .find(|d| d.compatible == compat || d.compatible.starts_with(compat))
         .cloned()
+}
+
+/// Number of CPU harts in the DTB (`cpu@*` nodes, or compatible `riscv`, not intc).
+///
+/// Returns 0 if no DTB was parsed. Callers that need a runnable count should
+/// clamp to `[1, MAX_HARTS]`.
+pub fn cpu_count() -> usize {
+    let cached = CPU_COUNT.load(Ordering::Acquire);
+    if cached != 0 {
+        return cached;
+    }
+    let addr = get_address();
+    if addr == 0 {
+        return 0;
+    }
+    let n = parser::count_cpus(addr);
+    CPU_COUNT.store(n, Ordering::Release);
+    n
+}
+
+/// Host-advertised HDL mailbox from `/reserved-memory` or `/chosen`.
+///
+/// `None` if the DTB omitted the node (kill-switch) or no DTB was parsed.
+/// Address/ABI matching against the guest linker freeze is `virt::hdl_host_advertised`.
+#[allow(dead_code)] // virt reads this; D1 never publishes to a host GPU
+pub fn hdl_mailbox() -> Option<HdlMailbox> {
+    HDL_MAILBOX.lock().clone()
 }

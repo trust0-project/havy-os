@@ -62,4 +62,14 @@ impl ProgressBar {
 
         Ok(())
     }
+
+    /// Emit HDL nodes matching [`Self::draw`].
+    pub fn emit(&self, b: &mut crate::ui::scene::Builder<'_>) {
+        let fill_w = ((self.width as f32 * self.progress) as u32).max(if self.progress > 0.0 {
+            1
+        } else {
+            0
+        });
+        b.progress(self.x, self.y, self.width, self.height, fill_w);
+    }
 }

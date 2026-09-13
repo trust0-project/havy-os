@@ -36,7 +36,7 @@ impl Window {
             show_controls: true, // Show controls by default
         }
     }
-    
+
     /// Builder method to set whether controls are shown
     pub fn with_controls(mut self, show: bool) -> Self {
         self.show_controls = show;
@@ -46,8 +46,12 @@ impl Window {
     /// Draw the window to a DrawTarget
     pub fn draw<D: DrawTarget<Color = Rgb888>>(&self, target: &mut D) -> Result<(), D::Error> {
         let title_bar_height = 28u32;
-        let border_color = if self.focused { colors::ACCENT } else { colors::BORDER };
-        
+        let border_color = if self.focused {
+            colors::ACCENT
+        } else {
+            colors::BORDER
+        };
+
         // Window shadow (offset dark rectangle)
         Rectangle::new(
             Point::new(self.x + 4, self.y + 4),
@@ -86,7 +90,10 @@ impl Window {
         // Title bar border line
         Line::new(
             Point::new(self.x, self.y + title_bar_height as i32),
-            Point::new(self.x + self.width as i32 - 1, self.y + title_bar_height as i32),
+            Point::new(
+                self.x + self.width as i32 - 1,
+                self.y + title_bar_height as i32,
+            ),
         )
         .into_styled(PrimitiveStyle::with_stroke(border_color, 1))
         .draw(target)?;
@@ -105,17 +112,17 @@ impl Window {
         // Window control buttons (close, minimize, maximize)
         let button_y = self.y + 8;
         let button_radius = 6u32;
-        
+
         // Close button (red)
         Circle::new(Point::new(self.x + 12, button_y), button_radius * 2)
             .into_styled(PrimitiveStyle::with_fill(colors::ERROR))
             .draw(target)?;
-        
+
         // Minimize button (yellow)
         Circle::new(Point::new(self.x + 32, button_y), button_radius * 2)
             .into_styled(PrimitiveStyle::with_fill(colors::WARNING))
             .draw(target)?;
-        
+
         // Maximize button (green)
         Circle::new(Point::new(self.x + 52, button_y), button_radius * 2)
             .into_styled(PrimitiveStyle::with_fill(colors::SUCCESS))
@@ -141,21 +148,23 @@ impl Window {
             self.height - title_bar_height as u32 - (padding * 2) as u32,
         )
     }
-    
+
     /// Draw window with batch rendering (faster, but simpler style without rounded corners)
     /// Returns the content area for rendering content inside
     pub fn draw_fast(&self, gpu: &mut crate::platform::d1_display::GpuDriver) -> WindowContentArea {
         const TITLE_BAR_HEIGHT: u32 = 32;
-        
+
         // Window background - use direct fill_rect for batch rendering
         gpu.fill_rect(
-            self.x as u32, 
-            self.y as u32, 
-            self.width, 
-            self.height, 
-            28, 28, 38  // Window background color
+            self.x as u32,
+            self.y as u32,
+            self.width,
+            self.height,
+            28,
+            28,
+            38, // Window background color
         );
-        
+
         // Window border
         let _ = Rectangle::new(
             Point::new(self.x, self.y),
@@ -163,53 +172,78 @@ impl Window {
         )
         .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(60, 60, 80), 1))
         .draw(gpu);
-        
+
         // Title bar background - use direct fill_rect
         gpu.fill_rect(
-            self.x as u32, 
-            self.y as u32, 
-            self.width, 
-            TITLE_BAR_HEIGHT, 
-            40, 40, 55  // Title bar color
+            self.x as u32,
+            self.y as u32,
+            self.width,
+            TITLE_BAR_HEIGHT,
+            40,
+            40,
+            55, // Title bar color
         );
-        
+
         // Traffic light buttons (close, minimize, maximize) - only if show_controls is true
         if self.show_controls {
             let btn_y = self.y + 10;
             let btn_start_x = self.x + 12;
-            
+
             // Close button (red)
             let _ = Circle::new(Point::new(btn_start_x, btn_y), 12)
                 .into_styled(PrimitiveStyle::with_fill(Rgb888::new(220, 80, 80)))
                 .draw(gpu);
-            
+
             // Minimize button (yellow)
             let _ = Circle::new(Point::new(btn_start_x + 20, btn_y), 12)
                 .into_styled(PrimitiveStyle::with_fill(Rgb888::new(230, 180, 80)))
                 .draw(gpu);
-            
+
             // Maximize button (green)
             let _ = Circle::new(Point::new(btn_start_x + 40, btn_y), 12)
                 .into_styled(PrimitiveStyle::with_fill(Rgb888::new(80, 200, 120)))
                 .draw(gpu);
         }
-        
+
         // Title text (centered)
         let title_style = MonoTextStyle::new(&FONT_9X15_BOLD, Rgb888::WHITE);
         let title_x = self.x + (self.width as i32 / 2) - ((self.title.len() as i32 * 9) / 2);
         let _ = Text::new(&self.title, Point::new(title_x, self.y + 22), title_style).draw(gpu);
-        
+
         // Draw small logo aligned to the right of the header
         let logo_x = (self.x + self.width as i32 - LOGO_SMALL_SIZE as i32 - 8) as u32;
         let logo_y = (self.y + 4) as u32;
-        draw_image(gpu, logo_x, logo_y, LOGO_SMALL_SIZE, LOGO_SMALL_SIZE, LOGO_SMALL);
-        
+        draw_image(
+            gpu,
+            logo_x,
+            logo_y,
+            LOGO_SMALL_SIZE,
+            LOGO_SMALL_SIZE,
+            LOGO_SMALL,
+        );
+
         WindowContentArea {
             x: self.x + 1,
             y: self.y + TITLE_BAR_HEIGHT as i32 + 1,
             width: self.width - 2,
             height: self.height - TITLE_BAR_HEIGHT - 2,
         }
+    }
+
+    /// Emit HDL chrome matching [`Self::draw_fast`] (no `fill_rect`).
+    pub fn emit_fast(&self, b: &mut crate::ui::scene::Builder<'_>) {
+        b.window_chrome(
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.title.as_bytes(),
+            self.show_controls,
+            false,
+            (28, 28, 38),
+            (40, 40, 55),
+            (255, 255, 255),
+        );
     }
 }
 

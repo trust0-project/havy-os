@@ -58,6 +58,14 @@ const SYS_NET_INFO: u64 = 80;
 const SYS_HEAP_STATS: u64 = 81;
 const SYS_SLEEP: u64 = 82;
 const SYS_PERFSTAT: u64 = 83;
+const SYS_OPEN: u64 = 90;
+const SYS_CLOSE: u64 = 91;
+const SYS_READ: u64 = 92;
+const SYS_WRITE: u64 = 93;
+const SYS_LSEEK: u64 = 94;
+const SYS_MMAP: u64 = 100;
+const SYS_MUNMAP: u64 = 101;
+const SYS_BRK: u64 = 102;
 
 
 
@@ -255,6 +263,46 @@ pub fn perfstat(out: &mut [u64], reset: bool) -> i32 {
         out.len() as u64,
         reset as u64,
     ) as i32
+}
+
+#[inline]
+pub fn open(path_ptr: *const u8, path_len: i32, flags: i32) -> i32 {
+    syscall3(SYS_OPEN, path_ptr as u64, path_len as u64, flags as u64) as i32
+}
+
+#[inline]
+pub fn close(fd: i32) -> i32 {
+    syscall1(SYS_CLOSE, fd as u64) as i32
+}
+
+#[inline]
+pub fn read(fd: i32, buf_ptr: *mut u8, buf_len: i32) -> i32 {
+    syscall3(SYS_READ, fd as u64, buf_ptr as u64, buf_len as u64) as i32
+}
+
+#[inline]
+pub fn write(fd: i32, buf_ptr: *const u8, buf_len: i32) -> i32 {
+    syscall3(SYS_WRITE, fd as u64, buf_ptr as u64, buf_len as u64) as i32
+}
+
+#[inline]
+pub fn lseek(fd: i32, offset: i64, whence: i32) -> i64 {
+    syscall3(SYS_LSEEK, fd as u64, offset as u64, whence as u64)
+}
+
+#[inline]
+pub fn mmap(len: usize, prot: i32) -> i64 {
+    syscall2(SYS_MMAP, len as u64, prot as u64)
+}
+
+#[inline]
+pub fn munmap(ptr: usize, len: usize) -> i32 {
+    syscall2(SYS_MUNMAP, ptr as u64, len as u64) as i32
+}
+
+#[inline]
+pub fn brk(addr: usize) -> i64 {
+    syscall1(SYS_BRK, addr as u64)
 }
 
 

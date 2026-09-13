@@ -348,6 +348,14 @@ static IO_CALLBACKS: Spinlock<[Option<IoCallback>; MAX_PENDING_REQUESTS]> = Spin
 /// * `IoResult::Ok(data)` - Operation succeeded with returned data
 /// * `IoResult::Err(msg)` - Operation failed with error message
 pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
+    let hart_id = get_hart_id();
+    if hart_id >= MAX_HARTS {
+        return IoResult::Err("invalid source hart");
+    }
+    if hart_id == 0 {
+        return handle_request(&request);
+    }
+
     let request_id = request.request_id;
     let slot_idx = (request_id as usize) % MAX_PENDING_REQUESTS;
     
@@ -355,22 +363,25 @@ pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
     IO_COMPLETIONS[slot_idx].reset();
     
     // Submit request to caller's hart queue (reduces lock contention)
-    let hart_id = get_hart_id();
     IO_QUEUES[hart_id].lock().push_back(request);
     REQUESTS_SUBMITTED.fetch_add(1, Ordering::Relaxed);
     PENDING_IO.fetch_add(1, Ordering::Release);
     crate::perfstat::inc(crate::perfstat::id::IO_REQUESTS);
     
     // Send IPI to Hart 0 to wake it up
-    if get_hart_id() != 0 {
-        crate::cpu::send_ipi(0);
-    }
+    crate::cpu::send_ipi(0);
     
     // Wait for completion
     let start = crate::get_time_ms();
     loop {
+        // Disable SIE before the condition check. If completion races this
+        // check, its IPI remains pending and wakes WFI; it cannot be handled
+        // and cleared in the check-to-sleep gap.
+        let interrupt_state = crate::trap::disable_interrupts_save();
+
         // Check if complete
         if let Some(result) = IO_COMPLETIONS[slot_idx].take() {
+            crate::trap::restore_interrupts(interrupt_state);
             return result;
         }
         
@@ -378,6 +389,7 @@ pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
         if timeout_ms > 0 {
             let elapsed = crate::get_time_ms() - start;
             if elapsed >= timeout_ms as i64 {
+                crate::trap::restore_interrupts(interrupt_state);
                 return IoResult::Err("I/O request timeout");
             }
         }
@@ -390,8 +402,9 @@ pub fn request_io(request: IoRequest, timeout_ms: u64) -> IoResult {
 
         // Yield CPU (use WFI to save power)
         unsafe {
-            core::arch::asm!("wfi");
+            core::arch::asm!("wfi", options(nomem, nostack));
         }
+        crate::trap::restore_interrupts(interrupt_state);
     }
 }
 
@@ -407,6 +420,12 @@ pub fn request_io_async(request: IoRequest) -> RequestId {
     
     // Reset the completion slot
     IO_COMPLETIONS[slot_idx].reset();
+
+    if get_hart_id() == 0 {
+        let result = handle_request(&request);
+        IO_COMPLETIONS[slot_idx].store(result);
+        return request_id;
+    }
     
     // Submit request to caller's hart queue (reduces lock contention)
     let hart_id = get_hart_id();
@@ -465,6 +484,12 @@ pub fn submit_async_io_with_callback(
     
     // Register the callback
     IO_CALLBACKS.lock()[slot_idx] = Some(callback);
+
+    if get_hart_id() == 0 {
+        let result = handle_request(&request);
+        complete_request(request_id, result);
+        return request_id;
+    }
     
     // Submit request to caller's hart queue (reduces lock contention)
     let hart_id = get_hart_id();
@@ -846,11 +871,11 @@ fn handle_display_request(request: &IoRequest) -> IoResult {
             IoResult::Ok(alloc::vec![if available { 1 } else { 0 }])
         }
         IoOp::TouchPoll => {
-            crate::platform::d1_touch::poll();
+            crate::input::poll();
             IoResult::Ok(Vec::new())
         }
         IoOp::TouchNextEvent => {
-            if let Some(event) = crate::platform::d1_touch::next_event() {
+            if let Some(event) = crate::input::next_event() {
                 // Serialize event: [type:2][code:2][value:4] = 8 bytes
                 let mut data = Vec::with_capacity(8);
                 data.extend_from_slice(&event.event_type.to_le_bytes());
@@ -862,7 +887,7 @@ fn handle_display_request(request: &IoRequest) -> IoResult {
             }
         }
         IoOp::TouchHasEvents => {
-            let has = crate::platform::d1_touch::has_events();
+            let has = crate::input::has_events();
             IoResult::Ok(alloc::vec![if has { 1 } else { 0 }])
         }
         _ => IoResult::Err("Display operation not implemented via I/O router"),
@@ -871,6 +896,12 @@ fn handle_display_request(request: &IoRequest) -> IoResult {
 
 /// Handle audio device requests
 fn handle_audio_request(request: &IoRequest) -> IoResult {
+    #[cfg(not(feature = "d1"))]
+    {
+        let _ = request;
+        return IoResult::Err("no audio device on virt");
+    }
+    #[cfg(feature = "d1")]
     match &request.operation {
         IoOp::AudioWriteSample { sample } => {
             let success = crate::platform::d1_audio::write_sample(*sample);

@@ -9,6 +9,7 @@
 //! - `widgets`: UI widget components (Button, Label, etc.)
 //! - `manager`: UiManager and global state
 //! - `main_screen`: Main screen functionality
+//! - `scene`: retained HDL desktop (widgets emit nodes; gpuid publishes)
 //! - `boot`: Boot screen setup
 
 use crate::platform::d1_display;
@@ -17,22 +18,23 @@ use crate::uart;
 // Module declarations
 pub mod boot;
 pub mod colors;
+pub mod compositor;
 pub mod cursor;
+pub mod hdl;
+pub mod hdl_mailbox;
+pub mod input_queue;
 pub mod main_screen;
 pub mod manager;
+pub mod raster_soft;
+pub mod scene;
 pub mod widgets;
 
 // Re-export commonly used items at the module root for backwards compatibility
-pub use cursor::{
-    get_cursor_pos, set_cursor_pos,
-};
+pub use cursor::{get_cursor_pos, set_cursor_pos};
 pub use main_screen::{
-    handle_main_screen_input, setup_main_screen,
-    update_main_screen_hardware_stats,
+    handle_main_screen_input, setup_main_screen, update_main_screen_hardware_stats,
 };
-pub use manager::{
-    with_ui, UiManager, UI_MANAGER,
-};
+pub use manager::{with_ui, UiManager, UI_MANAGER};
 
 // Embedded Trust0 logo (64x64 RGBA = 16KB)
 static LOGO_DATA: &[u8] = include_bytes!("logo.raw");
@@ -43,9 +45,9 @@ const LOGO_HEIGHT: u32 = 64;
 pub(crate) static LOGO_SMALL: &[u8] = include_bytes!("logo_small.raw");
 pub(crate) const LOGO_SMALL_SIZE: u32 = 24;
 
-// Screen resolution constants
-pub const SCREEN_WIDTH: i32 = 1024;
-pub const SCREEN_HEIGHT: i32 = 768;
+// Screen resolution constants (virt 1024×768, D1 ST7701 480×480)
+pub const SCREEN_WIDTH: i32 = crate::platform::d1_display::DISPLAY_WIDTH as i32;
+pub const SCREEN_HEIGHT: i32 = crate::platform::d1_display::DISPLAY_HEIGHT as i32;
 
 /// Draw an embedded RGBA image to the framebuffer (fast blit).
 ///
@@ -53,7 +55,14 @@ pub const SCREEN_HEIGHT: i32 = 768;
 /// dirty-rect mark covers the whole image. Opaque runs within a row are
 /// coalesced into `fill_hline` bulk writes; only alpha-tested edge pixels
 /// fall back to per-pixel stores.
-pub(crate) fn draw_image(gpu: &mut d1_display::GpuDriver, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) {
+pub(crate) fn draw_image(
+    gpu: &mut d1_display::GpuDriver,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) {
     d1_display::begin_pixel_batch();
     for row in 0..height {
         let mut col = 0u32;
@@ -99,4 +108,3 @@ pub(crate) fn draw_image(gpu: &mut d1_display::GpuDriver, x: u32, y: u32, width:
     d1_display::end_pixel_batch();
     d1_display::mark_dirty(x, y, width, height);
 }
-

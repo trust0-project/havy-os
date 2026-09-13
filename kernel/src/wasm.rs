@@ -1,9 +1,8 @@
 use alloc::{format, string::String, vec, vec::Vec};
 use alloc::collections::BTreeMap;
 use wasmi::{Caller, Config, Engine, Func, Linker, Module, Store};
-use core::ptr;
 
-use crate::{SHELL_CMD_STATE, ShellCmdState, clint::get_time_ms, commands::http, constants::TEST_FINISHER, cpu, lock::{self, utils::BLK_DEV}, services::klogd::{KLOG, klog_info}, uart, Spinlock};
+use crate::{SHELL_CMD_STATE, ShellCmdState, clint::get_time_ms, commands::http, cpu, lock::{self, utils::BLK_DEV}, services::klogd::{KLOG, klog_info}, uart, Spinlock};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WASM Module Cache - Avoids re-parsing WASM binaries
@@ -79,8 +78,33 @@ pub fn get_shell_cmd_info() -> Option<(String, u32, i64, u64, bool)> {
 
 
 
+struct WasmExecGuard;
+
+impl Drop for WasmExecGuard {
+    fn drop(&mut self) {
+        crate::ui::input_queue::set_guest_ui_client(false);
+    }
+}
+
+/// Poll HID and post work for `gpuid`. Does not mutate MAIN_SCREEN / compositor.
+fn enqueue_pending_ui_work() {
+    crate::input::poll();
+    while let Some(event) = crate::input::next_event() {
+        crate::ui::input_queue::enqueue_input(event);
+    }
+}
+
+/// Enqueue pending HID, then apply on hart 0 if this is the owner hart.
+fn submit_ui_work() {
+    enqueue_pending_ui_work();
+    crate::services::gpuid::apply_queued_if_owner();
+}
+
 /// Execute a WASM binary with the given arguments
 pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
+    crate::ui::input_queue::set_guest_ui_client(true);
+    let _exec_guard = WasmExecGuard;
+
     // Check module cache first
     let hash = hash_wasm(wasm_bytes);
     
@@ -571,11 +595,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 uart::write_line("");
                 uart::write_line("    \x1b[1;32m[OK] Goodbye!\x1b[0m");
                 uart::write_line("");
-                unsafe {
-                    ptr::write_volatile(TEST_FINISHER as *mut u32, 0x5555);
-                }
-                #[allow(clippy::empty_loop)]
-                loop {}
+                crate::sbi::shutdown();
             }),
         )
         .map_err(|e| format!("define shutdown: {:?}", e))?;
@@ -852,7 +872,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
 
     // Syscall: sleep_ms(ms) -> ()
     // Sleeps for the specified number of milliseconds.
-    // Also polls for input events to allow Cancel button to work during sleep.
+    // Polls HID and enqueues it for gpuid so Cancel still works during sleep.
     linker
         .define(
             "env",
@@ -862,26 +882,7 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 let target = start + ms as i64;
                 
                 while crate::get_time_ms() < target {
-                    // Poll for touch/input events
-                    crate::platform::d1_touch::poll();
-                    
-                    // Check for 'q' key directly in character queue
-                    if crate::platform::d1_touch::has_char_input() {
-                        if let Some(ch) = crate::platform::d1_touch::peek_char() {
-                            if ch == b'q' || ch == b'Q' {
-                                crate::platform::d1_touch::consume_char();
-                                crate::ui::main_screen::request_cancel();
-                            }
-                        }
-                    }
-                    
-                    // Process any queued events - this allows Cancel button clicks
-                    // and ESC key to set the cancellation flag
-                    while let Some(event) = crate::platform::d1_touch::next_event() {
-                        crate::ui::main_screen::handle_main_screen_input(event);
-                    }
-                    
-                    // Small delay to avoid burning CPU
+                    submit_ui_work();
                     for _ in 0..100 {
                         core::hint::spin_loop();
                     }
@@ -899,24 +900,9 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
             "env",
             "terminal_refresh",
             Func::wrap(&mut store, |_caller: Caller<'_, WasmContext>| {
-                // Poll for touch/input events first (to catch Cancel button clicks and ESC/q)
-                crate::platform::d1_touch::poll();
-                while let Some(event) = crate::platform::d1_touch::next_event() {
-                    crate::ui::main_screen::handle_main_screen_input(event);
-                }
-                
-                // Also check character queue for 'q' key directly
-                if crate::platform::d1_touch::has_char_input() {
-                    if let Some(ch) = crate::platform::d1_touch::peek_char() {
-                        if ch == b'q' || ch == b'Q' {
-                            crate::platform::d1_touch::consume_char();
-                            crate::ui::main_screen::request_cancel();
-                        }
-                    }
-                }
-                
-                // Copy from OUTPUT_CAPTURE to Terminal output buffer and redraw
-                crate::ui::main_screen::refresh_terminal_output();
+                enqueue_pending_ui_work();
+                crate::ui::input_queue::enqueue_refresh();
+                crate::services::gpuid::apply_queued_if_owner();
             }),
         )
         .map_err(|e| format!("define terminal_refresh: {:?}", e))?;
@@ -932,27 +918,25 @@ pub fn execute(wasm_bytes: &[u8], args: &[&str]) -> Result<String, String> {
                 // FIRST: Check the shared cancellation flag from SharedArrayBuffer
                 // This is set by the main thread when user clicks Cancel, presses 'q', ESC, or Ctrl+C
                 // This works across workers because it reads from SharedArrayBuffer via MMIO
-                let shared_cancel = unsafe { 
-                    core::ptr::read_volatile((0x0250_2000 + 0x130) as *const u32)
-                };
-                if shared_cancel != 0 {
+                #[cfg(feature = "d1")]
+                {
+                    let shared_cancel = unsafe {
+                        core::ptr::read_volatile((0x0250_2000 + 0x130) as *const u32)
+                    };
+                    if shared_cancel != 0 {
+                        return 1;
+                    }
+                }
+                
+                // SECOND: Guest-visible cancel flag (set by enqueue, not MAIN_SCREEN).
+                if crate::ui::input_queue::take_cancel() {
                     return 1;
                 }
                 
-                // SECOND: Check the kernel-side cancellation flag (set by Cancel button or Ctrl+C)
-                if crate::ui::main_screen::should_cancel() {
-                    return 1;
-                }
+                // THIRD: Poll HID into the gpuid queue (no direct scene mutation).
+                submit_ui_work();
                 
-                // THIRD: Poll for touch/keyboard events and process them
-                // This handles Cancel button clicks and key presses locally
-                crate::platform::d1_touch::poll();
-                while let Some(event) = crate::platform::d1_touch::next_event() {
-                    crate::ui::main_screen::handle_main_screen_input(event);
-                }
-                
-                // Check again after processing events (Cancel button might have been clicked)
-                if crate::ui::main_screen::should_cancel() {
+                if crate::ui::input_queue::take_cancel() {
                     return 1;
                 }
                 

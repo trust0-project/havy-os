@@ -45,9 +45,6 @@ const EMAC_RX_CUR_DESC: usize = 0xC4;    // RX Current Descriptor
 const EMAC_RX_CUR_BUF: usize = 0xC8;     // RX Current Buffer
 const EMAC_RGMII_STA: usize = 0xD0;      // RGMII Status
 
-// Custom VM extension register (for relay IP assignment)
-const EMAC_IP_CONFIG: usize = 0x100;     // IP address (VM extension)
-
 // Control Register Bits
 const CTL0_FULL_DUPLEX: u32 = 1 << 0;
 const CTL0_LOOPBACK: u32 = 1 << 1;
@@ -205,22 +202,6 @@ impl D1Emac {
     fn read_reg(&self, offset: usize) -> u32 {
         unsafe {
             read_volatile((self.base + offset) as *const u32)
-        }
-    }
-
-    /// Read IP address assigned by VM relay (VM extension register)
-    /// Returns Some([a, b, c, d]) if IP is assigned, None if not
-    pub fn get_config_ip(&self) -> Option<[u8; 4]> {
-        let ip_val = self.read_reg(EMAC_IP_CONFIG);
-        if ip_val == 0 {
-            None  // No IP assigned
-        } else {
-            Some([
-                ((ip_val >> 24) & 0xFF) as u8,
-                ((ip_val >> 16) & 0xFF) as u8,
-                ((ip_val >> 8) & 0xFF) as u8,
-                (ip_val & 0xFF) as u8,
-            ])
         }
     }
 

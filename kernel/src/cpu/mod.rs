@@ -2,8 +2,10 @@ use core::{arch::asm, cell::UnsafeCell, sync::atomic::{AtomicBool, AtomicU32, At
 
 use alloc::vec::Vec;
 
-use crate::{ Spinlock, boot::BOOT_READY, clint::get_time_ms, constants::{CLINT_MSIP_BASE, SCHED_DIAG_CAN_SCHEDULE, SCHED_DIAG_HART_ID, SCHED_DIAG_PICK_COUNT, SCHED_DIAG_PICK_RESULT, SCHED_DIAG_PROCESS_NAME, SCHED_DIAG_PROCESS_PID, SCHED_DIAG_REQUEUE_OK}, cpu::{self, process::{Context, Pid}}, fence_acquire, fence_memory, init, sbi, services::{gpuid, httpd, klogd::{self, klog_info}, netd, shelld, sysmond, tcpd}, trap, utils::update_sysinfo};
-use crate::dtb::DTB_ADDR;
+use crate::{ Spinlock, boot::BOOT_READY, clint::get_time_ms, cpu::{self, process::{Context, Pid}}, fence_acquire, fence_memory, init, sbi, services::{gpuid, httpd, klogd::{self, klog_info}, netd, shelld, sysmond, tcpd}, trap, utils::update_sysinfo};
+
+#[cfg(not(feature = "d1"))]
+use crate::constants::CLINT_MSIP_BASE;
 
 pub mod sched;
 pub mod process;
@@ -15,9 +17,9 @@ pub mod net_proxy;
 pub mod audio_proxy;
 pub mod chase_lev;
 
-pub(crate) const MAX_HARTS: usize = 128;
+/// Runtime hart table size. Must be `_max_hart_id + 1` (virt 8, D1 1).
+pub(crate) const MAX_HARTS: usize = crate::platform::current::MAX_HART_ID + 1;
 pub(crate) static HARTS_ONLINE: AtomicUsize = AtomicUsize::new(0);
-pub(crate) const CLINT_HART_COUNT: usize = 0x0200_0F00;
 
 /// Tracks which harts are actively running hart_loop() and ready for scheduling.
 /// This is set AFTER a hart enters hart_loop(), not just when it goes online.
@@ -43,15 +45,15 @@ static HART0_HOUSEKEEP_LAST: AtomicU64 = AtomicU64::new(0);
 /// attempting them on every idle loop iteration.
 const HART0_HOUSEKEEP_INTERVAL_MS: u64 = 50;
 
-/// Read the hart count from the CLINT register (set by emulator)
+/// Expected hart count: 1 on D1, otherwise DTB `cpu@*` / compatible `riscv`.
+#[cfg(feature = "d1")]
 pub(crate) fn get_expected_harts() -> usize {
-    let count = unsafe { core::ptr::read_volatile(CLINT_HART_COUNT as *const u32) } as usize;
-    // Clamp to valid range [1, MAX_HARTS]
-    if count == 0 {
-        1
-    } else {
-        count.min(MAX_HARTS)
-    }
+    1
+}
+
+#[cfg(not(feature = "d1"))]
+pub(crate) fn get_expected_harts() -> usize {
+    crate::dtb::cpu_count().clamp(1, MAX_HARTS)
 }
 
 /// Sleep for approximately the given milliseconds using WFI.
@@ -99,6 +101,13 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
     
     loop {
         let mut did_work = false;
+
+        // Hart 0 is the sole device owner. Drain secondary-hart requests
+        // before running another cooperative daemon tick so a long tick
+        // cannot starve callers blocked in request_io().
+        if hart_id == 0 && io_router::has_pending_io() {
+            did_work = io_router::dispatch_io() > 0;
+        }
         
         // Run scheduler round-robin: pick a process, run one tick, requeue, repeat
         // All harts participate in scheduling once the scheduler is active
@@ -107,6 +116,7 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
         if can_schedule {
             if let Some(process) = sched::SCHEDULER.pick_next(hart_id) {
                 did_work = true;
+                crate::trap::ensure_periodic_timer(hart_id);
                 
                 // Mark CPU as running this process
                 if let Some(cpu) = CPU_TABLE.get(hart_id) {
@@ -146,11 +156,6 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
         // the log/sysinfo tasks are time-gated to ~50 ms so they don't lock
         // subsystem state on every idle loop iteration.
         if hart_id == 0 {
-            // Process I/O requests from secondary harts (only if any pending).
-            if io_router::has_pending_io() {
-                io_router::dispatch_io();
-            }
-
             let now = get_time_ms() as u64;
             let last = HART0_HOUSEKEEP_LAST.load(Ordering::Relaxed);
             if now.wrapping_sub(last) >= HART0_HOUSEKEEP_INTERVAL_MS {
@@ -158,7 +163,6 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
                 klogd::flush_log_buffer();
                 klogd::klogd_tick();
                 sysmond::sysmond_tick();
-                // Update system info MMIO device (for emulator UI)
                 update_sysinfo();
             }
         }
@@ -180,6 +184,8 @@ pub(crate) fn hart_loop(hart_id: usize) -> ! {
                 let delta = sched::idle_timer_delta_ms(hart_id, 50);
                 if delta > 1 {
                     crate::trap::schedule_timer_interrupt_in_ms(hart_id, delta);
+                } else {
+                    crate::trap::ensure_periodic_timer(hart_id);
                 }
                 crate::perfstat::inc(crate::perfstat::id::IDLE_WFI);
                 unsafe {
@@ -250,10 +256,18 @@ pub fn is_msip_pending(hart_id: usize) -> bool {
     if hart_id >= MAX_HARTS {
         return false;
     }
-    let msip_addr = CLINT_MSIP_BASE + (hart_id * 4);
-    unsafe {
-        let val = core::ptr::read_volatile(msip_addr as *const u32);
-        val & 1 != 0
+    #[cfg(feature = "d1")]
+    {
+        let _ = hart_id;
+        false
+    }
+    #[cfg(not(feature = "d1"))]
+    {
+        let msip_addr = CLINT_MSIP_BASE + (hart_id * 4);
+        unsafe {
+            let val = core::ptr::read_volatile(msip_addr as *const u32);
+            val & 1 != 0
+        }
     }
 }
 
@@ -380,17 +394,14 @@ unsafe fn secondary_hart_park(hart_id: usize) -> ! {
 ///
 /// # S-mode Note
 /// In S-mode (riscv-rt s-mode feature), we cannot read mhartid CSR.
-/// riscv-rt passes hart ID as function parameter. We store it in tp 
+/// riscv-rt passes hart ID as the sole hook parameter. We store it in tp
 /// (thread pointer) for later access via get_hart_id().
+///
+/// The DTB pointer is not an `_mp_hook` argument; riscv-rt forwards it as
+/// `a1` to the `#[entry]` function after this hook returns.
 #[export_name = "_mp_hook"]
 #[inline(never)]
-pub unsafe extern "C" fn mp_hook(hart_id: usize, dtb_addr: usize) -> bool {
-    // Capture DTB address from a1 (OpenSBI passes DTB pointer here)
-    // Must be done early before a1 is clobbered by Rust code
-    if hart_id == 0 && dtb_addr != 0 {
-        DTB_ADDR.store(dtb_addr, Ordering::Release);
-    }
-    
+pub unsafe extern "Rust" fn mp_hook(hart_id: usize) -> bool {
     // Store hart_id in tp for later access via get_hart_id()
     asm!(
         "mv tp, {0}",

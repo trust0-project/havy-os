@@ -11,8 +11,8 @@
 
 use crate::services::klogd::klog_info;
 
-/// PLIC base address (matches VM's plic.rs)
-const PLIC_BASE: usize = 0x0C00_0000;
+/// PLIC base: virt `0x0C00_0000`, D1 T-Head `0x1000_0000`.
+const PLIC_BASE: usize = crate::platform::current::PLIC_BASE;
 
 /// Predefined IRQ numbers (must match VM's definitions)
 pub const VIRTIO_INPUT_IRQ: u32 = 1;
@@ -26,11 +26,45 @@ fn s_context(hart_id: usize) -> usize {
     hart_id * 2 + 1
 }
 
+#[inline]
+fn enable_addr(hart_id: usize) -> *mut u32 {
+    (PLIC_BASE + 0x002000 + 0x80 * s_context(hart_id)) as *mut u32
+}
+
+/// Mask one source for a hart. Safe to call from interrupt context.
+pub fn mask(hart_id: usize, irq: u32) {
+    if hart_id != 0 || irq >= 32 {
+        return;
+    }
+    unsafe {
+        let addr = enable_addr(hart_id);
+        let enabled = core::ptr::read_volatile(addr);
+        core::ptr::write_volatile(addr, enabled & !(1u32 << irq));
+    }
+}
+
+/// Unmask one source after its deferred process-context handler drained it.
+pub fn unmask(hart_id: usize, irq: u32) {
+    if hart_id != 0 || irq >= 32 {
+        return;
+    }
+    unsafe {
+        let addr = enable_addr(hart_id);
+        let enabled = core::ptr::read_volatile(addr);
+        core::ptr::write_volatile(addr, enabled | (1u32 << irq));
+    }
+}
+
 /// Initialize PLIC for a hart.
 ///
 /// Enables relevant interrupt sources and sets threshold to 0.
 /// Must be called during boot for each hart.
 pub fn init(hart_id: usize) {
+    // VM device emulation is owned by hart 0. Secondary harts receive work
+    // through IPIs and the kernel I/O router, never through external IRQs.
+    if hart_id != 0 {
+        return;
+    }
     let ctx = s_context(hart_id);
 
     unsafe {
@@ -43,11 +77,11 @@ pub fn init(hart_id: usize) {
 
         // Enable interrupt sources for this context
         // Enable bits at 0x002000 + 0x80 * context
-        let enable_addr = (PLIC_BASE + 0x002000 + 0x80 * ctx) as *mut u32;
+        let enable_reg = enable_addr(hart_id);
         let enable_mask = (1u32 << VIRTIO_INPUT_IRQ)
             | (1u32 << D1_TOUCH_IRQ)
             | (1u32 << UART_IRQ);
-        core::ptr::write_volatile(enable_addr, enable_mask);
+        core::ptr::write_volatile(enable_reg, enable_mask);
 
         // Set threshold to 0 (accept all priorities > 0)
         let threshold_addr = (PLIC_BASE + 0x200000 + 0x1000 * ctx) as *mut u32;

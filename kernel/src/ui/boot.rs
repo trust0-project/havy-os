@@ -8,10 +8,7 @@
 use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use embedded_graphics::{
-    pixelcolor::Rgb888,
-    prelude::*,
-};
+use embedded_graphics::{pixelcolor::Rgb888, prelude::*};
 
 use u8g2_fonts::{
     fonts,
@@ -22,15 +19,14 @@ use u8g2_fonts::{
 use crate::platform::d1_display;
 
 /// Maximum lines in the boot console buffer
-const MAX_LINES: usize = 50;
+const MAX_LINES: usize = 80;
 
 /// Maximum BYTES per line (UTF-8 box-drawing chars are 3 bytes each)
-/// A line with 80 Unicode chars could need up to 240 bytes
-const MAX_LINE_LEN: usize = 100;
+const MAX_LINE_LEN: usize = 160;
 
-/// Display dimensions (1024×768 display)
-const DISPLAY_WIDTH: u32 = 1024;
-const DISPLAY_HEIGHT: u32 = 768;
+/// Display dimensions (platform scanout)
+const DISPLAY_WIDTH: u32 = crate::platform::d1_display::DISPLAY_WIDTH;
+const DISPLAY_HEIGHT: u32 = crate::platform::d1_display::DISPLAY_HEIGHT;
 
 /// Font dimensions (9x15 X11 fixed font)
 const FONT_HEIGHT: u32 = 15;
@@ -46,8 +42,8 @@ const MARGIN_LEFT: i32 = 16;
 const MARGIN_TOP: i32 = 16;
 
 /// Colors
-const COLOR_BACKGROUND: Rgb888 = Rgb888::new(0, 0, 0);  // Black
-const COLOR_TEXT: Rgb888 = Rgb888::new(0, 255, 0);      // Bright green
+const COLOR_BACKGROUND: Rgb888 = Rgb888::new(0, 0, 0); // Black
+const COLOR_TEXT: Rgb888 = Rgb888::new(0, 255, 0); // Bright green
 
 /// Boot phase tracking
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -83,31 +79,31 @@ impl LineBuffer {
             line_count: 0,
         }
     }
-    
+
     /// Add a line to the buffer (scrolls if full)
     fn push_line(&mut self, text: &str) {
         let bytes = text.as_bytes();
         let len = bytes.len().min(MAX_LINE_LEN);
-        
+
         // Copy text to current position
         self.lines[self.write_pos][..len].copy_from_slice(&bytes[..len]);
         self.lengths[self.write_pos] = len;
-        
+
         // Advance write position (circular buffer)
         self.write_pos = (self.write_pos + 1) % MAX_LINES;
-        
+
         // Track total lines
         if self.line_count < MAX_LINES {
             self.line_count += 1;
         }
     }
-    
+
     /// Get line at display position (0 = oldest visible line)
     fn get_line(&self, display_idx: usize) -> Option<&str> {
         if display_idx >= self.line_count {
             return None;
         }
-        
+
         // Calculate actual buffer index
         let start = if self.line_count < MAX_LINES {
             0
@@ -116,7 +112,7 @@ impl LineBuffer {
         };
         let idx = (start + display_idx) % MAX_LINES;
         let len = self.lengths[idx];
-        
+
         core::str::from_utf8(&self.lines[idx][..len]).ok()
     }
 }
@@ -168,17 +164,17 @@ pub fn print_line(text: &str) {
     if !is_initialized() {
         return;
     }
-    
+
     // Skip empty lines - they're only for UART console visual separation
     // On GPU, we want compact consecutive messages
     if text.is_empty() || text == "\n" {
         return;
     }
-    
+
     unsafe {
         (*addr_of_mut!(CONSOLE)).push_line(text);
     }
-    
+
     // Auto-render after each line
     render();
 }
@@ -188,39 +184,35 @@ pub fn print_boot_msg(prefix: &str, msg: &str) {
     if !is_initialized() {
         return;
     }
-    
+
     // Format: "[prefix] msg" using static buffer
     let mut buf = [0u8; MAX_LINE_LEN];
     let mut pos = 0;
-    
+
     // Add prefix
     if !prefix.is_empty() {
         buf[pos] = b'[';
         pos += 1;
         let prefix_bytes = prefix.as_bytes();
         let len = prefix_bytes.len().min(20);
-        buf[pos..pos+len].copy_from_slice(&prefix_bytes[..len]);
+        buf[pos..pos + len].copy_from_slice(&prefix_bytes[..len]);
         pos += len;
         buf[pos] = b']';
         pos += 1;
         buf[pos] = b' ';
         pos += 1;
     }
-    
+
     // Add message
     let msg_bytes = msg.as_bytes();
     let len = msg_bytes.len().min(MAX_LINE_LEN - pos);
-    buf[pos..pos+len].copy_from_slice(&msg_bytes[..len]);
+    buf[pos..pos + len].copy_from_slice(&msg_bytes[..len]);
     pos += len;
-    
+
     if let Ok(line) = core::str::from_utf8(&buf[..pos]) {
         print_line(line);
     }
 }
-
-
-
-
 
 /// Batch depth counter: when > 0, render() skips flushing
 /// Uses reference counting so nested batch_begin/batch_end pairs work correctly
@@ -230,7 +222,9 @@ static mut BATCH_DEPTH: usize = 0;
 
 /// Enable batch mode (defer flushes until all batch_end calls complete)
 pub fn batch_begin() {
-    unsafe { BATCH_DEPTH += 1; }
+    unsafe {
+        BATCH_DEPTH += 1;
+    }
 }
 
 /// End batch mode - only flushes when all nested batches have ended
@@ -246,8 +240,6 @@ pub fn batch_end() {
     }
 }
 
-
-
 /// Render the boot console to the framebuffer.
 ///
 /// Incremental: while the console has not started scrolling (the common case
@@ -260,11 +252,11 @@ pub fn render() {
     if !is_initialized() || get_phase() != BootPhase::Console {
         return;
     }
-    
+
     // Calculate visible lines based on display area
     let visible_lines = ((DISPLAY_HEIGHT as i32 - MARGIN_TOP * 2) / LINE_HEIGHT as i32) as usize;
     let visible_lines = visible_lines.min(MAX_LINES);
-    
+
     unsafe {
         let line_count = CONSOLE.line_count;
         if line_count == 0 {
@@ -273,10 +265,10 @@ pub fn render() {
             }
             return;
         }
-        
+
         // Calculate scroll offset (how many lines scrolled off the top)
         let scroll_offset = line_count.saturating_sub(visible_lines);
-        
+
         // Incremental append is safe only when nothing above the new lines
         // moved: same scroll offset, strictly more lines than last render,
         // and not the first render. Once the ring buffer is full
@@ -286,22 +278,29 @@ pub fn render() {
         let incremental = LAST_RENDERED_LINE_COUNT > 0
             && scroll_offset == LAST_SCROLL_OFFSET
             && line_count > LAST_RENDERED_LINE_COUNT;
-        
+
         let num_to_show = line_count.min(visible_lines);
         let first_row = if incremental {
             LAST_RENDERED_LINE_COUNT.saturating_sub(scroll_offset)
         } else {
             0
         };
-        
+
         d1_display::with_gpu(|gpu| {
             if !incremental {
                 // Full redraw: clear the whole console text area
                 let console_height = (visible_lines as u32) * LINE_HEIGHT;
-                gpu.fill_rect(0, MARGIN_TOP as u32, DISPLAY_WIDTH, console_height,
-                    COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+                gpu.fill_rect(
+                    0,
+                    MARGIN_TOP as u32,
+                    DISPLAY_WIDTH,
+                    console_height,
+                    COLOR_BACKGROUND.r(),
+                    COLOR_BACKGROUND.g(),
+                    COLOR_BACKGROUND.b(),
+                );
             }
-            
+
             // Draw lines (all of them on full redraw, only the new ones on append)
             d1_display::begin_pixel_batch();
             for i in first_row..num_to_show {
@@ -310,8 +309,15 @@ pub fn render() {
                 if incremental {
                     // Clear just this line's band (plus a few rows for glyph
                     // descenders) before drawing it
-                    gpu.fill_rect(0, y_top as u32, DISPLAY_WIDTH, LINE_HEIGHT + 4,
-                        COLOR_BACKGROUND.r(), COLOR_BACKGROUND.g(), COLOR_BACKGROUND.b());
+                    gpu.fill_rect(
+                        0,
+                        y_top as u32,
+                        DISPLAY_WIDTH,
+                        LINE_HEIGHT + 4,
+                        COLOR_BACKGROUND.r(),
+                        COLOR_BACKGROUND.g(),
+                        COLOR_BACKGROUND.b(),
+                    );
                 }
                 let y = y_top + FONT_HEIGHT as i32;
                 if let Some(text) = CONSOLE.get_line(buffer_idx) {
@@ -328,10 +334,10 @@ pub fn render() {
             d1_display::end_pixel_batch();
             // Dirty region already marked by fill_rect -> fill_hline -> mark_dirty
         });
-        
+
         LAST_RENDERED_LINE_COUNT = line_count;
         LAST_SCROLL_OFFSET = scroll_offset;
-        
+
         // Only flush when not in any batch (BATCH_DEPTH == 0)
         if BATCH_DEPTH == 0 {
             d1_display::flush();

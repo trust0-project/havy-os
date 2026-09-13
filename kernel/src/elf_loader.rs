@@ -221,12 +221,17 @@ pub fn execute_elf_smode(loaded: &LoadedElf, args: &[&str]) -> i32 {
     
     // Initialize syscall context with args
     crate::syscall::init_context(static_args);
+    crate::fd::reset();
     
     let entry = loaded.entry;
     
-    // Allocate a stack for the binary (8KB)
-    let stack: alloc::boxed::Box<[u8]> = alloc::vec![0u8; 8192].into_boxed_slice();
+    // Allocate a stack for the binary (128 KiB from the DRAM pool)
+    const USER_STACK_SIZE: usize = 128 * 1024;
+    let stack: alloc::boxed::Box<[u8]> = alloc::vec![0u8; USER_STACK_SIZE].into_boxed_slice();
     let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
+
+    crate::paging::map_user(loaded.memory.as_ptr() as usize, loaded.memory.len());
+    crate::paging::map_user(stack.as_ptr() as usize, stack.len());
     
     // Run the binary as a function call in S-mode
     // Save callee-saved registers, switch stack, call entry, restore
@@ -305,6 +310,7 @@ pub fn execute_elf_smode(loaded: &LoadedElf, args: &[&str]) -> i32 {
     
     // Clear syscall context
     crate::syscall::clear_context();
+    crate::fd::clear();
     
     // Keep memory alive until here
     drop(stack);
@@ -367,6 +373,11 @@ pub fn signal_exit(code: i32) {
     }
 }
 
+/// True while an ELF is in U-mode (context exists and has not exited).
+pub fn is_running() -> bool {
+    unsafe { KERNEL_CTX.as_ref().is_some_and(|ctx| !ctx.exited) }
+}
+
 /// Check if binary has exited
 pub fn has_exited() -> Option<i32> {
     unsafe {
@@ -397,6 +408,7 @@ pub fn execute_elf(loaded: &LoadedElf, args: &[&str], caller_ra: u64, caller_sp:
     
     // Initialize syscall context
     crate::syscall::init_context(static_args);
+    crate::fd::reset();
 
     
     // Initialize kernel context for return
@@ -415,9 +427,13 @@ pub fn execute_elf(loaded: &LoadedElf, args: &[&str], caller_ra: u64, caller_sp:
     
     let entry = loaded.entry;
     
-    // Allocate a stack for the binary (8KB)  
-    let stack: alloc::boxed::Box<[u8]> = alloc::vec![0u8; 8192].into_boxed_slice();
+    // Allocate a stack for the binary (128 KiB from the DRAM pool)
+    const USER_STACK_SIZE: usize = 128 * 1024;
+    let stack: alloc::boxed::Box<[u8]> = alloc::vec![0u8; USER_STACK_SIZE].into_boxed_slice();
     let stack_top = stack.as_ptr() as u64 + stack.len() as u64;
+
+    crate::paging::map_user(loaded.memory.as_ptr() as usize, loaded.memory.len());
+    crate::paging::map_user(stack.as_ptr() as usize, stack.len());
     
     // Get pointer to kernel context
     let ctx_ptr = unsafe { KERNEL_CTX.as_mut().unwrap() as *mut KernelContext };
@@ -495,6 +511,7 @@ pub fn restore_kernel_context() -> ! {
         
         // Clear syscall context
         crate::syscall::clear_context();
+    crate::fd::clear();
         
         // Clear the kernel context
         unsafe {

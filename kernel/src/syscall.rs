@@ -149,18 +149,20 @@ pub fn handle_syscall(
         SYS_SLEEP => sys_sleep(a0 as u64),
         SYS_PERFSTAT => sys_perfstat(a0 as *mut u8, a1 as usize, a2),
 
+        SYS_OPEN => sys_open(a0 as *const u8, a1 as usize, a2 as i32),
+        SYS_CLOSE => crate::fd::sys_close(a0 as i32),
+        SYS_READ => crate::fd::sys_read(a0 as i32, a1 as *mut u8, a2 as usize),
+        SYS_WRITE => crate::fd::sys_write(a0 as i32, a1 as *const u8, a2 as usize),
+        SYS_LSEEK => crate::fd::sys_lseek(a0 as i32, a1 as i64, a2 as i32),
+        SYS_MMAP => crate::fd::sys_mmap(a0 as usize, a1 as i32),
+        SYS_MUNMAP => crate::fd::sys_munmap(a0, a1 as usize),
+        SYS_BRK => crate::fd::sys_brk(a0),
+
         // Unknown syscall
         _ => -1, // ENOSYS
     }
 }
 
-/// SYS_PERFSTAT: copy kernel performance counters to userspace.
-///
-/// * `out_ptr` - buffer for `max_counters` u64 values (little-endian)
-/// * `max_counters` - capacity of the buffer in u64 slots
-/// * `reset` - non-zero resets all counters after the snapshot
-///
-/// Returns the number of counters written.
 fn sys_perfstat(out_ptr: *mut u8, max_counters: usize, reset: u64) -> i64 {
     if out_ptr.is_null() || max_counters == 0 {
         return -1;
@@ -175,6 +177,15 @@ fn sys_perfstat(out_ptr: *mut u8, max_counters: usize, reset: u64) -> i64 {
         crate::perfstat::reset();
     }
     n as i64
+}
+
+fn sys_open(path_ptr: *const u8, path_len: usize, flags: i32) -> i64 {
+    unsafe {
+        if let Some(path) = read_str(path_ptr, path_len) {
+            return crate::fd::sys_open(path, flags);
+        }
+    }
+    -1
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -722,30 +733,26 @@ fn sys_shutdown() -> i64 {
     uart::write_line("\x1b[1;31m|\x1b[0m                    \x1b[1;97mSystem Shutdown Initiated\x1b[0m                       \x1b[1;31m|\x1b[0m");
     uart::write_line("\x1b[1;31m+===================================================================+\x1b[0m");
     uart::write_line("");
-    
-    unsafe {
-        core::ptr::write_volatile(crate::constants::TEST_FINISHER as *mut u32, 0x5555);
-    }
-    
-    loop {
-        core::hint::spin_loop();
-    }
+
+    crate::sbi::shutdown();
 }
 
 fn sys_should_cancel() -> i64 {
-    // Check shared cancellation flag from SharedArrayBuffer (WASM path)
-    let shared_cancel = unsafe {
-        core::ptr::read_volatile((0x0250_2000 + 0x130) as *const u32)
-    };
-    if shared_cancel != 0 {
-        return 1;
+    // D1 emulator cancel doorbell. Virt uses virtio-input / kernel flag.
+    #[cfg(feature = "d1")]
+    {
+        let shared_cancel = unsafe {
+            core::ptr::read_volatile((0x0250_2000 + 0x130) as *const u32)
+        };
+        if shared_cancel != 0 {
+            return 1;
+        }
     }
-    
-    // Check kernel-side cancellation flag
+
     if crate::ui::main_screen::should_cancel() {
         return 1;
     }
-    
+
     0
 }
 

@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 
 use embedded_graphics::pixelcolor::RgbColor;
 
+use crate::input::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use crate::platform::d1_display;
-use crate::platform::d1_touch::{self, InputEvent, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 
 use super::colors;
 use super::widgets::{Button, Label};
@@ -32,12 +32,12 @@ impl UiManager {
             main_screen_mode: false,
         }
     }
-    
+
     /// Set main screen mode - when true, render() becomes a no-op
     pub fn set_main_screen_mode(&mut self, mode: bool) {
         self.main_screen_mode = mode;
     }
-    
+
     /// Check if in main screen mode
     pub fn is_main_screen_mode(&self) -> bool {
         self.main_screen_mode
@@ -119,7 +119,7 @@ impl UiManager {
         if self.main_screen_mode {
             return;
         }
-        
+
         if !self.dirty {
             return;
         }
@@ -205,9 +205,9 @@ pub fn render_and_flush() {
 
 /// Poll for input and handle it
 pub fn poll_input() -> Option<usize> {
-    d1_touch::poll();
+    crate::input::poll();
 
-    if let Some(event) = d1_touch::next_event() {
+    if let Some(event) = crate::input::next_event() {
         with_ui(|ui| ui.handle_input(event)).flatten()
     } else {
         None

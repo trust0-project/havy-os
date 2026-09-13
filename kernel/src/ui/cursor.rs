@@ -1,19 +1,22 @@
 //! Cursor and Mouse Handling
 //!
-//! Manages cursor position, visibility, and rendering.
+//! Position is always tracked in guest logical pixels for hit-testing.
+//! Browser HDL: CSS cursor; do not software-paint or republish on move.
+//! Native / D1 / unpublished FB: last HDL `OpImage` (tex 2) or I-beam
+//! fill rects; `scene` dirties on move.
 
 use core::ptr::addr_of_mut;
 
+use crate::input::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::platform::d1_display;
-use crate::platform::d1_touch::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 
 use super::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// Mouse/cursor state
-pub static mut CURSOR_X: i32 = 512;  // Start at center of 1024x768
-pub static mut CURSOR_Y: i32 = 384;
+pub static mut CURSOR_X: i32 = crate::ui::SCREEN_WIDTH / 2;
+pub static mut CURSOR_Y: i32 = crate::ui::SCREEN_HEIGHT / 2;
 static mut CURSOR_VISIBLE: bool = false;
-static mut MOUSE_BUTTONS: u8 = 0;  // Bitmask: bit 0 = left, bit 1 = right, bit 2 = middle
+static mut MOUSE_BUTTONS: u8 = 0; // Bitmask: bit 0 = left, bit 1 = right, bit 2 = middle
 
 /// Get current cursor position
 pub fn get_cursor_pos() -> (i32, i32) {
@@ -31,10 +34,10 @@ pub fn set_cursor_pos(x: i32, y: i32) {
 
 /// Set mouse button state
 pub fn set_mouse_button(button: u16, pressed: bool) {
-    use crate::platform::d1_touch::BTN_TOUCH;
+    use crate::input::BTN_TOUCH;
     unsafe {
         let bit = match button {
-            BTN_LEFT | BTN_TOUCH => 0,  // BTN_TOUCH acts like left mouse button
+            BTN_LEFT | BTN_TOUCH => 0, // BTN_TOUCH acts like left mouse button
             BTN_RIGHT => 1,
             BTN_MIDDLE => 2,
             _ => return,
@@ -72,38 +75,39 @@ static mut CURSOR_BACKUP_VALID: bool = false;
 /// Cursor bitmap (1 = white, 2 = black border, 0 = transparent)
 /// Arrow cursor pointing top-left
 const CURSOR_BITMAP: [u8; CURSOR_W * CURSOR_H] = [
-    1,0,0,0,0,0,0,0,0,0,0,0,
-    1,1,0,0,0,0,0,0,0,0,0,0,
-    1,2,1,0,0,0,0,0,0,0,0,0,
-    1,2,2,1,0,0,0,0,0,0,0,0,
-    1,2,2,2,1,0,0,0,0,0,0,0,
-    1,2,2,2,2,1,0,0,0,0,0,0,
-    1,2,2,2,2,2,1,0,0,0,0,0,
-    1,2,2,2,2,2,2,1,0,0,0,0,
-    1,2,2,2,2,2,2,2,1,0,0,0,
-    1,2,2,2,2,2,2,2,2,1,0,0,
-    1,2,2,2,2,1,1,1,1,1,1,0,
-    1,2,2,1,2,1,0,0,0,0,0,0,
-    1,2,1,0,1,2,1,0,0,0,0,0,
-    1,1,0,0,1,2,1,0,0,0,0,0,
-    1,0,0,0,0,1,2,1,0,0,0,0,
-    0,0,0,0,0,1,1,0,0,0,0,0,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 2,
+    2, 1, 0, 0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0,
+    1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 1, 2, 2, 2, 2, 1, 1, 1,
+    1, 1, 1, 0, 1, 2, 2, 1, 2, 1, 0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 1, 2, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0,
+    1, 2, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0,
 ];
 
 /// Restore pixels under cursor (call before moving cursor)
 pub fn restore_cursor_backup() {
+    if !crate::ui::scene::use_immediate_painter() {
+        return;
+    }
     let (px, py) = unsafe { (CURSOR_PREV_X, CURSOR_PREV_Y) };
     if !unsafe { CURSOR_BACKUP_VALID } || px < 0 || py < 0 {
         return;
     }
-    
+
     // Use batch write for faster restore
     d1_display::with_gpu(|gpu| {
-        gpu.write_rect(px as u32, py as u32, CURSOR_W, CURSOR_H, 
-            unsafe { &CURSOR_BACKUP }, &CURSOR_BITMAP);
+        gpu.write_rect(
+            px as u32,
+            py as u32,
+            CURSOR_W,
+            CURSOR_H,
+            unsafe { &CURSOR_BACKUP },
+            &CURSOR_BITMAP,
+        );
     });
-    
-    unsafe { CURSOR_BACKUP_VALID = false; }
+
+    unsafe {
+        CURSOR_BACKUP_VALID = false;
+    }
 }
 
 /// Save pixels under cursor location
@@ -111,46 +115,52 @@ fn save_cursor_backup(x: i32, y: i32) {
     if x < 0 || y < 0 {
         return;
     }
-    
+
     // Use batch read for faster save
     d1_display::with_gpu(|gpu| {
-        gpu.read_rect(x as u32, y as u32, CURSOR_W, CURSOR_H, 
-            unsafe { &mut *addr_of_mut!(CURSOR_BACKUP) });
+        gpu.read_rect(x as u32, y as u32, CURSOR_W, CURSOR_H, unsafe {
+            &mut *addr_of_mut!(CURSOR_BACKUP)
+        });
     });
-    unsafe { CURSOR_BACKUP_VALID = true; }
+    unsafe {
+        CURSOR_BACKUP_VALID = true;
+    }
 }
 
 /// Draw cursor at current position - proper arrow pointer with bitmap
 pub fn draw_cursor() {
+    if !crate::ui::scene::use_immediate_painter() || crate::ui::hdl_mailbox::mailbox_present() {
+        return;
+    }
     let (x, y) = unsafe { (CURSOR_X, CURSOR_Y) };
     let (px, py) = unsafe { (CURSOR_PREV_X, CURSOR_PREV_Y) };
-    
+
     if !unsafe { CURSOR_VISIBLE } {
         return;
     }
-    
+
     // Check if backup was invalidated (UI was redrawn)
     let needs_refresh = !unsafe { CURSOR_BACKUP_VALID };
-    
+
     // Skip if position hasn't changed AND backup is valid
     if x == px && y == py && !needs_refresh {
         return;
     }
-    
+
     // Restore previous cursor location (only if backup is valid)
     if unsafe { CURSOR_BACKUP_VALID } {
         restore_cursor_backup();
     }
-    
+
     // Save pixels at new location
     save_cursor_backup(x, y);
-    
+
     // Update previous position
     unsafe {
         CURSOR_PREV_X = x;
         CURSOR_PREV_Y = y;
     }
-    
+
     // Draw cursor using batched bitmap write
     d1_display::with_gpu(|gpu| {
         gpu.draw_cursor_bitmap(x, y, CURSOR_W, CURSOR_H, &CURSOR_BITMAP);

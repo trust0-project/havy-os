@@ -10,3 +10,4 @@ tasks/**
 
 # Native bindings (built in CI, not committed)
 riscv-vm/native/*.node
+docs

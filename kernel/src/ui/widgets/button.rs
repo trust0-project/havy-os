@@ -72,4 +72,16 @@ impl Button {
 
         Ok(())
     }
+
+    /// Emit HDL nodes matching the main-screen quick-action look.
+    pub fn emit(&self, b: &mut crate::ui::scene::Builder<'_>) {
+        b.button(
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            self.selected,
+            self.label.as_bytes(),
+        );
+    }
 }

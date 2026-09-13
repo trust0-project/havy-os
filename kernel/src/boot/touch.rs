@@ -1,5 +1,10 @@
-use crate::{ platform};
-
 pub fn init_touch() {
-    platform::d1_touch::init();
+    #[cfg(feature = "d1")]
+    {
+        let _ = crate::platform::d1_touch::init();
+    }
+    #[cfg(not(feature = "d1"))]
+    {
+        let _ = crate::virtio_input::init();
+    }
 }

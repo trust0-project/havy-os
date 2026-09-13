@@ -14,30 +14,26 @@ const BEEP_FREQ: u32 = 440;
 const BEEP_DURATION_MS: u32 = 200;
 
 pub fn init_audio() {
-    if platform::d1_audio::init().is_ok() {
-        // Configure audio device
-        platform::d1_audio::set_sample_rate(SAMPLE_RATE);
-        platform::d1_audio::set_enabled(true);
-        
-        // Play boot beep - simple sine wave at 440Hz
-        play_boot_beep();
-        
-        // Disable after beep (kernel will re-enable when needed)
-        platform::d1_audio::set_enabled(false);
+    #[cfg(feature = "d1")]
+    {
+        if platform::d1_audio::init().is_ok() {
+            platform::d1_audio::set_sample_rate(SAMPLE_RATE);
+            platform::d1_audio::set_enabled(true);
+            play_boot_beep();
+            platform::d1_audio::set_enabled(false);
+        }
     }
 }
 
 /// Play a beep sound (can be called anytime after boot)
 pub fn play_beep() {
-    // Configure and enable
-    platform::d1_audio::set_sample_rate(SAMPLE_RATE);
-    platform::d1_audio::set_enabled(true);
-    
-    // Play the beep
-    play_boot_beep();
-    
-    // Disable after beep
-    platform::d1_audio::set_enabled(false);
+    #[cfg(feature = "d1")]
+    {
+        platform::d1_audio::set_sample_rate(SAMPLE_RATE);
+        platform::d1_audio::set_enabled(true);
+        play_boot_beep();
+        platform::d1_audio::set_enabled(false);
+    }
 }
 
 /// Play a simple sine wave beep for testing
@@ -61,9 +57,14 @@ fn play_boot_beep() {
         // Write stereo sample (same on both channels)
         // Retry a few times if buffer is full
         for _ in 0..10 {
-            if platform::d1_audio::write_stereo(sample, sample) {
-                break;
+            #[cfg(feature = "d1")]
+            {
+                if platform::d1_audio::write_stereo(sample, sample) {
+                    break;
+                }
             }
+            #[cfg(not(feature = "d1"))]
+            break;
             // Brief spin wait if buffer full
             for _ in 0..100 {
                 core::hint::spin_loop();

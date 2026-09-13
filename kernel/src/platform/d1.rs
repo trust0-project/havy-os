@@ -24,11 +24,7 @@ pub const DRAM_BASE: usize = 0x4000_0000;
 /// Kernel load address (after OpenSBI's 2MB reservation)
 pub const KERNEL_START: usize = 0x4020_0000;
 
-/// Heap start address (kernel + 4MB)
-pub const HEAP_START: usize = 0x4060_0000;
-
-/// Heap size (56 MB, leaving room for framebuffer etc)
-pub const HEAP_SIZE: usize = 56 * 1024 * 1024;
+/// Heap is sized by `d1.ld` (`_sheap` .. `_eheap`); leftover DRAM after FB + stacks.
 
 /// Total DRAM size (512 MB on Lichee RV 86)
 pub const DRAM_SIZE: usize = 512 * 1024 * 1024;
@@ -63,11 +59,21 @@ pub const GPIO_BASE: usize = 0x0200_0000;
 /// UART0 base address (debug console)
 pub const UART_BASE: usize = 0x0250_0000;
 
+/// DesignWare APB UART register stride (16550 numbers × 4)
+pub const UART_STRIDE: usize = 4;
+
 /// UART1 base address
 pub const UART1_BASE: usize = 0x0250_0400;
 
 /// UART2 base address
 pub const UART2_BASE: usize = 0x0250_0800;
+
+// ============================================================================
+// PLIC (T-Head)
+// ============================================================================
+
+/// T-Head PLIC base address
+pub const PLIC_BASE: usize = 0x1000_0000;
 
 // ============================================================================
 // SD/MMC Controller
@@ -149,11 +155,19 @@ pub const HAS_VIRTIO: bool = false;
 // Display Configuration (Lichee RV 86 Panel)
 // ============================================================================
 
-/// Display width (1024x768 display)
-pub const DISPLAY_WIDTH: usize = 1024;
+/// ST7701 panel on Lichee RV 86: 480×480.
+pub const DISPLAY_WIDTH: u32 = 480;
+pub const DISPLAY_HEIGHT: u32 = 480;
+/// 480×4 = 1920 is not a multiple of 256; pad for WebGPU `bytesPerRow`.
+pub const FB_STRIDE: usize = 2048;
+/// Same DRAM-relative offsets as virt, but inside D1 DRAM (`0x4000_0000`).
+pub const FB_META_OFFSET: usize = 0x00FF_F000;
+pub const FB_OFFSET: usize = 0x0100_0000;
+pub const FB_META_ADDR: usize = DRAM_BASE + FB_META_OFFSET;
+pub const FB_ADDR: usize = DRAM_BASE + FB_OFFSET;
 
-/// Display height (1024x768 display)
-pub const DISPLAY_HEIGHT: usize = 768;
+/// Inclusive max hart id. Matches `d1.ld`.
+pub const MAX_HART_ID: usize = 0;
 
 /// Panel controller: ST7701S
 pub const PANEL_TYPE: &str = "st7701s";

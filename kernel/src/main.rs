@@ -1,11 +1,20 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(feature = "d1"))]
 core::arch::global_asm!(
     ".global _max_hart_id",
-    "_max_hart_id = 127",
+    "_max_hart_id = 7",
     ".global _hart_stack_size",
-    "_hart_stack_size = 0x10000"
+    "_hart_stack_size = 0x20000"
+);
+
+#[cfg(feature = "d1")]
+core::arch::global_asm!(
+    ".global _max_hart_id",
+    "_max_hart_id = 0",
+    ".global _hart_stack_size",
+    "_hart_stack_size = 0x20000"
 );
 
 mod allocator;
@@ -48,6 +57,11 @@ mod plic;
 mod syscall_numbers;
 mod syscall;
 mod elf_loader;
+mod paging;
+#[cfg(not(feature = "d1"))]
+mod virtio_input;
+mod input;
+mod fd;
 
 pub use cpu::CPU_TABLE;
 pub use cpu::process::PROCESS_TABLE;
@@ -66,7 +80,11 @@ use lock::state::shell::ShellCmdState;
 use crate::lock::utils::SHELL_CMD_STATE;
 
 #[entry]
-fn main() -> ! {
+fn main(hart_id: usize, dtb_addr: usize) -> ! {
+    debug_assert_eq!(hart_id, 0);
+    if dtb_addr != 0 {
+        crate::dtb::DTB_ADDR.store(dtb_addr, core::sync::atomic::Ordering::Release);
+    }
     uart::Console::init();
     allocator::init();
     init_boot();

@@ -31,6 +31,7 @@ pub(crate) static BOOT_READY: AtomicBool = AtomicBool::new(false);
 pub fn init_boot() {
     init_logger();
     init_dtb();
+    crate::paging::init();
     init_gpu();
     init_cpu();
     init_memory();

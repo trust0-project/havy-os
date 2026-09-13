@@ -32,6 +32,7 @@
 //! ```
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::services::klogd::{klog_debug, klog_info, klog_trace, klog_warning};
 
@@ -59,8 +60,20 @@ pub mod cause {
     pub const STORE_PAGE_FAULT: usize = 15;
 }
 
-/// Timer interval in cycles (approximately 1ms at 10MHz for responsive input)
+/// Timer interval in cycles for a 1 ms tick.
+/// virt: 10_000 @ 10 MHz CLINT; d1: 24_000 @ 24 MHz `rdtime`.
+#[cfg(not(feature = "d1"))]
 const TIMER_INTERVAL: u64 = 10_000;
+#[cfg(feature = "d1")]
+const TIMER_INTERVAL: u64 = 24_000;
+
+const TIMER_MODE_PERIODIC: u8 = 0;
+const TIMER_MODE_IDLE: u8 = 1;
+const TIMER_MODE_NEEDS_REARM: u8 = 2;
+static TIMER_MODE: [AtomicU8; crate::cpu::MAX_HARTS] = {
+    const INIT: AtomicU8 = AtomicU8::new(TIMER_MODE_PERIODIC);
+    [INIT; crate::cpu::MAX_HARTS]
+};
 
 /// Read the current time via the `time` CSR
 #[inline]
@@ -77,7 +90,10 @@ pub fn read_mtime() -> u64 {
 }
 
 /// Schedule the next timer interrupt using SBI
-pub fn schedule_timer_interrupt(_hart_id: usize) {
+pub fn schedule_timer_interrupt(hart_id: usize) {
+    if hart_id < crate::cpu::MAX_HARTS {
+        TIMER_MODE[hart_id].store(TIMER_MODE_PERIODIC, Ordering::Release);
+    }
     let current = read_mtime();
     crate::sbi::set_timer(current.wrapping_add(TIMER_INTERVAL));
 }
@@ -87,14 +103,29 @@ pub fn schedule_timer_interrupt(_hart_id: usize) {
 /// Used by the idle path to sleep longer than the 1 ms busy tick: an idle
 /// hart with no due deadlines wakes on IPI (new work / parked wake) and
 /// only needs the timer as a deadline backstop.
-pub fn schedule_timer_interrupt_in_ms(_hart_id: usize, ms: u64) {
+pub fn schedule_timer_interrupt_in_ms(hart_id: usize, ms: u64) {
+    if hart_id < crate::cpu::MAX_HARTS {
+        TIMER_MODE[hart_id].store(TIMER_MODE_IDLE, Ordering::Release);
+    }
     let current = read_mtime();
-    // 10 MHz mtime: 10_000 ticks per millisecond.
-    crate::sbi::set_timer(current.wrapping_add(ms.max(1) * 10_000));
+    crate::sbi::set_timer(current.wrapping_add(ms.max(1) * TIMER_INTERVAL));
 }
 
-/// Enable supervisor-mode interrupts
-pub fn enable_interrupts() {
+/// Restore the 1 ms cooperative checkpoint after an IPI/external wake ended
+/// a long idle sleep.
+pub fn ensure_periodic_timer(hart_id: usize) {
+    if hart_id < crate::cpu::MAX_HARTS
+        && TIMER_MODE[hart_id].load(Ordering::Acquire) != TIMER_MODE_PERIODIC
+    {
+        schedule_timer_interrupt(hart_id);
+    }
+}
+
+/// Enable supervisor-mode interrupts for one hart.
+///
+/// The VM assigns all emulated devices and PLIC delivery to hart 0.
+/// Secondary harts receive only timer and software interrupts.
+pub fn enable_interrupts(hart_id: usize) {
     unsafe {
         // Enable SIE (Supervisor Interrupt Enable) in sstatus
         asm!(
@@ -102,12 +133,13 @@ pub fn enable_interrupts() {
             options(nomem, nostack)
         );
         
-        // Enable timer, software, and external interrupts in sie
+        // Enable timer and software interrupts everywhere; external
+        // interrupts are BSP-only by the VM/kernel device-owner contract.
         // STIE = bit 5, SSIE = bit 1, SEIE = bit 9
+        let sie_mask = if hart_id == 0 { 0x222usize } else { 0x22usize };
         asm!(
-            "li t0, 0x222",
-            "csrs sie, t0",
-            out("x5") _,
+            "csrs sie, {mask}",
+            mask = in(reg) sie_mask,
             options(nomem, nostack)
         );
     }
@@ -121,6 +153,35 @@ pub fn disable_interrupts() {
             "csrci sstatus, 0x2",  // Clear SIE bit
             options(nomem, nostack)
         );
+    }
+}
+
+/// Disable S-mode interrupts and return the previous `sstatus`.
+///
+/// Used to make check-then-WFI waits race-free: an IPI that arrives after the
+/// condition check remains pending until the caller restores SIE.
+#[inline]
+pub fn disable_interrupts_save() -> usize {
+    let previous: usize;
+    let sie = 0x2usize;
+    unsafe {
+        asm!(
+            "csrrc {previous}, sstatus, {sie}",
+            previous = out(reg) previous,
+            sie = in(reg) sie,
+            options(nomem, nostack),
+        );
+    }
+    previous
+}
+
+/// Restore SIE to the state captured by [`disable_interrupts_save`].
+#[inline]
+pub fn restore_interrupts(previous_sstatus: usize) {
+    if previous_sstatus & 0x2 != 0 {
+        unsafe {
+            asm!("csrsi sstatus, 0x2", options(nomem, nostack));
+        }
     }
 }
 
@@ -234,8 +295,16 @@ fn handle_timer_interrupt(hart_id: usize) {
         cpu.enter_interrupt();
     }
     
-    // Schedule next timer interrupt via SBI
-    schedule_timer_interrupt(hart_id);
+    // A long idle deadline is one-shot. Let hart_loop decide whether to arm
+    // another idle deadline or restore the 1 ms cooperative checkpoint.
+    let mode = if hart_id < crate::cpu::MAX_HARTS {
+        TIMER_MODE[hart_id].swap(TIMER_MODE_NEEDS_REARM, Ordering::AcqRel)
+    } else {
+        TIMER_MODE_PERIODIC
+    };
+    if mode != TIMER_MODE_IDLE {
+        schedule_timer_interrupt(hart_id);
+    }
     
     // Set yield pending flag - actual context switch happens in hart_loop
     // NOTE: We cannot call switch_context() from here because we're inside
@@ -251,6 +320,10 @@ fn handle_timer_interrupt(hart_id: usize) {
 /// Handle software interrupt (IPI) via SBI
 fn handle_software_interrupt(hart_id: usize) {
     crate::sbi::clear_ipi();
+    // Keep interrupt context lock-free. This atomic wake hint makes the
+    // cooperative scheduler sweep parked work immediately after trap return;
+    // hart 0 also observes io_router::has_pending_io() in its loop.
+    crate::cpu::sched::handle_ipi(hart_id);
     
     if let Some(cpu) = crate::cpu::CPU_TABLE.get(hart_id) {
         cpu.enter_interrupt();
@@ -286,16 +359,13 @@ fn handle_external_interrupt(hart_id: usize) {
     // Dispatch based on IRQ number
     match irq {
         plic::VIRTIO_INPUT_IRQ => {
-            // VirtIO Input device has events ready
-            handle_input_interrupt();
+            handle_input_interrupt(hart_id, irq);
         }
         plic::D1_TOUCH_IRQ => {
-            // D1 Touch device has events ready
-            handle_input_interrupt();
+            handle_input_interrupt(hart_id, irq);
         }
         plic::UART_IRQ => {
-            // UART has received data
-            // Shell currently polls UART, so just acknowledge
+            // Host input wakes the VM worker directly; the shell drains RX.
         }
         _ => {
             klog_warning(
@@ -311,11 +381,11 @@ fn handle_external_interrupt(hart_id: usize) {
 
 /// Handle input device interrupt.
 /// Called when VirtIO Input or D1 Touch has pending events.
-fn handle_input_interrupt() {
-    // Poll the device to transfer events from hardware to software queue
-    crate::cpu::display_proxy::touch_poll();
-    
-    // Signal gpuid that input is ready
+fn handle_input_interrupt(hart_id: usize, irq: u32) {
+    // Polling virtio queues in interrupt context can deadlock if gpuid was
+    // interrupted while it owned the same driver state. Mask this level IRQ;
+    // gpuid drains and unmasks it from process context.
+    crate::plic::mask(hart_id, irq);
     crate::services::gpuid::signal_input_ready();
 }
 
@@ -384,11 +454,33 @@ fn handle_exception(hart_id: usize, cause: usize, frame: *mut u64) {
                 );
             }
         }
+        cause::INSTRUCTION_PAGE_FAULT
+        | cause::LOAD_PAGE_FAULT
+        | cause::STORE_PAGE_FAULT => {
+            crate::paging::handle_fault(cause, sepc, stval);
+        }
         _ => {
-            panic!(
-                "EXCEPTION on hart {}: cause={} sepc={:#x} stval={:#x}",
-                hart_id, cause, sepc, stval
+            klog_warning(
+                "trap",
+                &alloc::format!(
+                    "EXCEPTION on hart {}: cause={} sepc={:#x} stval={:#x}",
+                    hart_id, cause, sepc, stval
+                ),
             );
+            if crate::elf_loader::is_running() {
+                crate::elf_loader::signal_exit(-1);
+                crate::elf_loader::restore_kernel_context();
+            }
+            // Skip the instruction rather than panic (Bare leftovers, misaligned, etc.).
+            unsafe {
+                asm!(
+                    "csrr t0, sepc",
+                    "addi t0, t0, 4",
+                    "csrw sepc, t0",
+                    out("x5") _,
+                    options(nomem, nostack)
+                );
+            }
         }
     }
 }
@@ -481,7 +573,7 @@ pub fn init(hart_id: usize) {
     set_trap_vector(handler_addr);
     
     schedule_timer_interrupt(hart_id);
-    enable_interrupts();
+    enable_interrupts(hart_id);
     
     klog_info(
         "trap",

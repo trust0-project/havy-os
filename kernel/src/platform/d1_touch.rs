@@ -15,7 +15,14 @@
 //! - 0x118: Y resolution
 
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicBool, Ordering};
 use crate::Spinlock;
+use crate::input::InputEvent;
+
+pub use crate::input::{
+    EV_SYN, EV_KEY, EV_ABS, EV_CHAR, ABS_X, ABS_Y, BTN_TOUCH, BTN_LEFT, BTN_RIGHT, BTN_MIDDLE,
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_SPACE, KEY_BACKSPACE, KEY_ESC,
+};
 
 // D1 I2C2 base (where GT911 touch controller is attached)
 const D1_I2C2_BASE: usize = 0x0250_2000;
@@ -38,46 +45,7 @@ const KEY_STATE: usize = D1_I2C2_BASE + 0x124;   // Key state (1=pressed, 0=rele
 const CHAR_COUNT: usize = D1_I2C2_BASE + 0x128;  // Number of pending characters
 const CHAR_CODE: usize = D1_I2C2_BASE + 0x12C;   // Character ASCII code
 
-// Event types (compatible with VirtIO Input / Linux evdev)
-pub const EV_SYN: u16 = 0x00;
-pub const EV_KEY: u16 = 0x01;
-pub const EV_ABS: u16 = 0x03;
-pub const EV_CHAR: u16 = 0x10;  // Custom: typed character (code = ASCII value)
-
-// Absolute axis codes
-pub const ABS_X: u16 = 0x00;
-pub const ABS_Y: u16 = 0x01;
-
-// Key codes (for touch buttons)
-pub const BTN_TOUCH: u16 = 0x14A;
-pub const BTN_LEFT: u16 = 0x110;   // Mouse left button (for compatibility)
-pub const BTN_RIGHT: u16 = 0x111;  // Mouse right button (for compatibility)
-pub const BTN_MIDDLE: u16 = 0x112; // Mouse middle button (for compatibility)
-
-// Keyboard key codes (for compatibility with VirtIO Input replacement)
-pub const KEY_UP: u16 = 103;
-pub const KEY_DOWN: u16 = 108;
-pub const KEY_LEFT: u16 = 105;
-pub const KEY_RIGHT: u16 = 106;
-pub const KEY_ENTER: u16 = 28;
-pub const KEY_SPACE: u16 = 57;
-pub const KEY_BACKSPACE: u16 = 14;
-pub const KEY_ESC: u16 = 1;
-
-/// Input event structure (compatible with VirtIO Input / evdev)
-#[derive(Clone, Copy, Debug, Default)]
-pub struct InputEvent {
-    pub event_type: u16,
-    pub code: u16,
-    pub value: i32,
-}
-
-impl InputEvent {
-    /// Check if this is a key press event (EV_KEY with value 1)
-    pub fn is_key_press(&self) -> bool {
-        self.event_type == EV_KEY && self.value == 1
-    }
-}
+// Event types come from crate::input.
 
 /// Touch driver state - protected by Spinlock for thread safety
 struct TouchState {
@@ -146,22 +114,29 @@ fn write_reg(addr: usize, value: u32) {
     unsafe { write_volatile(addr as *mut u32, value) }
 }
 
-/// Initialize the GT911 touchscreen driver
+/// Whether FT6336U answered on TWI (hardware). Emulator uses MMIO.
+static USE_TWI: AtomicBool = AtomicBool::new(false);
+
+/// Initialize the GT911/FT6336U touchscreen driver
 pub fn init() -> Result<(), &'static str> {
-    // Read resolution from device
+    if twi_probe_ft6336() {
+        USE_TWI.store(true, Ordering::Release);
+        return Ok(());
+    }
     let _x_res = read_reg(TOUCH_X_RES);
     let _y_res = read_reg(TOUCH_Y_RES);
-    
-    // Clear any pending interrupts
     write_reg(TOUCH_INT_STATUS, 0);
     write_reg(TOUCH_STATUS, 0);
-    
     Ok(())
 }
 
 /// Poll for touch and keyboard events and queue them
 /// Thread-safe: can be called from any hart
 pub fn poll() {
+    if USE_TWI.load(Ordering::Acquire) {
+        ft6336_poll();
+        return;
+    }
     // First, poll for typed characters (respects keyboard layout)
     // These are used for Terminal window text input
     loop {
@@ -336,4 +311,137 @@ pub fn peek_char() -> Option<u8> {
 /// Consume the current character from the queue
 pub fn consume_char() {
     write_reg(CHAR_COUNT, 0);
+}
+
+// ── TWI2 + FT6336U (hardware). Emulator probe fails and stays on MMIO. ──
+
+const TWI_BASE: usize = 0x0250_2000;
+const TWI_DATA: usize = 0x08;
+const TWI_CNTR: usize = 0x0C;
+const TWI_STAT: usize = 0x10;
+const TWI_CCR: usize = 0x14;
+const TWI_SRST: usize = 0x18;
+const FT_ADDR: u8 = 0x38;
+const FT_ID_REG: u8 = 0xA3;
+const FT_TD_STATUS: u8 = 0x02;
+
+const CNTR_BUS_EN: u32 = 1 << 6;
+const CNTR_M_STA: u32 = 1 << 5;
+const CNTR_M_STP: u32 = 1 << 4;
+const CNTR_INT_FLAG: u32 = 1 << 3;
+const CNTR_A_ACK: u32 = 1 << 2;
+
+fn twi_wait_flag() -> Option<u32> {
+    for _ in 0..50_000 {
+        let c = read_reg(TWI_BASE + TWI_CNTR);
+        if (c & CNTR_INT_FLAG) != 0 {
+            return Some(read_reg(TWI_BASE + TWI_STAT) & 0xFF);
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+fn twi_clear_flag(ack: bool, extra: u32) {
+    let mut c = read_reg(TWI_BASE + TWI_CNTR);
+    c &= !CNTR_INT_FLAG;
+    if ack {
+        c |= CNTR_A_ACK;
+    } else {
+        c &= !CNTR_A_ACK;
+    }
+    write_reg(TWI_BASE + TWI_CNTR, c | extra);
+}
+
+fn twi_stop() {
+    let mut c = read_reg(TWI_BASE + TWI_CNTR);
+    c |= CNTR_M_STP;
+    c &= !CNTR_INT_FLAG;
+    write_reg(TWI_BASE + TWI_CNTR, c);
+}
+
+fn twi_read_reg(reg: u8) -> Option<u8> {
+    write_reg(TWI_BASE + TWI_SRST, 1);
+    for _ in 0..1000 {
+        core::hint::spin_loop();
+    }
+    write_reg(TWI_BASE + TWI_SRST, 0);
+    write_reg(TWI_BASE + TWI_CCR, 0x43);
+    write_reg(TWI_BASE + TWI_CNTR, CNTR_BUS_EN);
+
+    write_reg(TWI_BASE + TWI_CNTR, CNTR_BUS_EN | CNTR_M_STA);
+    let st = twi_wait_flag()?;
+    if st != 0x08 && st != 0x10 {
+        twi_stop();
+        return None;
+    }
+    write_reg(TWI_BASE + TWI_DATA, (FT_ADDR << 1) as u32);
+    twi_clear_flag(false, 0);
+    let st = twi_wait_flag()?;
+    if st != 0x18 {
+        twi_stop();
+        return None;
+    }
+    write_reg(TWI_BASE + TWI_DATA, reg as u32);
+    twi_clear_flag(false, 0);
+    if twi_wait_flag()? != 0x28 {
+        twi_stop();
+        return None;
+    }
+    write_reg(TWI_BASE + TWI_CNTR, CNTR_BUS_EN | CNTR_M_STA);
+    let st = twi_wait_flag()?;
+    if st != 0x10 && st != 0x08 {
+        twi_stop();
+        return None;
+    }
+    write_reg(TWI_BASE + TWI_DATA, ((FT_ADDR << 1) | 1) as u32);
+    twi_clear_flag(false, 0);
+    if twi_wait_flag()? != 0x40 {
+        twi_stop();
+        return None;
+    }
+    twi_clear_flag(false, 0); // NACK last byte
+    let st = twi_wait_flag()?;
+    let data = read_reg(TWI_BASE + TWI_DATA) as u8;
+    let _ = st;
+    twi_stop();
+    Some(data)
+}
+
+fn twi_probe_ft6336() -> bool {
+    matches!(twi_read_reg(FT_ID_REG), Some(0x64) | Some(0x11) | Some(0x36) | Some(0x06))
+}
+
+fn ft6336_poll() {
+    let n = match twi_read_reg(FT_TD_STATUS) {
+        Some(v) => (v & 0x0F) as i32,
+        None => return,
+    };
+    let mut state = TOUCH_STATE.lock();
+    if n > 0 {
+        let xh = twi_read_reg(0x03).unwrap_or(0);
+        let xl = twi_read_reg(0x04).unwrap_or(0);
+        let yh = twi_read_reg(0x05).unwrap_or(0);
+        let yl = twi_read_reg(0x06).unwrap_or(0);
+        let x = ((((xh as u16) & 0x0F) << 8) | xl as u16) as i32;
+        let y = ((((yh as u16) & 0x0F) << 8) | yl as u16) as i32;
+        let is_new = !state.pressed;
+        if x != state.last_x || is_new {
+            state.last_x = x;
+            state.push_event(InputEvent { event_type: EV_ABS, code: ABS_X, value: x });
+        }
+        if y != state.last_y || is_new {
+            state.last_y = y;
+            state.push_event(InputEvent { event_type: EV_ABS, code: ABS_Y, value: y });
+        }
+        if is_new {
+            state.pressed = true;
+            state.push_event(InputEvent { event_type: EV_KEY, code: BTN_TOUCH, value: 1 });
+        }
+        state.push_event(InputEvent { event_type: EV_SYN, code: 0, value: 0 });
+    } else if state.pressed {
+        state.pressed = false;
+        state.push_event(InputEvent { event_type: EV_KEY, code: BTN_TOUCH, value: 0 });
+        state.push_event(InputEvent { event_type: EV_SYN, code: 0, value: 0 });
+    }
 }

@@ -1,9 +1,12 @@
 #!/bin/bash
-# Build script for havy_os kernel targeting Lichee RV 86 (Allwinner D1)
+# Build script for havy_os.
+# Default Cargo feature is `virt` (QEMU virt / riscv-vm --machine virt).
+# D1 / Lichee RV: cargo build --no-default-features --features d1
+# HDL wasm exports (hdl_seq / hdl_take_frame / new_with_machine_hdl): rebuild risk-v/riscv-vm (wasm-pack via that crate's build.sh) so site/virtual-machine picks them up.
 #
 # Usage:
-#   ./build_d1.sh           - Build kernel + filesystem
-#   ./build_d1.sh sdcard    - Create complete SD card image
+#   ./build.sh           - Build virt kernel + filesystem
+#   ./build.sh sdcard    - Also create complete SD card image
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KERNEL_DIR="$SCRIPT_DIR/kernel"
@@ -15,10 +18,10 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  Building havy_os for Lichee RV 86 (Allwinner D1)  ${NC}"
+echo -e "${GREEN}  Building havy_os (virt by default)                 ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 # =============================================================================
-# Step 1: Build kernel (D1 is now the only target)
+# Step 1: Build kernel (default features = virt; D1 needs --no-default-features --features d1)
 # =============================================================================
 echo -e "\n${YELLOW}[1/5] Building kernel...${NC}"
 cd "$KERNEL_DIR"
@@ -219,6 +222,6 @@ echo "  • kernel      - ELF executable"
 [ -f "$OUTPUT_DIR/fs.img" ] && echo "  • fs.img      - Filesystem image"
 [ -f "$OUTPUT_DIR/sdcard.img" ] && echo "  • sdcard.img  - Complete SD card image"
 echo ""
-echo -e "${CYAN}U-Boot boot commands:${NC}"
+echo -e "${CYAN}D1 U-Boot (kernel built with --features d1):${NC}"
 echo "  load mmc 0:1 0x40200000 kernel.bin"
 echo "  go 0x40200000"

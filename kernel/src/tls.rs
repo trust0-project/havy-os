@@ -42,13 +42,11 @@ pub struct SimpleRng {
 
 impl SimpleRng {
     pub fn new() -> Self {
-        // Seed from timer
-        const CLINT_MTIME: usize = 0x0200_BFF8;
-        let seed = unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) };
-        // Mix in some additional entropy from multiple timer reads
+        // Seed from `rdtime` (CLINT mtime on virt; 24 MHz time CSR on D1).
+        let seed = crate::trap::read_mtime();
         let mut state = seed ^ 0xdeadbeef_cafebabe;
         for _ in 0..10 {
-            let t = unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) };
+            let t = crate::trap::read_mtime();
             state = state.wrapping_mul(6364136223846793005).wrapping_add(t);
         }
         Self { state }

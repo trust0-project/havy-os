@@ -8,7 +8,13 @@ use crate::scripting::execute_command;
 use crate::utils::{poll_tail_follow, resolve_path};
 use crate::services::{klogd, sysmond};
 
-const UART_BASE: usize = 0x1000_0000;
+const UART_BASE: usize = crate::platform::current::UART_BASE;
+const UART_STRIDE: usize = crate::platform::current::UART_STRIDE;
+
+#[inline]
+fn uart_reg(reg: usize) -> *mut u8 {
+    (UART_BASE + reg * UART_STRIDE) as *mut u8
+}
 
 // ============================================================================
 // UART SPINLOCK - Prevents interleaved output from multiple harts
@@ -86,18 +92,17 @@ impl Console {
     #[allow(dead_code)]
     pub fn init() {
         unsafe {
-            let base = UART_BASE as *mut u8;
-
-            // Disable all interrupts
-            core::ptr::write_volatile(base.add(IER), 0x00);
+            // The browser worker wakes directly on its host input ring, so
+            // the guest shell can poll RX without a level-triggered IRQ storm.
+            core::ptr::write_volatile(uart_reg(IER), 0x00);
 
             // 8 bits, no parity, one stop bit (8N1)
             // QEMU doesn't require baud rate configuration
-            core::ptr::write_volatile(base.add(LCR), 0x03);
+            core::ptr::write_volatile(uart_reg(LCR), 0x03);
 
             // Disable FIFO for simple character-by-character operation
             // Writing 0 to FCR disables FIFO mode
-            core::ptr::write_volatile(base.add(FCR), 0x00);
+            core::ptr::write_volatile(uart_reg(FCR), 0x00);
         }
     }
 
@@ -121,12 +126,12 @@ impl Console {
                 poll_tail_follow();
             }
         }
-        unsafe { core::ptr::read_volatile((UART_BASE + RBR) as *const u8) }
+        unsafe { core::ptr::read_volatile(uart_reg(RBR) as *const u8) }
     }
 
     #[inline(always)]
     fn lsr() -> u8 {
-        unsafe { core::ptr::read_volatile((UART_BASE + LSR) as *const u8) }
+        unsafe { core::ptr::read_volatile(uart_reg(LSR) as *const u8) }
     }
 
     #[inline(always)]
@@ -150,14 +155,13 @@ impl Console {
     pub fn write_byte(&mut self, byte: u8) {
         Self::wait_for_tx_ready();
         unsafe {
-            core::ptr::write_volatile((UART_BASE + THR) as *mut u8, byte);
+            core::ptr::write_volatile(uart_reg(THR), byte);
         }
     }
 
     pub fn read_byte(&self) -> u8 {
-        // Only return a byte if data is ready, otherwise return 0
         if Self::is_rx_ready() {
-            unsafe { core::ptr::read_volatile((UART_BASE + RBR) as *const u8) }
+            unsafe { core::ptr::read_volatile(uart_reg(RBR) as *const u8) }
         } else {
             0
         }

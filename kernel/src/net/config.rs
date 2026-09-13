@@ -3,13 +3,13 @@
 use smoltcp::wire::Ipv4Address;
 
 /// Network configuration
-/// Default IP address: 0.0.0.0 (unassigned, will be set by netd from relay)
+/// Default IP address: 0.0.0.0 (unassigned until DHCPv4)
 pub const DEFAULT_IP_ADDR: Ipv4Address = Ipv4Address::new(0, 0, 0, 0);
 pub const GATEWAY: Ipv4Address = Ipv4Address::new(10, 0, 2, 2);
 pub const PREFIX_LEN: u8 = 24;
 
-/// Dynamic IP address assigned by the relay/network controller
-/// This is set by netd when the relay assigns an IP
+/// Dynamic IP address assigned by DHCPv4
+/// This is set when the DHCP client reaches Configured.
 pub static mut MY_IP_ADDR: Ipv4Address = Ipv4Address::new(0, 0, 0, 0);
 
 /// Get the current IP address (safe wrapper)
@@ -17,7 +17,7 @@ pub fn get_my_ip() -> Ipv4Address {
     unsafe { MY_IP_ADDR }
 }
 
-/// Set the IP address (called by netd when relay assigns IP)
+/// Set the IP address (called when DHCPv4 configures the iface)
 pub fn set_my_ip(ip: Ipv4Address) {
     unsafe { MY_IP_ADDR = ip; }
 }

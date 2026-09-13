@@ -1,8 +1,6 @@
-use core::sync::atomic::Ordering;
-
 use alloc::{format, string::String};
 
-use crate::{ allocator, clint::get_time_ms, constants::{SYSINFO_CPU_COUNT, SYSINFO_DISK_TOTAL, SYSINFO_DISK_USED, SYSINFO_HEAP_TOTAL, SYSINFO_HEAP_USED, SYSINFO_UPTIME}, cpu::HARTS_ONLINE, lock::utils::{BLK_DEV, CWD_MAX_LEN, CWD_STATE, FS_STATE, TAIL_FOLLOW_STATE}, uart};
+use crate::{ clint::get_time_ms, lock::utils::{BLK_DEV, CWD_MAX_LEN, CWD_STATE, FS_STATE, TAIL_FOLLOW_STATE}, uart};
 
 
 /// Initialize CWD to root
@@ -143,38 +141,12 @@ pub(crate) fn print_prompt() {
     ));
 }
 
-/// Write system statistics to the MMIO SysInfo device
-/// This allows the emulator to read kernel stats and display them in the UI
+/// Housekeeping hook for system statistics.
+///
+/// Heap / disk live in the reserved FB doorbell (in-band) and via
+/// `SYS_HEAP_STATS` / `SYS_PERFSTAT`. No SysInfo MMIO.
 pub(crate) fn update_sysinfo() {
-    // Get CPU count first (needed for memory stats calculation)
-    let cpu_count = HARTS_ONLINE.load(Ordering::Relaxed);
-    
-    // Get comprehensive memory stats (includes kernel, stacks, heap, framebuffers)
-    let gpu_enabled = crate::platform::d1_display::is_available();
-    let mem_stats = allocator::memory_stats(cpu_count, gpu_enabled);
-    
-    // Get disk stats (if filesystem available)
-    let (disk_used, disk_total) = {
-        let fs_guard = FS_STATE.read();
-        if let Some(ref fs) = *fs_guard {
-            fs.disk_usage_bytes()
-        } else {
-            (0, 0)
-        }
-    };
-    
-    // Get uptime
-    let uptime_ms = get_time_ms() as u64;
-    
-    // Write to MMIO registers (volatile writes, all 64-bit writes are 8-byte aligned)
-    unsafe {
-        core::ptr::write_volatile(SYSINFO_HEAP_USED as *mut u64, mem_stats.total_used as u64);
-        core::ptr::write_volatile(SYSINFO_HEAP_TOTAL as *mut u64, mem_stats.total_available as u64);
-        core::ptr::write_volatile(SYSINFO_DISK_USED as *mut u64, disk_used);
-        core::ptr::write_volatile(SYSINFO_DISK_TOTAL as *mut u64, disk_total);
-        core::ptr::write_volatile(SYSINFO_CPU_COUNT as *mut u32, cpu_count as u32);
-        core::ptr::write_volatile(SYSINFO_UPTIME as *mut u64, uptime_ms);
-    }
+    crate::platform::d1_display::publish_meta();
 }
 
 /// Check for new content in a file being followed by tail -f

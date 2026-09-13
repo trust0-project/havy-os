@@ -38,7 +38,7 @@ use crate::cpu::chase_lev::{StealResult, WorkStealingDeque};
 use crate::cpu::process::{
     PROCESS_TABLE, Pid, Priority, Process, ProcessEntry, ProcessInfo, ProcessState, allocate_pid,
 };
-use crate::cpu::{CPU_TABLE, MAX_HARTS};
+use crate::cpu::MAX_HARTS;
 use crate::services::klogd::{klog_debug, klog_info};
 
 /// Number of priority tiers (High+Realtime / Normal / Low+Idle).
@@ -47,6 +47,22 @@ const NUM_TIERS: usize = 3;
 /// A floating daemon migrates only when the local queue exceeds the least
 /// loaded hart by more than this many entries (prevents ping-ponging).
 const MIGRATION_THRESHOLD: usize = 2;
+
+/// Ready and either past its sleep deadline, or gpuid with HID pending.
+#[inline]
+fn is_runnable_due(process: &Process, now: u64) -> bool {
+    if !process.state().is_runnable() {
+        return false;
+    }
+    if process.next_run_at() <= now {
+        return true;
+    }
+    if crate::services::gpuid::should_wake(process.name.as_str()) {
+        process.set_next_run_at(0);
+        return true;
+    }
+    false
+}
 
 /// Map a process priority onto a queue tier (0 = highest).
 #[inline]
@@ -274,6 +290,19 @@ impl Scheduler {
         }
     }
 
+    /// Decrement an approximate queue length without allowing wraparound.
+    ///
+    /// Chase-Lev resolves the last-item owner/thief race, but this independent
+    /// accounting value must remain safe even if a future queue change reports
+    /// the same transition twice.
+    fn decrement_queue_len(&self, cpu_id: usize) {
+        let _ = self.queue_lens[cpu_id].fetch_update(
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+            |len| Some(len.saturating_sub(1)),
+        );
+    }
+
     /// Park a process on this hart (blocked, or sleeping until deadline).
     fn park(&self, cpu_id: usize, process: Arc<Process>) {
         process.set_park_hart(cpu_id);
@@ -309,7 +338,7 @@ impl Scheduler {
                     let p = parked.swap_remove(i);
                     p.clear_park_hart();
                     drop(p);
-                } else if state.is_runnable() && p.next_run_at() <= now {
+                } else if is_runnable_due(p, now) {
                     let p = parked.swap_remove(i);
                     p.clear_park_hart();
                     woken.push(p);
@@ -337,9 +366,10 @@ impl Scheduler {
         loop {
             match self.local[cpu_id].pop() {
                 Some(process) => {
-                    self.queue_lens[cpu_id].fetch_sub(1, Ordering::Release);
+                    self.decrement_queue_len(cpu_id);
                     match process.state() {
-                        s if s.is_runnable() && process.next_run_at() <= now => {
+                        s if is_runnable_due(&process, now) => {
+                            let _ = s;
                             return Some(process);
                         }
                         ProcessState::Zombie => continue,
@@ -358,9 +388,10 @@ impl Scheduler {
             loop {
                 match self.queues[cpu_id][tier].pop() {
                     Some(process) => {
-                        self.queue_lens[cpu_id].fetch_sub(1, Ordering::Release);
+                        self.decrement_queue_len(cpu_id);
                         match process.state() {
-                            s if s.is_runnable() && process.next_run_at() <= now => {
+                            s if is_runnable_due(&process, now) => {
+                                let _ = s;
                                 return Some(process);
                             }
                             ProcessState::Zombie => {
@@ -419,10 +450,11 @@ impl Scheduler {
             for tier in first_tier..NUM_TIERS {
                 match self.queues[victim][tier].steal() {
                     StealResult::Success(process) => {
-                        self.queue_lens[victim].fetch_sub(1, Ordering::Release);
+                        self.decrement_queue_len(victim);
 
                         match process.state() {
-                            s if s.is_runnable() && process.next_run_at() <= now => {
+                            s if is_runnable_due(&process, now) => {
+                                let _ = s;
                                 if process.can_run_on_cpu(cpu_id) {
                                     crate::perfstat::inc(crate::perfstat::id::SCHED_PICKS);
                                     crate::perfstat::inc(crate::perfstat::id::SCHED_STEALS);
@@ -465,7 +497,8 @@ impl Scheduler {
         // Sleeping daemon (called sched::sleep_current_ms): park directly
         // instead of cycling through the run queue.
         let now = crate::get_time_ms() as u64;
-        if process.next_run_at() > now && process.get_cpu_affinity().is_none() {
+        if process.next_run_at() > now && !crate::services::gpuid::should_wake(process.name.as_str())
+        {
             self.park(current_cpu, process);
             return;
         }
@@ -504,12 +537,9 @@ impl Scheduler {
 
         for cpu_id in 0..num_cpus {
             if cpu_id != 0 && !crate::cpu::is_hart_ready(cpu_id) {
-                // Skip harts that aren't scheduling yet (unless nothing else)
-                if let Some(cpu) = CPU_TABLE.get(cpu_id) {
-                    if !cpu.is_online() {
-                        continue;
-                    }
-                }
+                // Online means the CPU table entry exists; only HART_READY
+                // proves the hart has reached its scheduling loop.
+                continue;
             }
             let len = self.queue_lens[cpu_id].load(Ordering::Relaxed);
             if len < min_len || (len == min_len && best_cpu == 0 && cpu_id != 0) {
@@ -699,6 +729,17 @@ pub fn notify_woken(process: &Process) {
         if hart != crate::get_hart_id() {
             crate::send_ipi(hart);
         }
+    }
+}
+
+/// Record an IPI as a scheduler wakeup for `hart_id`.
+///
+/// This is interrupt-safe: it only updates atomics. The hart loop performs
+/// queue sweeping and I/O dispatch after the trap returns.
+pub fn handle_ipi(hart_id: usize) {
+    if hart_id < MAX_HARTS {
+        SCHEDULER.parked_deadline[hart_id].store(0, Ordering::Release);
+        YIELD_PENDING[hart_id].store(true, Ordering::Release);
     }
 }
 

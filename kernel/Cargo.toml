@@ -4,8 +4,11 @@ version = "0.1.64"
 edition = "2021"
 
 [features]
-default = []
-# D1/Lichee RV 86 is now the only supported platform
+default = ["virt"]
+virt = []
+d1 = []
+# Mutually exclusive: `virt` (QEMU/VM) vs `d1` (Lichee RV).
+# D1: cargo build --no-default-features --features d1
 
 [dependencies]
 riscv = "0.10.1"
@@ -43,9 +46,11 @@ features = [
     "log",
     "medium-ethernet",
     "proto-ipv4",
+    "proto-dhcpv4",
     "socket-icmp",
     "socket-tcp",
     "socket-udp",
+    "socket-dhcpv4",
 ]
 
 # TLS support for HTTPS

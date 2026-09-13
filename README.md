@@ -4,7 +4,7 @@ Havy OS is a hobby operating system written in Rust, designed for the RISC-V 64-
 
 ## Features
 
-- **RISC-V 64-bit Architecture:** Targets the `riscv64gc-unknown-none-elf` platform.
+- **RISC-V 64-bit Architecture:** Targets the `riscv64gc-unknown-none-elf` platform. Two boards: QEMU `virt` (default) and Allwinner D1.
 - **Multi-hart (SMP) Support:** Includes a multi-hart boot process and a scheduler that can distribute tasks across multiple cores.
 - **Preemptive Scheduler:** A priority-based, preemptive scheduler with per-hart run queues and work-stealing capabilities.
 - **Simple File System (SFS):** A custom block-based file system with write-caching for performance.
@@ -25,7 +25,7 @@ Havy OS consists of two main parts: the kernel and the user-space applications.
 The kernel (`kernel/`) is monolithic and handles all core system functionality, including:
 - Memory management (heap allocator).
 - Process and task management (scheduler, task control blocks).
-- Device drivers (VirtIO for block storage and networking, UART for serial console).
+- Device drivers (UART; storage and net depend on `virt` vs `d1`).
 - Filesystem, networking, and IPC services.
 - A system call interface for user-space applications.
 
@@ -51,34 +51,48 @@ Follow these instructions to build and run Havy OS on your local machine.
 
 ### Building
 
-A build script is provided to automate the process. Run it from the root of the project:
+Kernel Cargo features are mutually exclusive:
+
+- **`virt` (default)** — QEMU `virt` / `riscv-vm --machine virt` (DRAM `0x8000_0000`, 10 MHz timebase).
+- **`d1`** — Allwinner D1 / Lichee RV. Build with `--no-default-features --features d1`.
 
 ```sh
+# virt kernel (default features)
 sh ./build.sh
+sh ./build.sh sdcard    # also writes sdcard.img for the VM
+
+# D1 kernel
+cd kernel && cargo build --release --target riscv64gc-unknown-none-elf --no-default-features --features d1
 ```
 
-This script will:
-1.  Compile the kernel for RISC-V.
-2.  Compile the user-space applications and `mkfs` utility to WASM.
-3.  Optimize the WASM binaries using `wasm-opt` if it's installed.
-4.  Run the `mkfs` utility to create a 2MB filesystem image (`fs.img`) containing the user-space applications.
+`./build.sh` compiles the kernel, user-space programs, and a filesystem image (`fs.img`). Pass `sdcard` to pack `kernel.bin` + `fs.img` into `sdcard.img`.
 
 ### Running
 
-After a successful build, you can run Havy OS in QEMU with the following command:
+Match the kernel feature to the board. The VM boots an SD card image (`--sdcard`); there is no `--kernel` flag.
 
-with our npm package virtual-machine
-```sh
-npx virtual-machine --kernel target/riscv64gc-unknown-none-elf/release/kernel --disk target/riscv64gc-unknown-none-elf/release/fs.img --harts 2
-```
+**QEMU virt** (kernel built with default `virt` features):
 
 ```sh
 qemu-system-riscv64 -machine virt -m 1G -bios none \
   -kernel target/riscv64gc-unknown-none-elf/release/kernel \
   -drive file=target/riscv64gc-unknown-none-elf/release/fs.img,format=raw,id=hd0,if=none \
   -device virtio-blk-device,drive=hd0 \
+  -netdev user,id=net0 -device virtio-net-device,netdev=net0 \
+  -device virtio-gpu-device \
+  -device virtio-keyboard-device -device virtio-mouse-device \
   -chardev stdio,id=char0,mux=on,signal=off \
   -serial chardev:char0 -display none
+```
+
+**riscv-vm** (`npx virtual-machine`, after `./build.sh sdcard`):
+
+```sh
+# virt kernel ↔ --machine virt (default, 10 MHz)
+npx virtual-machine --sdcard target/riscv64gc-unknown-none-elf/release/sdcard.img --harts 2 --machine virt
+
+# D1 kernel ↔ --machine d1 (24 MHz)
+npx virtual-machine --sdcard target/riscv64gc-unknown-none-elf/release/sdcard.img --machine d1
 ```
 
 This will start the OS, and you should see the boot process in your terminal, ending with a shell prompt.

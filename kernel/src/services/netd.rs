@@ -1,6 +1,6 @@
 //! netd - Network Daemon Service
 //!
-//! Background service that polls for IP assignment from the relay.
+//! Background service that polls DHCPv4 and the network stack.
 //! Runs after boot to provision the network IP address dynamically.
 
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -22,7 +22,7 @@ pub fn init() -> Result<(), &'static str> {
     }
     
     NETD_INITIALIZED.store(true, Ordering::Release);
-    klog_info("netd", "Network daemon initialized, waiting for IP assignment");
+    klog_info("netd", "Network daemon initialized, waiting for DHCPv4");
     
     Ok(())
 }
@@ -121,9 +121,9 @@ pub(crate) fn poll_network() {
 }
 
 
-/// netd tick - poll for IP assignment from relay
+/// netd tick - poll until DHCPv4 configures an address
 ///
-/// Called by the scheduler. Polls the D1 EMAC for IP assignment.
+/// Called by the scheduler. NetState::poll runs the DHCP client.
 pub fn tick() {
     if !NETD_INITIALIZED.load(Ordering::Acquire) {
         return;
@@ -143,13 +143,10 @@ pub fn tick() {
     }
     NETD_LAST_RUN.store(now, Ordering::Release);
     
-    // Try to get IP from D1 EMAC
     try_get_ip();
 }
 
-/// Try to get IP from D1 EMAC MMIO register
-/// 
-/// Multi-hart safe: Uses net_proxy for hart-aware access.
+/// Poll the stack and notice when DHCPv4 has set MY_IP_ADDR.
 fn try_get_ip() -> bool {
     use crate::cpu::net_proxy;
     
@@ -162,7 +159,7 @@ fn try_get_ip() -> bool {
         let ip = net_proxy::get_ip();
         let octets = ip.octets();
         klog_info("netd", &alloc::format!(
-            "IP assigned from relay: {}.{}.{}.{}/{}",
+            "IP assigned via DHCP: {}.{}.{}.{}/{}",
             octets[0], octets[1], octets[2], octets[3], PREFIX_LEN
         ));
         NETD_IP_ASSIGNED.store(true, Ordering::Release);
@@ -182,7 +179,7 @@ pub fn netd_service() {
     // Poll network stack for traffic (packets, etc.)
     poll_network();
     
-    // Check for IP assignment from relay
+    // Check for DHCPv4 assignment
     tick();
 
     // smoltcp needs periodic polling; 2 ms keeps latency low while cutting

@@ -107,7 +107,7 @@ fn run_init_scripts() {
 }
 
 /// Daemon service entry point for netd (network daemon)
-/// Polls for IP assignment from relay. High priority service.
+/// Polls for DHCPv4. High priority service.
 pub fn netd_service() {
     netd::tick();
 }
@@ -173,16 +173,18 @@ pub fn init_services() {
             "Shell daemon - handles interactive command input",
             shelld::shell_service,
             Priority::High,
-            None,  // Testing: keep on hart 0
+            Some(0),
         );
 
     if has_net {
+        // All network device MMIO is owned by hart 0. Higher-level work may
+        // float only after it is separated from the NIC-driving tick.
         schedule_service(
             "netd",
-            "Network daemon - handles IP assignment from relay",
+            "Network daemon - DHCPv4 and packet poll",
             netd::netd_service,
             Priority::High,
-            None,  // Can run on any hart
+            Some(0),
         );
     
         schedule_service(
@@ -190,7 +192,7 @@ pub fn init_services() {
             "TCP daemon - listens on port 30, responds with hello",
             tcpd::tcpd_service,
             Priority::Normal,
-            None,
+            Some(0),
         );
     
         schedule_service(
@@ -198,7 +200,7 @@ pub fn init_services() {
             "HTTP server daemon - listens on port 80, serves web content",
             httpd::httpd_service,
             Priority::Normal,
-            None,
+            Some(0),
         );
     }
 
@@ -208,7 +210,7 @@ pub fn init_services() {
             "GPU UI daemon - handles keyboard input and display updates",
             gpuid_service,
             Priority::High,
-            None,  // Can run on any hart (touch driver is thread-safe)
+            Some(0),
         );
         
         // GUI command process - executes terminal commands in U-mode
@@ -217,7 +219,7 @@ pub fn init_services() {
             "GUI command executor - runs terminal commands in user mode",
             crate::services::gui_cmd::gui_cmd_service,
             Priority::Normal,
-            None,
+            Some(0),
         );
     }
 

@@ -15,7 +15,7 @@
 //!                     │
 //! ┌───────────────────┴─────────────────────────────┐
 //! │              Device Traits                       │
-//! │  (BlockDevice, NetworkDevice, DisplayDevice)    │
+//! │  (BlockDevice, NetworkDevice)                   │
 //! └───────────────────┬─────────────────────────────┘
 //!                     │
 //!         ┌───────────┴───────────┐
@@ -31,7 +31,15 @@ pub mod network;
 pub mod display;
 pub mod rtc;
 pub mod uart;
+pub mod virtio;
 pub mod virtio_p9;
+
+#[cfg(not(feature = "d1"))]
+pub mod virtio_blk;
+#[cfg(not(feature = "d1"))]
+pub mod virtio_net;
+#[cfg(not(feature = "d1"))]
+pub mod virtio_gpu;
 
 pub use block::{BlockDevice, BlockError};
 pub use network::{NetworkDevice, NetworkError};

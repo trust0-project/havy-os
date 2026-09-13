@@ -11,5 +11,9 @@ mod radio_button;
 mod window;
 
 pub use button::Button;
+pub use checkbox::Checkbox;
 pub use label::Label;
+pub use panel::Panel;
+pub use progress_bar::ProgressBar;
+pub use radio_button::RadioButton;
 pub use window::Window;

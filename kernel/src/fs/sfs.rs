@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 use crate::lock::state::fs::FileSystemState;
-use crate::platform::d1_mmc::D1Mmc as BlockDev;
+use crate::lock::state::blk::BlockDeviceState as BlockDev;
 use super::vfs::{FileSystem, FileInfo};
 
 /// Simple File System wrapper implementing the VFS FileSystem trait

@@ -146,3 +146,20 @@ pub const SYS_SLEEP: u64 = 82;
 /// Counter order is defined in kernel/src/perfstat.rs (module `id`).
 pub const SYS_PERFSTAT: u64 = 83;
 
+/// Open: open(path_ptr, path_len, flags) -> fd
+pub const SYS_OPEN: u64 = 90;
+/// Close: close(fd) -> i32
+pub const SYS_CLOSE: u64 = 91;
+/// Read: read(fd, buf_ptr, buf_len) -> i32
+pub const SYS_READ: u64 = 92;
+/// Write: write(fd, buf_ptr, buf_len) -> i32
+pub const SYS_WRITE: u64 = 93;
+/// Seek: lseek(fd, offset, whence) -> i64
+pub const SYS_LSEEK: u64 = 94;
+/// mmap: mmap(len, prot) -> ptr
+pub const SYS_MMAP: u64 = 100;
+/// munmap: munmap(ptr, len) -> i32
+pub const SYS_MUNMAP: u64 = 101;
+/// brk: brk(addr) -> ptr (addr=0 returns current break)
+pub const SYS_BRK: u64 = 102;
+

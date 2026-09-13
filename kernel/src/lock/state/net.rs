@@ -1,19 +1,131 @@
 //! Network State management
 //!
-//! Simplified network state for D1 EMAC devices (real hardware and VM emulation).
-//! Provides basic smoltcp integration without VirtIO-specific features.
+//! smoltcp over D1 EMAC (d1) or virtio-net (virt). IP comes from DHCPv4.
 
 use alloc::collections::VecDeque;
 
 use smoltcp::iface::{Interface, SocketHandle, SocketSet, Config, SocketStorage};
-use smoltcp::socket::{icmp, tcp, udp};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::{dhcpv4, icmp, tcp, udp};
 use smoltcp::time::Instant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
-use crate::platform::d1_emac::{D1Emac, D1EmacDevice};
-use crate::device::NetworkDevice;  // Trait for mac_address()
+use crate::device::{NetworkDevice, NetworkError};
 use crate::net::config::*;
 use crate::net::server::*;
+
+pub enum Nic {
+    #[cfg(feature = "d1")]
+    Emac(crate::platform::d1_emac::D1Emac),
+    #[cfg(not(feature = "d1"))]
+    Virtio(crate::device::virtio_net::VirtioNet),
+}
+
+impl NetworkDevice for Nic {
+    fn mac_address(&self) -> [u8; 6] {
+        match self {
+            #[cfg(feature = "d1")]
+            Self::Emac(d) => d.mac_address(),
+            #[cfg(not(feature = "d1"))]
+            Self::Virtio(d) => d.mac_address(),
+        }
+    }
+    fn link_up(&self) -> bool {
+        match self {
+            #[cfg(feature = "d1")]
+            Self::Emac(d) => d.link_up(),
+            #[cfg(not(feature = "d1"))]
+            Self::Virtio(d) => d.link_up(),
+        }
+    }
+    fn transmit(&mut self, packet: &[u8]) -> Result<(), NetworkError> {
+        match self {
+            #[cfg(feature = "d1")]
+            Self::Emac(d) => d.transmit(packet),
+            #[cfg(not(feature = "d1"))]
+            Self::Virtio(d) => d.transmit(packet),
+        }
+    }
+    fn receive(&mut self, buf: &mut [u8]) -> Result<usize, NetworkError> {
+        match self {
+            #[cfg(feature = "d1")]
+            Self::Emac(d) => d.receive(buf),
+            #[cfg(not(feature = "d1"))]
+            Self::Virtio(d) => d.receive(buf),
+        }
+    }
+    fn has_packet(&self) -> bool {
+        match self {
+            #[cfg(feature = "d1")]
+            Self::Emac(d) => d.has_packet(),
+            #[cfg(not(feature = "d1"))]
+            Self::Virtio(d) => d.has_packet(),
+        }
+    }
+}
+
+pub struct Phy<'a>(pub &'a mut Nic);
+
+impl Device for Phy<'_> {
+    type RxToken<'a> = NicRxToken where Self: 'a;
+    type TxToken<'a> = NicTxToken<'a> where Self: 'a;
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.medium = Medium::Ethernet;
+        caps.max_transmission_unit = 1500;
+        caps.max_burst_size = Some(1);
+        caps.checksum = smoltcp::phy::ChecksumCapabilities::default();
+        caps
+    }
+
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        if !self.0.has_packet() {
+            return None;
+        }
+        let mut buf = alloc::vec![0u8; 2048];
+        match self.0.receive(&mut buf) {
+            Ok(len) => {
+                buf.truncate(len);
+                Some((NicRxToken { buffer: buf }, NicTxToken { device: self.0 }))
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        Some(NicTxToken { device: self.0 })
+    }
+}
+
+pub struct NicRxToken {
+    buffer: alloc::vec::Vec<u8>,
+}
+
+impl RxToken for NicRxToken {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(&self.buffer)
+    }
+}
+
+pub struct NicTxToken<'a> {
+    device: &'a mut Nic,
+}
+
+impl TxToken for NicTxToken<'_> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buffer = alloc::vec![0u8; len];
+        let result = f(&mut buffer);
+        let _ = self.device.transmit(&buffer);
+        result
+    }
+}
 
 /// Pending loopback ping reply
 struct LoopbackReply {
@@ -24,27 +136,26 @@ struct LoopbackReply {
 
 /// Network state (D1 EMAC-based)
 pub struct NetState {
-    device: D1Emac,
+    device: Nic,
     iface: Interface,
     sockets: SocketSet<'static>,
     icmp_handle: SocketHandle,
     udp_handle: SocketHandle,
     tcp_handle: SocketHandle,
+    dhcp_handle: SocketHandle,
     loopback_replies: VecDeque<LoopbackReply>,
     server_sockets: TcpServerManager,
     mac: [u8; 6],
-    /// Whether IP has been assigned from relay
+    /// Whether DHCPv4 has configured an address
     ip_assigned: bool,
 }
 
 impl NetState {
-    /// Initialize the network stack with D1 EMAC
-    /// Note: IP address is not set here - netd will poll for it from relay
-    pub fn new(mut device: D1Emac) -> Result<Self, &'static str> {
-        // Use 0.0.0.0 initially - netd will poll for assigned IP from relay
+    /// Initialize the network stack. Address comes from DHCPv4.
+    pub fn new(mut device: Nic) -> Result<Self, &'static str> {
         let my_ip = DEFAULT_IP_ADDR;
         
-        // Don't set global MY_IP_ADDR here - netd will do it when relay assigns IP
+        // Don't set global MY_IP_ADDR here — DHCP Configured does.
 
         let mac = device.mac_address();
         let hw_addr = HardwareAddress::Ethernet(EthernetAddress(mac));
@@ -72,17 +183,14 @@ impl NetState {
         // Create the interface
         let mut iface = Interface::new(
             config,
-            &mut D1EmacDevice(&mut device),
+            &mut Phy(&mut device),
             Instant::from_millis(0),
         );
 
-        // Configure IP address
+        // No unicast until DHCPv4 Configured. DISCOVER goes out from 0.0.0.0.
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(IpAddress::Ipv4(my_ip), PREFIX_LEN)).ok();
+            addrs.clear();
         });
-
-        // Set default gateway
-        iface.routes_mut().add_default_ipv4_route(GATEWAY).ok();
 
         // Create socket set with static storage
         let sockets = unsafe { SocketSet::new(&mut SOCKET_STORAGE[..]) };
@@ -111,6 +219,7 @@ impl NetState {
             icmp_handle: SocketHandle::default(),
             udp_handle: SocketHandle::default(),
             tcp_handle: SocketHandle::default(),
+            dhcp_handle: SocketHandle::default(),
             loopback_replies: VecDeque::new(),
             server_sockets: TcpServerManager::new(),
             mac,
@@ -120,6 +229,7 @@ impl NetState {
         state.icmp_handle = state.sockets.add(icmp_socket);
         state.udp_handle = state.sockets.add(udp_socket);
         state.tcp_handle = state.sockets.add(tcp_socket);
+        state.dhcp_handle = state.sockets.add(dhcpv4::Socket::new());
 
         Ok(state)
     }
@@ -128,29 +238,31 @@ impl NetState {
     pub fn poll(&mut self, timestamp_ms: i64) {
         let timestamp = Instant::from_millis(timestamp_ms);
         
-        // Check for background IP assignment from relay
+        self.iface.poll(
+            timestamp,
+            &mut Phy(&mut self.device),
+            &mut self.sockets,
+        );
+
         if !self.ip_assigned {
-            if let Some(ip_bytes) = self.device.get_config_ip() {
-                let new_ip = Ipv4Address::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-                
-                // Update interface IP
+            let event = self.sockets.get_mut::<dhcpv4::Socket>(self.dhcp_handle).poll();
+            if let Some(dhcpv4::Event::Configured(cfg)) = event {
+                let cidr = cfg.address;
+                let ip = cidr.address();
+                let prefix = cidr.prefix_len();
                 self.iface.update_ip_addrs(|addrs| {
                     addrs.clear();
-                    addrs.push(IpCidr::new(IpAddress::Ipv4(new_ip), PREFIX_LEN)).ok();
+                    addrs.push(IpCidr::new(IpAddress::Ipv4(ip), prefix)).ok();
                 });
-                
-                // Update global IP
-                unsafe { MY_IP_ADDR = new_ip; }
-                
+                if let Some(gw) = cfg.router {
+                    self.iface.routes_mut().add_default_ipv4_route(gw).ok();
+                } else {
+                    self.iface.routes_mut().add_default_ipv4_route(GATEWAY).ok();
+                }
+                unsafe { MY_IP_ADDR = ip; }
                 self.ip_assigned = true;
             }
         }
-        
-        self.iface.poll(
-            timestamp,
-            &mut D1EmacDevice(&mut self.device),
-            &mut self.sockets,
-        );
     }
 
     /// Get MAC address
@@ -205,7 +317,7 @@ impl NetState {
         // Poll to actually transmit
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
 
@@ -224,7 +336,7 @@ impl NetState {
         // Poll to receive any pending packets
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
 
@@ -380,7 +492,7 @@ impl NetState {
         // Poll to transmit
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
         
@@ -397,7 +509,7 @@ impl NetState {
             
             self.iface.poll(
                 timestamp,
-                &mut D1EmacDevice(&mut self.device),
+                &mut Phy(&mut self.device),
                 &mut self.sockets,
             );
         }
@@ -423,7 +535,7 @@ impl NetState {
         // Poll first to receive any pending data
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
         
@@ -470,7 +582,7 @@ impl NetState {
         // Poll to send SYN
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
         
@@ -492,7 +604,7 @@ impl NetState {
         // Poll to transmit
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
         
@@ -506,7 +618,7 @@ impl NetState {
         // Poll first to receive any pending data
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
         
@@ -530,7 +642,7 @@ impl NetState {
         
         self.iface.poll(
             timestamp,
-            &mut D1EmacDevice(&mut self.device),
+            &mut Phy(&mut self.device),
             &mut self.sockets,
         );
     }
@@ -619,7 +731,7 @@ impl NetState {
         let echo_payload = b"RISCV_PING";
         
         // Poll first to ensure interface is ready
-        self.iface.poll(timestamp, &mut D1EmacDevice(&mut self.device), &mut self.sockets);
+        self.iface.poll(timestamp, &mut Phy(&mut self.device), &mut self.sockets);
 
         // Get ICMP socket
         let socket = self.sockets.get_mut::<icmp::Socket>(self.icmp_handle);
@@ -653,7 +765,7 @@ impl NetState {
         ).map_err(|_| "Failed to send ICMP")?;
 
         // Poll to actually transmit
-        self.iface.poll(timestamp, &mut D1EmacDevice(&mut self.device), &mut self.sockets);
+        self.iface.poll(timestamp, &mut Phy(&mut self.device), &mut self.sockets);
 
         Ok(())
     }
@@ -719,7 +831,7 @@ impl NetState {
 // Static Buffers for Network State
 // =============================================================================
 
-static mut SOCKET_STORAGE: [SocketStorage<'static>; 16] = [SocketStorage::EMPTY; 16];
+static mut SOCKET_STORAGE: [SocketStorage<'static>; 20] = [SocketStorage::EMPTY; 20];
 
 static mut ICMP_RX_META: [icmp::PacketMetadata; 8] = [icmp::PacketMetadata::EMPTY; 8];
 static mut ICMP_RX_DATA: [u8; 512] = [0; 512];

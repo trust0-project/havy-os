@@ -1,21 +1,41 @@
-//! Platform abstraction layer for havy_os
+//! Platform abstraction: one kernel, two machines (`virt` vs `d1`).
 //!
-//! This module provides platform-specific constants and initialization
-//! for D1 hardware (real hardware and VM emulation).
+//! Addresses, timebase, and which drivers are first-class come from
+//! [`current`]. CPU, SBI wrappers, scheduler, FS, and net stay shared.
+//!
+//! Cargo features (mutually exclusive):
+//! - `virt` (default): `link.x` at `0x8000_0000`, NS16550, SiFive PLIC
+//! - `d1`: `d1.ld` at `0x4020_0000`, DW UART, T-Head PLIC, SBI TIME
+
+#[cfg(all(feature = "virt", feature = "d1"))]
+compile_error!(
+    "features `virt` and `d1` are mutually exclusive; \
+     build D1 with --no-default-features --features d1"
+);
 
 pub mod d1;
 
-// D1 device drivers
-pub mod d1_display;     // D1 Display Engine driver (for D1 hardware and VM D1 emulation)
-pub mod d1_emac;        // D1 EMAC Ethernet driver (for D1 hardware and VM D1 emulation)
-pub mod d1_mmc;         // D1 MMC/SD card driver
-pub mod d1_touch;       // D1 Touch (GT911) driver
-pub mod d1_audio;       // D1 Audio codec driver
+#[cfg(not(feature = "d1"))]
+pub mod virt;
 
-// Re-export D1 as the active platform
+#[cfg(feature = "d1")]
 pub use d1 as current;
+#[cfg(not(feature = "d1"))]
+pub use virt as current;
 
-// Common platform trait (future expansion)
+pub mod d1_display;
+
+#[cfg(feature = "d1")]
+pub mod d1_emac;
+#[cfg(feature = "d1")]
+pub mod d1_mmc;
+#[cfg(feature = "d1")]
+pub mod d1_touch;
+#[cfg(feature = "d1")]
+pub mod d1_audio;
+#[cfg(feature = "d1")]
+pub mod d1_de;
+
 pub trait Platform {
     const DRAM_BASE: usize;
     const UART_BASE: usize;

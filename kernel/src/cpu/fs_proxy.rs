@@ -79,19 +79,24 @@ impl IoFuture {
         let start = crate::get_time_ms();
         
         loop {
+            let interrupt_state = crate::trap::disable_interrupts_save();
             if let Some(result) = self.poll() {
+                crate::trap::restore_interrupts(interrupt_state);
                 return result;
             }
             
             if timeout_ms > 0 {
                 let elapsed = crate::get_time_ms() - start;
                 if elapsed >= timeout_ms as i64 {
+                    crate::trap::restore_interrupts(interrupt_state);
                     return IoResult::Err("I/O future timeout");
                 }
             }
             
-            // Yield CPU
+            // Race-free sleep: completion IPIs remain pending until SIE is
+            // restored after WFI.
             unsafe { asm!("wfi", options(nomem, nostack)); }
+            crate::trap::restore_interrupts(interrupt_state);
         }
     }
 }
